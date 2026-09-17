@@ -54,13 +54,16 @@ cross-machine interoperability; those belong to later milestones.
 From the repository root, run:
 
 ```sh
-bash .codex/ci.sh
+swift package describe
+swift build --configuration debug --target Host
+swift build --configuration debug --target Viewer
+swift test --configuration debug
 ```
 
-The script validates the package graph, rejects forbidden M0 product API
-references in Swift source, builds `Host` and `Viewer`, runs the root smoke
-test, and runs each shared package's tests. It uses only local SwiftPM tools,
-the checked-in source tree, and workspace-local build/cache directories.
+These commands validate the package graph, build `Host` and `Viewer`, and run
+the root smoke test using only local SwiftPM tools and the checked-in source
+tree. Each shared package can be validated independently with
+`swift test --package-path Packages/<PackageName>`.
 
 The additional Intel-target compile probe used for this handoff was:
 

@@ -52,8 +52,8 @@ M6 validates Host-side authorization and injection.
 - Establish the repository/project format for Swift 6 and the recorded macOS
   deployment target.
 - Create the minimum Host, Viewer, and six shared package/module skeleton.
-- Create deterministic build/test validation, including `.codex/ci.sh` when
-  appropriate.
+- Create deterministic build/test validation using documented Swift Package
+  Manager commands.
 - Add smoke tests that prove the skeleton compiles/imports without invoking any
   product capability.
 - Record Intel Host and Apple Silicon Viewer build assumptions and any
@@ -77,7 +77,7 @@ or product UI behavior.
 
 ### Tests and verification
 
-- Run the executable `.codex/ci.sh` or the documented equivalent.
+- Run the documented Swift Package Manager build and test commands.
 - Build and test on the available architecture; record the unavailable
   architecture as a gap rather than implying it passed.
 - Confirm no forbidden product API or feature was added by inspecting the diff
