@@ -4,7 +4,9 @@
 
 This is the V1 product specification. It defines the user-visible goal and
 acceptance boundaries; implementation details belong in the architecture and
-protocol documents. The current repository is planning-only.
+protocol documents. The repository currently contains M0/M1 foundations;
+product capability implementation remains out of scope until its owning
+milestones.
 
 ## Product goal
 

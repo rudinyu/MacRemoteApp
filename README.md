@@ -7,10 +7,11 @@ Host; this is deliberately not a full remote-desktop product.
 
 ## Current status
 
-The M0 Repository Foundation is now present. The repository contains the
-planning documents plus a Swift Package Manager skeleton with separate Host and
-Viewer executable targets, six local shared packages, and deterministic local
-build/test validation. It still contains no product capability implementation.
+The M0 Repository Foundation and M1 RemoteProtocol wire contract are now
+present. The repository contains separate Host and Viewer executable targets,
+six local shared packages, deterministic local build/test validation, and the
+versioned bounded protocol types documented in `docs/M1_PROTOCOL.md`. It still
+contains no live product capability implementation.
 
 The repository root is:
 
@@ -36,6 +37,7 @@ MacRemoteApp/
     ├── ARCHITECTURE.md
     ├── DEVELOPMENT_PLAN.md
     ├── M0_FOUNDATION.md
+    ├── M1_PROTOCOL.md
     ├── PRODUCT_SPEC.md
     ├── PROTOCOL.md
     └── SECURITY.md
@@ -124,8 +126,8 @@ skip a gate because a later feature appears easy to prototype.
 
 ## M0 implementation prompt (reference)
 
-M0 is complete. The original implementation prompt is retained below as a
-scope record; the next authorized implementation milestone is M1.
+M0 and M1 are complete. The original M0 implementation prompt is retained
+below as a scope record; the next authorized implementation milestone is M2.
 
 Copy the following prompt into Codex after opening this directory as the
 repository root:

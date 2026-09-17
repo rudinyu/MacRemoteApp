@@ -7,8 +7,9 @@ primary outcome, explicit boundaries, exit criteria, and verification work. A
 milestone is complete only when its exit criteria and tests are satisfied or a
 documented exception is explicitly accepted by the user.
 
-The current repository contains only the planning package. M0 is the next
-implementation task and must remain a repository-foundation task.
+The repository contains the completed M0 foundation and M1 RemoteProtocol
+contract. M2 is the next implementation task; later milestones remain gated by
+their documented dependencies and exit criteria.
 
 ## Delivery principles
 

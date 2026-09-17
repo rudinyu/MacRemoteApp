@@ -80,8 +80,8 @@ magic/version, unknown mandatory flags, impossible lengths, sequence violations,
 and payloads that exceed negotiated limits. Parsers must be incremental so a
 partial network read is not treated as a malformed complete message.
 
-The exact binary field widths and serialization format are an M1 decision and
-must be documented with golden vectors before interoperability testing.
+The exact binary field widths and serialization format are fixed by M1 in
+`docs/M1_PROTOCOL.md`, including golden vectors before interoperability testing.
 
 ## Message families
 
@@ -106,7 +106,7 @@ must be documented with golden vectors before interoperability testing.
 | `Close` | Both | Intentional shutdown reason |
 
 Message names are design identifiers. M1 defines exact schemas, optionality,
-canonical encoding, and golden test vectors.
+canonical encoding, and golden test vectors in `docs/M1_PROTOCOL.md`.
 
 ## Handshake and capability negotiation
 
@@ -233,7 +233,8 @@ error strings.
 
 - Major protocol changes require an explicit incompatible version.
 - Minor changes may add optional fields/capabilities with safe defaults.
-- M1 creates golden vectors for envelopes and each stable message schema.
+- M1 creates golden vectors for envelopes and each stable message schema; see
+  `docs/M1_PROTOCOL.md`.
 - Tests must cover truncated frames, oversized lengths, unknown optional fields,
   unknown mandatory fields, duplicate sequences, stale window IDs, and stale
   codec generations.

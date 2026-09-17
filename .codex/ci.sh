@@ -19,15 +19,18 @@ cd "${repo_root}"
 echo "Validating Swift package graph"
 swift package describe >/dev/null
 
-echo "Checking M0 source scope"
+echo "Checking repository source scope"
 forbidden_hits="$(rg -n \
     'ScreenCaptureKit|VideoToolbox|Network\.framework|import Network|import CoreGraphics|import ApplicationServices|import Metal|CGEvent|AXUIElement|NSPasteboard|WebRTC|AVAudio' \
     Apps Packages Tests --glob '*.swift' || true)"
 if [[ -n "${forbidden_hits}" ]]; then
-    echo "M0 scope check failed: forbidden product API or feature reference found" >&2
+    echo "Repository scope check failed: forbidden product API or feature reference found" >&2
     echo "${forbidden_hits}" >&2
     exit 1
 fi
+
+echo "Checking M1 protocol documentation"
+test -s "${repo_root}/docs/M1_PROTOCOL.md"
 
 echo "Building Host target"
 swift build --configuration debug --target Host
@@ -54,4 +57,4 @@ do
         --configuration debug
 done
 
-echo "M0 validation passed"
+echo "Repository validation passed (M0 foundation + M1 RemoteProtocol)"
