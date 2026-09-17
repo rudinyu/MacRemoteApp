@@ -65,6 +65,16 @@ public struct FrameParser: Sendable {
         guard previous < UInt64.max else {
             throw ProtocolError.sequenceOverflow
         }
+        if envelope.channel == .media {
+            guard envelope.sequence > previous else {
+                throw ProtocolError.invalidSequence(
+                    expected: previous + 1,
+                    actual: envelope.sequence
+                )
+            }
+            lastSequenceByChannel[envelope.channel] = envelope.sequence
+            return
+        }
         let expected = previous + 1
         guard envelope.sequence == expected else {
             throw ProtocolError.invalidSequence(

@@ -30,11 +30,16 @@ control.
 - Establish an authenticated TLS 1.3 session according to
   `docs/SECURITY.md` before protected control, video, input, or clipboard data
   is accepted.
-- The baseline design uses an ordered reliable control stream and an
-  independently queued media stream under the same authenticated session
-  policy. The exact physical connection arrangement is an M2 decision, but
-  both channels must be isolated enough that video backpressure cannot starve
-  input or authorization messages.
+- Network.framework peer authentication is required on every connection. A
+  bootstrap connection may identify an unknown certificate for pairing, but a
+  missing peer identity or failed certificate verification is never an
+  acceptable bootstrap state.
+- M2 binds both channels to one ordered reliable Network.framework TCP byte
+  stream under the same authenticated session policy. `TransportCore` keeps
+  independent bounded control and media scheduling queues; control is
+  prioritized between individual TCP writes, while TCP head-of-line blocking
+  remains a measured M8 concern. A different binding requires measured
+  evidence and an explicit later milestone decision.
 - V1 does not use WebRTC. A later Network.framework datagram/QUIC evaluation
   is allowed only as a measured M8 decision and is not part of the initial
   interoperability contract.
@@ -147,10 +152,18 @@ the stream.
   presentation timing, dimensions, and keyframe indicator.
 - Keyframes: the Host can request or produce a new keyframe after stream start,
   decoder reset, or recovery.
-- Ordering: the Viewer rejects stale generations and handles missing/superseded
-  frames by waiting for the next usable keyframe/configuration.
-- Backpressure: the media queue is bounded and may replace unsent stale frames;
-  it must never grow without limit.
+- Ordering: the Viewer rejects non-increasing media sequences and stale
+  generations. Forward gaps are allowed for discardable `VideoFrame` messages;
+  the decoder waits for the next usable keyframe/configuration rather than
+  applying stale state.
+- Backpressure: the media queue is bounded and may replace only unsent,
+  discardable video frames before they receive a wire sequence number; it must
+  never grow without limit. `VideoConfig` and recovery keyframes are not
+  discardable.
+- Authorization invalidation: unsent protected media is discarded. An admitted
+  protected control envelope is replaced by an optional unknown tombstone with
+  the same sequence, preserving strict control ordering while ensuring the
+  stale payload is not decoded or applied.
 - Pixel correctness: the Viewer preserves aspect ratio and reports actual
   presentation timing for M8 latency measurement.
 
@@ -179,6 +192,26 @@ event rate/sequence is invalid.
 V1 does not transfer arbitrary key logs, secure-input contents, password
 prompts, or events intended for background/unfocused applications.
 
+### M5 binding decisions
+
+- Viewer pointer coordinates are normalized to unsigned 16-bit values against
+  the current content rectangle. Events outside that rectangle, or while the
+  surface is not authenticated, authorized, and stream-ready, are rejected
+  locally and never sent.
+- `InputCore` assigns a local monotonic event ordinal and carries the current
+  selected-window generation. Keyboard modifiers use the protocol bitmask;
+  scroll deltas are bounded before encoding. The Viewer input surface admits
+  at most 240 events per monotonic second and the encoded event payload is
+  limited to 512 bytes.
+- `ViewerInputTransport` converts only the typed `InputCore.InputEventRecord`
+  into the existing `RemoteProtocol.InputEventMessage`. It does not serialize
+  raw `NSEvent`, `CGEvent`, key logs, or clipboard data. `TransportCore` then
+  applies session authentication, direction, capability, sequence, and window
+  generation checks.
+- M5 verification may use a Host test double to inspect typed records. Actual
+  Host coordinate mapping and OS event injection require the M6 permission,
+  foreground, focus, and selected-window checks.
+
 ## Clipboard contract
 
 - Only text is supported in V1.
@@ -188,8 +221,10 @@ prompts, or events intended for background/unfocused applications.
 - The receiver acknowledges or rejects an offer before applying it.
 - Each side tracks origin/generation so received text is not immediately echoed
   back indefinitely.
-- A default maximum payload of 1 MiB encoded text should be used unless M7
-  documents a different bound with a compatibility reason.
+- The M1 default is 65,515 UTF-8 bytes. `ClipboardText` travels on the control
+  channel and its 21-byte canonical schema/field overhead keeps the complete
+  payload within the shared 64 KiB control-envelope limit. M7 may choose a
+  different bound only with an explicit compatible framing decision.
 - Images, files, file promises, rich text, and arbitrary pasteboard types are
   rejected as unsupported.
 - Clipboard contents must never appear in normal logs or error strings.
@@ -226,6 +261,10 @@ error strings.
 - On disconnect, stop input immediately, cancel capture/encode work, clear
   unsent transient media, and retain no reusable authorization in memory longer
   than the session policy allows.
+- Connection establishment and each handshake phase have bounded deadlines.
+  Normal EOF, cancellation, timeout, or send failure clears local
+  authorization before any best-effort peer notification; a failed notification
+  never leaves the local session authorized.
 - Reconnect starts at peer validation and capability/session authorization. It
   may request a new keyframe, but it never silently resumes unsafe input.
 

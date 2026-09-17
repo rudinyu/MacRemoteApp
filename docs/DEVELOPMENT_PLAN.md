@@ -8,8 +8,15 @@ milestone is complete only when its exit criteria and tests are satisfied or a
 documented exception is explicitly accepted by the user.
 
 The repository contains the completed M0 foundation and M1 RemoteProtocol
-contract. M2 is the next implementation task; later milestones remain gated by
-their documented dependencies and exit criteria.
+contract, an M2 secure-session implementation with real loopback mutual-TLS
+verification, an M3 CaptureCore foundation with deterministic fake-provider
+tests, and the M4 CodecCore/Viewer presentation foundation. M2 code gates are
+complete; physical Intel-to-Apple-Silicon Bonjour/TLS smoke validation remains
+an environment evidence item. M3's live frame evidence is verified on the
+current M5 logged-in window-server session. M4's deterministic gates are
+complete; its VideoToolbox encode/decode smoke is an explicit opt-in hardware
+check. Later milestones remain blocked by their documented dependencies and
+exit criteria.
 
 ## Delivery principles
 
@@ -23,6 +30,8 @@ their documented dependencies and exit criteria.
   evidence.
 - Stop input first whenever authorization, focus, permission, or session health
   is uncertain.
+- Keep the public validation entry point tool-agnostic and reproducible; local
+  developer automation is not part of the published repository contract.
 - Do not add out-of-scope features as shortcuts or future-proofing.
 
 ## Dependency overview
@@ -113,10 +122,14 @@ clipboard side effects.
 - Unit tests for every stable envelope/message family.
 - Property/fuzz-style tests for bounded parsing and unknown optional fields.
 - Tests for duplicate/out-of-order sequences, length overflow, and maximum
-  clipboard payload handling.
+  clipboard payload handling, including the fact that `ClipboardText` shares
+  the control-channel envelope limit.
 - Run build, unit tests, and the repository validation script.
 
 ## M2 — Secure LAN discovery and session
+
+The implementation decisions and current verification boundary are recorded in
+`docs/M2_SESSION.md`.
 
 ### Scope
 
@@ -134,22 +147,42 @@ or WebRTC.
 ### Exit criteria
 
 - A Host and Viewer can discover and establish a protected test session on the
-  LAN using the documented pairing flow.
-- Identity mismatch, pairing denial, malformed handshake, timeout, and
+  LAN using the documented pairing flow, with peer authentication required on
+  every connection and a provisioned platform identity.
+- Both local operators explicitly consent to first pairing; a remote
+  confirmation alone cannot create a permanent trust record.
+- Identity mismatch, pairing denial, malformed handshake, timeout, normal EOF,
+  cancellation, capability mismatch, revoke-notification failure, and
   reconnect all fail closed.
-- Control and media queue ownership is isolated enough to prevent video from
-  starving authorization/input messages.
+- Authorization records bind the session generation, selected-window
+  generation, and enabled capabilities; protected delivery checks that scope.
+- Control and media queue ownership is isolated enough to prioritize control;
+  replacing an unsent discardable media frame may create an observable forward
+  media gap, but never drops required config/recovery frames or accepts a
+  non-increasing media sequence.
 - Trust records and revocation behavior are documented and tested.
 
 ### Tests and verification
 
 - Protocol/session tests using in-memory transport doubles.
 - Two-process or two-machine LAN smoke test when available.
-- Tests for TLS/configuration failure, wrong peer identity, stale trust,
-  replay/freshness, heartbeat timeout, and reconnect authorization.
+- Tests for required peer authentication, TLS/configuration failure, wrong
+  peer identity, stale trust, two-sided consent, replay/freshness, handshake
+  and connection deadlines, normal EOF, heartbeat timeout, bounded buffering,
+  and reconnect authorization.
 - Verify no protected content is sent before authorization.
 
+M3 cannot claim its dependency is complete while any M2 security gate remains
+open. M2's code gates are now complete; lack of an Intel machine may be
+recorded as an environment exception for cross-hardware LAN evidence, but it
+is not an exception for peer-authentication, consent, authorization, queue, or
+teardown correctness.
+
 ## M3 — Host window discovery and capture
+
+The CaptureCore implementation and deterministic tests are complete. A live
+ScreenCaptureKit frame has been verified on the current M5; other machines
+still require their own logged-in window-server and Screen Recording evidence.
 
 ### Scope
 
@@ -180,6 +213,15 @@ whole-desktop default capture, background/locked-screen control.
 - Record actual supported OS/hardware behavior separately from mocked tests.
 
 ## M4 — H.264 codec and Metal presentation
+
+### Status
+
+Complete for the deterministic M4 gate. `CodecCore` now owns the bounded
+VideoToolbox adapters, H.264 decoder configuration payload, generation/keyframe
+rules, and frame queue. `Apps/Viewer/MetalVideoRenderer.swift` owns the
+Viewer-side Metal/Core Image presentation path and aspect-fit layout. The
+hardware encode/decode smoke is opt-in because it requires a local VideoToolbox
+and window/display environment.
 
 ### Scope
 
@@ -212,6 +254,17 @@ presentation.
 - Memory/queue observations demonstrate no unbounded frame accumulation.
 
 ## M5 — Viewer interaction and input transport
+
+### Status
+
+Complete for the M5 Viewer-side gate. `InputCore` provides the bounded typed
+event model, coordinate normalization, sequence, and rate checks.
+`ViewerInputSurface` captures AppKit pointer, button, scroll, keyboard, and
+modifier events only when the authenticated session and content surface are
+ready. `ViewerInputTransport` maps those records to the authenticated
+`RemoteProtocol.InputEventMessage` path, and the in-memory Host transport test
+verifies ordering and window-generation delivery. Host OS injection remains
+explicitly deferred to M6.
 
 ### Scope
 
@@ -335,7 +388,10 @@ optimization.
 ### Tests and verification
 
 - Repeatable benchmark runs on the documented Intel Host and Apple Silicon
-  Viewer where available.
+  Viewer where available. Before collecting one-way samples, perform at least
+  20 authenticated Ping/Pong clock probes; estimate offset from the minimum
+  RTT, report residual uncertainty and drift, discard warm-up samples, and
+  require at least 1,000 valid frame samples over 30 seconds.
 - Fault-injection tests for packet/stream interruption, queue saturation,
   malformed frames, codec reset, and permission change.
 - Capture resource and latency reports as release artifacts, excluding private

@@ -53,17 +53,29 @@ The default limits are:
 | Limit | Default |
 | --- | ---: |
 | Maximum envelope payload | 1 MiB |
-| Maximum control payload | 64 KiB |
-| Maximum clipboard UTF-8 bytes | 1 MiB |
+| Maximum control payload, including `ClipboardText` | 64 KiB |
+| Maximum clipboard UTF-8 bytes | 65,515 bytes |
 | Maximum field value | 1 MiB |
 | Maximum identifier bytes | 256 |
 | Maximum window entries | 256 |
 | Maximum capabilities | 128 |
 
 `FrameParser` accepts arbitrary partial reads. It does not allocate based on a
-length that exceeds the configured limits. The first sequence on each channel
-may be any value; every following sequence on that channel must equal the
-previous value plus one. Control and media sequences are independent.
+length that exceeds the configured limits. `ClipboardText` is a control-channel
+message, so its encoded payload must fit the same 64 KiB control-envelope cap.
+The default logical UTF-8 limit is 65,515 bytes: the canonical `ClipboardText`
+payload has 21 bytes of schema/field overhead, leaving the complete encoded
+payload at or below 65,536 bytes. A peer may advertise a lower limit; the
+effective control limit and clipboard limit are both the minimum of the local
+and remote values, with encoding overhead still applied.
+
+The first sequence on each channel may be any value. Control sequences must be
+strictly contiguous and control/media sequences are independent. Media
+sequences must be strictly increasing; a bounded queue may replace an unsent,
+discardable video frame with a newer one, so the receiver may observe a forward
+gap in the media sequence. It must never drop `VideoConfig` or a required
+recovery keyframe locally, and a non-increasing media sequence is still a
+replay/protocol error.
 
 The envelope golden vector in the unit tests is:
 
@@ -176,7 +188,7 @@ The following vectors are the canonical payload bytes for the fixed samples in
 or clipboard data beyond the literal test string `hello`.
 
 ```text
-Hello               0101010000000201000201000000010103010000000F4D616352656D6F74654170702D4D31040100000004001000000501000000040001000006010000000400100000
+Hello               0101010000000201000201000000010103010000000F4D616352656D6F74654170702D4D3104010000000400100000050100000004000100000601000000040000FFEB
 Capabilities        010101000000060002000100060200000000040000078003000000000400000438040000000002003C
 PairingChallenge    010101000000080102030405060708020100000006313233343536
 PairingConfirmation 01010100000008010203040506070802010000000101030000000006313233343536

@@ -4,9 +4,15 @@ import RemoteProtocol
 import SecurityCore
 import TransportCore
 
+@MainActor
 @main
 struct ViewerApp {
     static func main() {
+        if CommandLine.arguments.contains("--m5-input-surface") {
+            ViewerInputDemo().run()
+            return
+        }
+
         let modules = [
             RemoteProtocolModule.name,
             CodecCoreModule.name,
@@ -15,6 +21,6 @@ struct ViewerApp {
             SecurityCoreModule.name
         ]
 
-        print("MacRemoteApp Viewer M0 foundation: \(modules.joined(separator: ", "))")
+        print("MacRemoteApp Viewer M5 foundation: \(modules.joined(separator: ", "))")
     }
 }

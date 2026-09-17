@@ -51,7 +51,15 @@ cross-machine interoperability; those belong to later milestones.
 
 ## Repeatable validation
 
-From the repository root, run:
+The public validation entry point for the current checkout is:
+
+```sh
+./scripts/validate.sh
+```
+
+It builds both executable targets, runs the root smoke test, tests all six
+packages, and checks the M2 boundary. For the original M0-only foundation
+probe, run:
 
 ```sh
 swift package describe

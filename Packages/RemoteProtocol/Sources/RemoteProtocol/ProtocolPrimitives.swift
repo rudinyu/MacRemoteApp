@@ -223,6 +223,7 @@ public enum CloseReason: UInt16, Equatable, Hashable, Sendable {
 
 public struct ProtocolLimits: Equatable, Sendable {
     public static let `default` = ProtocolLimits()
+    public static let clipboardTextPayloadOverhead = 21
 
     public let maxPayloadLength: Int
     public let maxControlPayloadLength: Int
@@ -235,7 +236,7 @@ public struct ProtocolLimits: Equatable, Sendable {
     public init(
         maxPayloadLength: Int = 1_048_576,
         maxControlPayloadLength: Int = 65_536,
-        maxClipboardTextBytes: Int = 1_048_576,
+        maxClipboardTextBytes: Int = 65_515,
         maxFieldLength: Int = 1_048_576,
         maxIdentifierBytes: Int = 256,
         maxWindowEntries: Int = 256,
@@ -258,8 +259,10 @@ public struct ProtocolLimits: Equatable, Sendable {
             maxIdentifierBytes >= 0 &&
             maxWindowEntries >= 0 &&
             maxCapabilities >= 0 &&
+            maxControlPayloadLength >= Self.clipboardTextPayloadOverhead &&
             maxControlPayloadLength <= maxPayloadLength &&
             maxClipboardTextBytes <= maxPayloadLength &&
+            maxClipboardTextBytes <= maxControlPayloadLength - Self.clipboardTextPayloadOverhead &&
             maxFieldLength <= maxPayloadLength &&
             maxPayloadLength <= Int(UInt32.max)
     }

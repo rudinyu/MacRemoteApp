@@ -7,11 +7,18 @@ Host; this is deliberately not a full remote-desktop product.
 
 ## Current status
 
-The M0 Repository Foundation and M1 RemoteProtocol wire contract are now
-present. The repository contains separate Host and Viewer executable targets,
-six local shared packages, deterministic local build/test validation, and the
-versioned bounded protocol types documented in `docs/M1_PROTOCOL.md`. It still
-contains no live product capability implementation.
+The M0 Repository Foundation and M1 RemoteProtocol wire contract are complete.
+The M2 secure LAN session implementation, PKCS#12/Keychain identity
+provisioning, and real loopback mutual-TLS/session smoke test are complete.
+Physical Intel Host to Apple Silicon Viewer Bonjour/TLS evidence remains an
+explicit hardware-environment gate. M3 now contains the Host window catalog
+and ScreenCaptureKit capture foundation with deterministic fake-provider tests
+and a successful M5 live frame smoke test. M4 now contains bounded H.264
+VideoToolbox encode/decode adapters, decoder-generation recovery rules, and a
+Viewer Metal presentation surface with deterministic layout/queue tests. The
+repository still contains no input injection or clipboard product capability
+implementation. M5 adds the Viewer-side typed input foundation and authenticated
+event transport; Host-side OS injection remains M6.
 
 The repository root is:
 
@@ -35,6 +42,10 @@ MacRemoteApp/
     ├── DEVELOPMENT_PLAN.md
     ├── M0_FOUNDATION.md
     ├── M1_PROTOCOL.md
+    ├── M2_SESSION.md
+    ├── M3_CAPTURE.md
+    ├── M4_CODEC.md
+    ├── M5_INPUT.md
     ├── PRODUCT_SPEC.md
     ├── PROTOCOL.md
     └── SECURITY.md
@@ -109,8 +120,8 @@ appropriate document before implementation.
 | M1 | RemoteProtocol types, framing, codec tests, and versioning |
 | M2 | Secure LAN discovery, pairing, and session lifecycle |
 | M3 | Host window discovery and ScreenCaptureKit capture |
-| M4 | H.264 encode/decode and Metal presentation |
-| M5 | Viewer mouse/keyboard capture and event transport |
+| M4 | H.264 encode/decode and Metal presentation (complete; hardware smoke is opt-in) |
+| M5 | Viewer mouse/keyboard capture and event transport (complete; Host injection remains M6) |
 | M6 | Host-side focus-aware input mapping and injection |
 | M7 | Text clipboard synchronization and session UX |
 | M8 | Latency, frame-rate, backpressure, reconnect, and resilience work |

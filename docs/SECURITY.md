@@ -72,8 +72,14 @@ the authenticated pairing flow.
    peer identity exchange.
 3. The Host and Viewer display a short, human-comparable confirmation value
    derived from the pairing transcript.
-4. The Operator confirms that the values match on the intended devices.
-5. Both sides store the peer identity and trust metadata in the Keychain.
+4. The local operator on each endpoint explicitly consents after checking that
+   the values match. A remote `PairingConfirmation` is evidence of remote
+   consent, not local consent.
+5. Both sides store the peer identity and trust metadata in the Keychain only
+   after the same challenge, peer identity, matching code, and both local and
+   remote consent states are complete. Reject, expiry, disconnect, or a
+   mismatched identity must clear pending state without creating one-sided
+   permanent trust.
 6. The session remains separately authorized for the selected window and
    enabled capabilities.
 
@@ -123,15 +129,21 @@ be treated as equivalent to "authorized to control".
 ## Transport protection
 
 - Use Network.framework with a TLS 1.3-capable configuration for the protected
-  session.
-- Validate peer identity against the pairing/trust record after the first
-  user-confirmed bootstrap.
+  session and explicitly require peer authentication on every connection.
+- A bootstrap may accept an unknown but actually presented certificate for the
+  pairing flow; it must reject a missing peer identity or failed certificate
+  verification. Validate a known peer identity against the pairing/trust
+  record before protected session data is delivered.
 - Keep control and media queue isolation, but apply the same session identity,
   authorization, and teardown rules to both.
 - Do not invent custom cryptography. Use platform-provided primitives and
   document the chosen configuration in M2/M9.
 - Include freshness and sequence validation so old control/input messages are
   not accepted after reconnect or window changes.
+- `TransportCore` owns the session delivery gate and clears its authorization
+  record before teardown/revocation notification. `SecurityCore` supplies
+  identity, pairing, trust, and capability policy decisions; it does not infer
+  current window generation, macOS permission, or focus eligibility.
 
 ## Input safety
 
@@ -177,8 +189,9 @@ be treated as equivalent to "authorized to control".
 Security validation is staged rather than deferred entirely to release:
 
 - **M1**: fuzz/boundary tests for envelope and message validation.
-- **M2**: pairing, identity mismatch, TLS failure, replay/freshness, and
-  unauthorized-session tests.
+- **M2**: required peer authentication, pairing consent, identity mismatch,
+  TLS failure, replay/freshness, bounded lifecycle, and unauthorized-session
+  tests.
 - **M3-M6**: permission revocation, stale window, focus loss, and input fail-
   closed tests.
 - **M7**: clipboard opt-in, size limit, redaction, conflict, and echo-loop
@@ -200,3 +213,35 @@ that the implementation does not provide.
 
 Any missed control, unverified cryptographic configuration, or environment-only
 test limitation must be recorded as an open security risk before V1 release.
+
+## M2 implementation decisions and open validation
+
+M2 uses TLS 1.3 through Network.framework and derives the peer identifier from
+the SHA-256 fingerprint of the leaf certificate public-key representation.
+Peer authentication is required on both client and server paths. Known peers
+are compared against `SecurityCore` trust records stored in the macOS
+Keychain. A certificate that does not match the stored identity is rejected;
+an unknown but presented identity may enter the protected bootstrap flow but
+cannot send or receive protected session content until pairing and Host
+authorization complete.
+
+The Host initiates pairing. The challenge identifier deterministically binds the
+pairing nonce, and both peers independently derive the confirmation value from
+that nonce and the two presented public identities; the Viewer rejects a value
+that does not match its local derivation. Each endpoint records an explicit
+local consent event, and a remote confirmation is accepted only as the other
+side's consent for the same challenge. Both sides persist the peer identity only
+after the two-sided state is complete. Revocation deletes the trust record and
+requires pairing again. Reconnect clears session authorization, window scope,
+capability scope, and channel sequence state.
+
+The local device key is retained by Keychain-backed `SecurityCore`; the TLS
+adapter receives a platform `SecIdentity` loaded from Keychain or imported
+from a PKCS#12 provisioning bundle. P-256 certificate and Network.framework
+peer-key representations are canonicalized before fingerprint comparison.
+Certificate enrollment policy, key-to-certificate continuity,
+reinstall/rotation behavior, locked-Keychain failure, and access-control
+configuration remain deployment-specific. The M5 environment has now passed
+real loopback mutual-TLS/session startup with temporary identities; that is not
+evidence of physical Intel Host to Apple Silicon Viewer Bonjour/TLS
+interoperability, which remains an environment validation item.

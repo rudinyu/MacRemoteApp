@@ -4,9 +4,14 @@
 
 This is the V1 product specification. It defines the user-visible goal and
 acceptance boundaries; implementation details belong in the architecture and
-protocol documents. The repository currently contains M0/M1 foundations;
-product capability implementation remains out of scope until its owning
-milestones.
+protocol documents. The repository currently contains the M0 foundation, the
+M1 wire contract, the M2 secure-session implementation, the M3 Host capture
+foundation, and the M4 H.264/Metal foundation. M2 code and loopback security
+gates are complete; physical Intel-to-Apple-Silicon LAN evidence remains
+environment-dependent. Product capability implementation remains limited to
+the owning milestone boundaries. M5 now contains the Viewer input surface,
+typed event normalization, and authenticated event-transport foundation; it
+does not inject events into the Host OS.
 
 ## Product goal
 
@@ -56,8 +61,10 @@ available on every macOS version.
    permissions only when the corresponding capability is needed.
 3. The Host advertises a non-sensitive LAN discovery record.
 4. The Viewer finds the Host and requests a connection.
-5. Both sides display a short pairing confirmation value. The Operator
-   confirms that the values match.
+5. Both sides display a short pairing confirmation value. The local operator
+   records consent on each intended endpoint after confirming that the values
+   match; one person may perform both confirmations while physically using the
+   two devices.
 6. The devices store the resulting trust record and establish an authenticated
    session.
 
@@ -153,14 +160,19 @@ has already verified them.
 | --- | --- |
 | Resolution | Support a 1920×1080 capture/display configuration when the selected window and hardware permit it; negotiate a lower size when necessary. |
 | Frame rate | Target 60 fps on the LAN path; provide a stable 30 fps fallback when the target cannot be sustained. Measure delivered frames over a defined 30-second window. |
-| End-to-end latency | Target under 50 ms from a Host capture timestamp to corresponding Viewer presentation timestamp on a controlled LAN benchmark. Report p50 and p95, not only an average. |
+| End-to-end latency | Target p95 under 50 ms from a Host capture timestamp to the corresponding Viewer presentation timestamp on a controlled LAN benchmark. Report p50 and p95, not only an average. Before sampling, exchange authenticated monotonic-clock timestamps over at least 20 Ping/Pong probes; estimate clock offset from the minimum-RTT sample and report the residual offset uncertainty and drift. Exclude warm-up samples, measure for 30 seconds with at least 1,000 valid frame samples, and mark one-way latency unverified when clock uncertainty exceeds 5 ms. |
 | Interaction latency | Measure input send-to-observable-result on a documented test app; report p50/p95 and conditions. |
 | Backpressure | A slow Viewer must not cause unbounded Host capture, encode, or memory queues. Prefer a recent frame over stale frames. |
 | Recovery | A temporary LAN interruption must result in a visible session state and a bounded reconnect/reauthorization path; do not silently resume unsafe input. |
 | Compatibility | Verify at least one Intel Host and one Apple Silicon Viewer using the M0 deployment matrix before V1 acceptance. |
 
 M8 owns the benchmark harness and records the exact hardware, macOS version,
-network conditions, resolution, frame rate, and measurement method.
+network conditions, resolution, frame rate, clock-sync probe count, estimated
+offset, uncertainty, drift, valid sample count, p50, p95, and measurement
+method. Viewer presentation timestamps must be taken at the actual display
+handoff, not when a frame merely enters a render queue. If clock alignment is
+not within the stated uncertainty bound, report a separate authenticated
+round-trip measurement instead of claiming a one-way latency result.
 
 ## Permissions and consent
 

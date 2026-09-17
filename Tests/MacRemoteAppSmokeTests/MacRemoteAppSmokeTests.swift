@@ -7,7 +7,7 @@ import XCTest
 import TransportCore
 
 final class MacRemoteAppSmokeTests: XCTestCase {
-    func testAllSharedModulesExposeOnlyTheirM0FoundationMarker() {
+    func testAllSharedModulesRemainImportable() {
         XCTAssertEqual(RemoteProtocolModule.name, "RemoteProtocol")
         XCTAssertEqual(CaptureCoreModule.name, "CaptureCore")
         XCTAssertEqual(CodecCoreModule.name, "CodecCore")

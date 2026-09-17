@@ -101,6 +101,37 @@ final class RemoteProtocolTests: XCTestCase {
         }
     }
 
+    func testFrameParserAllowsForwardGapsOnlyOnMediaChannel() throws {
+        let firstMedia = try Envelope(
+            channel: .media,
+            messageType: .videoFrame,
+            sequence: 0,
+            timestamp: 1,
+            payload: Data([0x01])
+        ).encoded()
+        let gappedMedia = try Envelope(
+            channel: .media,
+            messageType: .videoFrame,
+            sequence: 3,
+            timestamp: 2,
+            payload: Data([0x02])
+        ).encoded()
+        var mediaParser = try FrameParser()
+        XCTAssertEqual(try mediaParser.append(firstMedia).count, 1)
+        XCTAssertEqual(try mediaParser.append(gappedMedia).count, 1)
+
+        let duplicateMedia = try Envelope(
+            channel: .media,
+            messageType: .videoFrame,
+            sequence: 3,
+            timestamp: 3,
+            payload: Data([0x03])
+        ).encoded()
+        assertProtocolError(.invalidSequence(expected: 4, actual: 3)) {
+            _ = try mediaParser.append(duplicateMedia)
+        }
+    }
+
     func testEnvelopeRejectsMalformedAndOversizedFrames() throws {
         let valid = try Envelope(
             channel: .control,
@@ -252,7 +283,7 @@ final class RemoteProtocolTests: XCTestCase {
         ]
 
         let goldenVectors: [MessageType: String] = [
-            .hello: "0101010000000201000201000000010103010000000F4D616352656D6F74654170702D4D31040100000004001000000501000000040001000006010000000400100000",
+            .hello: "0101010000000201000201000000010103010000000F4D616352656D6F74654170702D4D3104010000000400100000050100000004000100000601000000040000FFEB",
             .capabilities: "010101000000060002000100060200000000040000078003000000000400000438040000000002003C",
             .pairingChallenge: "010101000000080102030405060708020100000006313233343536",
             .pairingConfirmation: "01010100000008010203040506070802010000000101030000000006313233343536",
@@ -352,6 +383,8 @@ final class RemoteProtocolTests: XCTestCase {
     }
 
     func testProtocolVersionCapabilityAndLimitsRules() throws {
+        XCTAssertEqual(ProtocolLimits.default.maxControlPayloadLength, 65_536)
+        XCTAssertEqual(ProtocolLimits.default.maxClipboardTextBytes, 65_515)
         XCTAssertTrue(ProtocolVersion(major: 1, minor: 0).isCompatible())
         XCTAssertFalse(ProtocolVersion(major: 2, minor: 0).isCompatible())
         XCTAssertFalse(ProtocolVersion(major: 1, minor: 1).isCompatible())
@@ -385,6 +418,27 @@ final class RemoteProtocolTests: XCTestCase {
 
         assertProtocolError(.invalidLimits) {
             _ = try FrameParser(limits: ProtocolLimits(maxPayloadLength: 1, maxControlPayloadLength: 2))
+        }
+    }
+
+    func testDefaultClipboardLimitFitsTheControlEnvelope() throws {
+        let text = Data(repeating: 0x61, count: ProtocolLimits.default.maxClipboardTextBytes)
+        let envelope = try Envelope(
+            message: .clipboardText(ClipboardTextMessage(generation: 1, text: text)),
+            sequence: 1,
+            timestamp: 1
+        )
+
+        XCTAssertEqual(envelope.payload.count, ProtocolLimits.default.maxControlPayloadLength)
+        XCTAssertLessThanOrEqual(
+            try envelope.encoded().count - Envelope.headerSize,
+            ProtocolLimits.default.maxControlPayloadLength
+        )
+        assertProtocolError(.payloadTooLarge(actual: 65_516, maximum: 65_515)) {
+            _ = try ClipboardTextMessage(
+                generation: 1,
+                text: Data(repeating: 0x61, count: 65_516)
+            ).encoded()
         }
     }
 }

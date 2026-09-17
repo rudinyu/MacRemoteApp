@@ -93,9 +93,9 @@ responsibilities and dependency direction below.
 | `RemoteProtocol` | Versioned wire messages, frame envelope, serialization/deserialization, capability identifiers, validation limits | Sockets, UI, ScreenCaptureKit, VideoToolbox, Keychain |
 | `CaptureCore` | Host-side application/window enumeration and ScreenCaptureKit capture orchestration, timestamps, capture state | H.264 bitstream policy, network I/O, remote input |
 | `CodecCore` | VideoToolbox compression/decompression adapters, codec configuration, frame metadata, decode output contract | Window selection, transport, user permissions |
-| `TransportCore` | Bonjour discovery, Network.framework connections, channel lifecycle, framing delivery, queues, flow control, reconnect state | Product UI, pairing policy, capture, event injection |
-| `InputCore` | Platform-neutral input model, Viewer event normalization, Host coordinate mapping, permission-aware injection adapter contract | Wire serialization, trust decisions, arbitrary background control |
-| `SecurityCore` | Device identity, Keychain trust records, pairing state, peer authentication policy, authorization decisions, redaction helpers | UI prompts, window pixels, generic business workflow |
+| `TransportCore` | Bonjour discovery, Network.framework connections, channel lifecycle, framing delivery, bounded queues, flow control, reconnect state, and session authorization delivery gates | Product UI, pairing policy, capture, event injection, current macOS permission/focus truth |
+| `InputCore` | Platform-neutral input model, Viewer event normalization, Host coordinate mapping, permission-aware injection adapter contract and final injection-time safety check | Wire serialization, trust decisions, arbitrary background control |
+| `SecurityCore` | Device identity, Keychain trust records, pairing state, peer authentication policy, reusable trust/capability policy evaluation, redaction helpers | UI prompts, sockets, window selection, current window/permission/focus state, generic business workflow |
 
 ## Dependency direction
 
@@ -121,6 +121,31 @@ Additional rules:
   decisions, but `SecurityCore` must not depend on an active socket.
 - App modules translate package events into UI state; package modules do not
   import app view controllers.
+- `SecurityCore` evaluates identity, pairing consent, trust, and capability
+  policy inputs but does not own session-specific window generations or OS
+  permission/focus state.
+- `TransportCore` is the authoritative session-delivery gate: after TLS and
+  pairing policy are satisfied, it stores the current authorization record and
+  checks message direction, negotiated capability, session generation, and
+  selected-window generation before sending or accepting protected messages.
+  It clears that record before teardown or revoke notification and fails closed
+  if notification delivery fails.
+- `Apps/Host` supplies the selected-window and permission/focus facts. `InputCore`
+  performs the final check immediately before any future Host-side injection;
+  a TransportCore authorization decision alone never authorizes an OS event.
+- In M3, `CaptureCore` is the source of truth for the Host window catalog,
+  Screen Recording permission state, selected-window generation, and raw
+  timestamped pixel-buffer lifecycle. `Apps/Host` may map those values to
+  `RemoteProtocol` messages after TransportCore authorization; CaptureCore
+  itself does not import the wire package.
+- In M5, `Apps/Viewer/ViewerInputSurface` owns AppKit event capture and visible
+  readiness state. `InputCore` owns the platform-neutral event record,
+  coordinate normalization, sequence, and rate/size validation. The Viewer
+  maps that record to `RemoteProtocol.InputEventMessage` through
+  `ViewerInputTransport`, and `TransportCore.SessionCoordinator` is the
+  authenticated capability/window-generation delivery gate. No M5 component
+  calls CoreGraphics or Accessibility APIs; Host-side mapping and injection
+  remain M6.
 - Cross-cutting diagnostics use a narrow structured logging interface. They do
   not pass raw clipboard text, secrets, or full captured frames.
 
@@ -201,11 +226,16 @@ lists, selected-window state, session status, input events, clipboard messages,
 and errors. It is reliable and ordered.
 
 The media plane carries codec configuration and video frames. It has an
-independent bounded queue and may supersede stale frames before they are sent.
-The baseline V1 binding is a Network.framework stream protected by the same
-authenticated session policy; M8 may evaluate a different Network.framework
-binding only if the measured baseline misses the documented target. WebRTC is
-not a V1 option.
+independent bounded scheduling queue and may replace only unsent, discardable
+video frames before they are admitted to the wire. `VideoConfig` and
+recovery keyframes are not discardable. Media sequences are strictly
+increasing, but a replaced frame may create a forward media gap; control
+sequences remain contiguous. The baseline V1 binding is one ordered
+Network.framework TCP stream protected by the same authenticated session
+policy; control is prioritized between individual writes, while TCP
+head-of-line blocking remains an M8 measurement concern. M8 may evaluate a
+different Network.framework binding only if the measured baseline misses the
+documented target. WebRTC is not a V1 option.
 
 The protocol envelope is shared, but the media plane must not be allowed to
 block control/input progress indefinitely.
@@ -247,6 +277,10 @@ selected-window identity, and permission state.
 - Preserve ordering and delivery for input and control messages.
 - Treat malformed, oversized, out-of-order, or unsupported messages as
   protocol errors; do not attempt to guess their meaning.
+- Authorization-epoch invalidation drops queued protected media and converts
+  queued protected control payloads to optional unknown tombstones with their
+  original sequence, preserving strict ordering without applying stale window,
+  input, or session data.
 - Stop input first when session health or authorization becomes uncertain.
 - Surface enough state for the Operator to recover without exposing sensitive
   diagnostics.
@@ -259,3 +293,31 @@ binding. M4 must record H.264 profile and rate-control defaults. M7 must record
 clipboard conflict and size policy. M8 must record benchmark evidence before
 any performance-driven transport change. These are decisions, not permission
 to add speculative features.
+
+## M2 decisions
+
+- Bonjour uses `_macremote._tcp` in `local.`. Discovery results are treated as
+  untrusted endpoint hints and contain no pairing secret or captured content.
+- The initial connection binding is one ordered Network.framework TCP byte
+  stream carrying the M1 control/media channels. `TransportCore` keeps bounded
+  control and media queues separate so stale media cannot starve control.
+- TLS requires version 1.3 or newer and peer authentication on every
+  connection. `SecurityCore` identifies a peer by the SHA-256 fingerprint of
+  the leaf certificate public-key representation and compares it with a
+  Keychain trust record.
+- Unknown peers use a certificate-presented bootstrap session followed by
+  explicit two-sided local-consent pairing. Trust does not imply window
+  authorization; the Host must separately authorize the session after
+  capability negotiation.
+
+## M3 decisions
+
+- The Host uses ScreenCaptureKit's desktop-independent-window filter and does
+  not fall back to whole-display capture.
+- Window discovery requires Screen Recording authorization, an on-screen
+  zero-layer window, a non-empty application bundle identifier, and positive
+  bounds. Titles remain optional metadata and are not treated as credentials.
+- `WindowCaptureSession` assigns a new generation per selection, accepts only
+  matching window/generation frames, and uses a bounded newest-frame output.
+  Permission loss, window disappearance, capture error, EOF, or cancellation
+  invalidates the active capture before later codec or transport work.
