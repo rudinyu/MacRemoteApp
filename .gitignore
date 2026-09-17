@@ -1,0 +1,14 @@
+.build/
+.swiftpm/
+DerivedData/
+.DS_Store
+
+# Keep the repository-owned validation entry point; ignore other Codex state.
+.codex/*
+!.codex/ci.sh
+.agents/
+
+# Local review/output artifacts must stay outside version control.
+codex-review*.log
+codex-output/
+.codex-local/
