@@ -6,8 +6,13 @@ import InputCore
 @MainActor
 final class ViewerInputSurface: NSView {
     private var trackingArea: NSTrackingArea?
+    private var windowFocusObserver: NSObjectProtocol?
+    private var windowBecomeKeyObserver: NSObjectProtocol?
     private var normalizer: InputEventNormalizer
     private var rateLimiter: InputEventRateLimiter
+    private var inputState = InputStateTracker()
+    private var modifierKeyTracker = ModifierKeyTracker()
+    private var admittedModifierKeyCodes: Set<UInt16> = []
 
     private(set) var inputReadiness: InputReadiness {
         didSet {
@@ -57,12 +62,85 @@ final class ViewerInputSurface: NSView {
         contentRect: InputContentRect,
         readiness: InputReadiness
     ) {
+        let readinessChanged = inputReadiness != readiness
+        let wasReady = inputReady
+        let willBeReady = readiness.isReady && contentRect.isValid
+        if !inputState.isEmpty && (readinessChanged || wasReady != willBeReady) {
+            // Keep the old readiness and normalizer generation in place while
+            // synthetic releases are admitted. Clearing state first would
+            // leave the Host believing a key or button is still pressed.
+            releasePressedState()
+        } else if readinessChanged || wasReady != willBeReady {
+            beginModifierResynchronization()
+            admittedModifierKeyCodes.removeAll(keepingCapacity: false)
+            rateLimiter.reset()
+        }
         normalizer.update(contentRect: contentRect, readiness: readiness)
         inputReadiness = readiness
         rateLimiter.reset()
+        if !readinessChanged && wasReady == willBeReady {
+            for _ in inputState.activeKeys {
+                rateLimiter.reserveStateEndingEvent()
+            }
+        }
     }
 
     override var acceptsFirstResponder: Bool { true }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if let windowFocusObserver {
+            NotificationCenter.default.removeObserver(windowFocusObserver)
+            self.windowFocusObserver = nil
+        }
+        if let windowBecomeKeyObserver {
+            NotificationCenter.default.removeObserver(windowBecomeKeyObserver)
+            self.windowBecomeKeyObserver = nil
+        }
+        releasePressedState()
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
+        windowFocusObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.releasePressedState()
+            }
+        }
+        windowBecomeKeyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.beginModifierResynchronization()
+            }
+        }
+        if window.isKeyWindow {
+            beginModifierResynchronization()
+        }
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned {
+            releasePressedState()
+        }
+        return resigned
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became {
+            beginModifierResynchronization()
+        }
+        return became
+    }
 
     override func updateTrackingAreas() {
         if let trackingArea {
@@ -91,21 +169,14 @@ final class ViewerInputSurface: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard inputReady else { return }
-        window?.makeFirstResponder(self)
-        emit { try normalizer.focusIntent(timestampNanoseconds: now()) }
-        emit {
-            try normalizer.pointerButton(
-                at: point(for: event),
-                button: 0,
-                pressed: true,
-                timestampNanoseconds: now()
-            )
-        }
+        emitButtonDown(event, button: 0)
     }
 
     override func mouseUp(with event: NSEvent) {
-        emit {
+        emit(
+            priority: priority(for: .pointerButton(0), pressed: false),
+            stateTransition: .ended(.pointerButton(0))
+        ) {
             try normalizer.pointerButton(
                 at: point(for: event),
                 button: 0,
@@ -116,7 +187,7 @@ final class ViewerInputSurface: NSView {
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        emitButton(event, button: 1, pressed: true)
+        emitButtonDown(event, button: 1)
     }
 
     override func rightMouseUp(with event: NSEvent) {
@@ -124,7 +195,7 @@ final class ViewerInputSurface: NSView {
     }
 
     override func otherMouseDown(with event: NSEvent) {
-        emitButton(event, button: UInt8(clamping: event.buttonNumber), pressed: true)
+        emitButtonDown(event, button: UInt8(clamping: event.buttonNumber))
     }
 
     override func otherMouseUp(with event: NSEvent) {
@@ -132,7 +203,7 @@ final class ViewerInputSurface: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        emit {
+        emit(throttleMovementWhenRateLimited: true) {
             try normalizer.pointerMove(at: point(for: event), timestampNanoseconds: now())
         }
     }
@@ -168,6 +239,43 @@ final class ViewerInputSurface: NSView {
         emitKey(event, pressed: false)
     }
 
+    override func flagsChanged(with event: NSEvent) {
+        guard inputReady else { return }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard modifierFlag(for: event.keyCode) != nil else { return }
+
+        if modifierKeyTracker.isResynchronizing {
+            let aggregateIsPressed = !flags.intersection(Self.resynchronizationModifierFlags).isEmpty
+            _ = modifierKeyTracker.observeAggregateState(isPressed: aggregateIsPressed)
+            return
+        }
+
+        guard let transition = modifierKeyTracker.toggle(keyCode: event.keyCode) else { return }
+        let isPressed: Bool
+        switch transition {
+        case .pressed:
+            isPressed = true
+        case .released:
+            isPressed = false
+        }
+
+        if !isPressed && !admittedModifierKeyCodes.contains(event.keyCode) {
+            return
+        }
+        let didEmit = emitKey(
+            event,
+            pressed: isPressed,
+            priority: isPressed ? .regular : .stateEnding,
+            modifierFlags: flags
+        )
+        guard didEmit else { return }
+        if isPressed {
+            admittedModifierKeyCodes.insert(event.keyCode)
+        } else {
+            admittedModifierKeyCodes.remove(event.keyCode)
+        }
+    }
+
     private func configureSurface() {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
@@ -176,8 +284,24 @@ final class ViewerInputSurface: NSView {
         setAccessibilityValue(inputReadiness.label)
     }
 
+    private func emitButtonDown(_ event: NSEvent, button: UInt8) {
+        guard inputReady,
+              let window,
+              window.makeFirstResponder(self) else { return }
+        emit { try normalizer.focusIntent(timestampNanoseconds: now()) }
+        emitButton(event, button: button, pressed: true)
+    }
+
     private func emitButton(_ event: NSEvent, button: UInt8, pressed: Bool) {
-        emit {
+        emit(
+            priority: priority(
+                for: .pointerButton(button),
+                pressed: pressed
+            ),
+            stateTransition: pressed
+                ? .began(.pointerButton(button))
+                : .ended(.pointerButton(button))
+        ) {
             try normalizer.pointerButton(
                 at: point(for: event),
                 button: button,
@@ -187,28 +311,59 @@ final class ViewerInputSurface: NSView {
         }
     }
 
-    private func emitKey(_ event: NSEvent, pressed: Bool) {
-        emit {
+    @discardableResult
+    private func emitKey(
+        _ event: NSEvent,
+        pressed: Bool,
+        priority: InputEventPriority? = nil,
+        modifierFlags: NSEvent.ModifierFlags? = nil
+    ) -> Bool {
+        let flags = modifierFlags ?? event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let eventPriority = priority ?? self.priority(
+            for: .key(event.keyCode),
+            pressed: pressed
+        )
+        return emit(
+            priority: eventPriority,
+            stateTransition: pressed
+                ? .began(.key(event.keyCode))
+                : .ended(.key(event.keyCode))
+        ) {
             try normalizer.key(
                 keyCode: event.keyCode,
-                modifiers: UInt32(truncatingIfNeeded: event.modifierFlags.intersection(.deviceIndependentFlagsMask).rawValue),
+                modifiers: UInt32(truncatingIfNeeded: flags.rawValue),
                 pressed: pressed,
                 timestampNanoseconds: now()
             )
         }
     }
 
-    private func emit(_ make: () throws -> InputEventRecord) {
-        guard inputReady else { return }
+    @discardableResult
+    private func emit(
+        priority: InputEventPriority = .regular,
+        stateTransition: InputStateTransition? = nil,
+        throttleMovementWhenRateLimited: Bool = false,
+        _ make: () throws -> InputEventRecord
+    ) -> Bool {
+        guard inputReady else { return false }
         do {
             let timestamp = now()
-            try rateLimiter.admit(timestampNanoseconds: timestamp)
+            try rateLimiter.admit(timestampNanoseconds: timestamp, priority: priority)
             let record = try make()
+            if let stateTransition {
+                updateStateReservation(for: stateTransition)
+            }
             onInputEvent?(record)
+            return true
         } catch let error as InputCoreError {
+            if throttleMovementWhenRateLimited, error == .rateLimited {
+                return false
+            }
             onInputRejected?(error)
+            return false
         } catch {
             onInputRejected?(.invalidEvent)
+            return false
         }
     }
 
@@ -220,4 +375,101 @@ final class ViewerInputSurface: NSView {
     private func now() -> UInt64 {
         DispatchTime.now().uptimeNanoseconds
     }
+
+    private func releasePressedState() {
+        let activeKeys = inputState.activeKeys
+        let buttons = activeKeys.compactMap { stateKey -> UInt8? in
+            guard case let .pointerButton(button) = stateKey else { return nil }
+            return button
+        }.sorted()
+        let keyCodes = activeKeys.compactMap { stateKey -> UInt16? in
+            guard case let .key(keyCode) = stateKey else { return nil }
+            return keyCode
+        }.sorted()
+
+        for button in buttons {
+            _ = emit(
+                priority: .stateEnding,
+                stateTransition: .ended(.pointerButton(button))
+            ) {
+                try normalizer.pointerButton(
+                    at: InputPoint(x: 0, y: 0),
+                    button: button,
+                    pressed: false,
+                    timestampNanoseconds: now()
+                )
+            }
+        }
+
+        let regularKeys = keyCodes.filter { modifierFlag(for: $0) == nil }
+        let modifierKeys = keyCodes.filter { modifierFlag(for: $0) != nil }
+        for keyCode in regularKeys + modifierKeys {
+            _ = emit(
+                priority: .stateEnding,
+                stateTransition: .ended(.key(keyCode))
+            ) {
+                try normalizer.key(
+                    keyCode: keyCode,
+                    modifiers: 0,
+                    pressed: false,
+                    timestampNanoseconds: now()
+                )
+            }
+        }
+
+        inputState.reset()
+        beginModifierResynchronization()
+        admittedModifierKeyCodes.removeAll(keepingCapacity: false)
+        rateLimiter.reset()
+    }
+
+    private func beginModifierResynchronization() {
+        modifierKeyTracker.beginResynchronization()
+        let flags = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags.intersection(Self.resynchronizationModifierFlags).isEmpty {
+            _ = modifierKeyTracker.observeAggregateState(isPressed: false)
+        }
+    }
+
+    private func updateStateReservation(for transition: InputStateTransition) {
+        switch transition {
+        case let .began(stateKey):
+            guard inputState.apply(.began(stateKey)) else { return }
+            rateLimiter.reserveStateEndingEvent()
+        case let .ended(stateKey):
+            _ = inputState.apply(.ended(stateKey))
+        }
+    }
+
+    private func priority(
+        for stateKey: InputStateKey,
+        pressed: Bool
+    ) -> InputEventPriority {
+        guard !pressed, inputState.contains(stateKey) else {
+            return .regular
+        }
+        return .stateEnding
+    }
+
+    private func modifierFlag(for keyCode: UInt16) -> NSEvent.ModifierFlags? {
+        switch keyCode {
+        case 54, 55:
+            return .command
+        case 58, 61:
+            return .option
+        case 59, 62:
+            return .control
+        case 56, 60:
+            return .shift
+        default:
+            return nil
+        }
+    }
+
+    private static let resynchronizationModifierFlags: NSEvent.ModifierFlags = [
+        .command,
+        .option,
+        .control,
+        .shift
+    ]
 }

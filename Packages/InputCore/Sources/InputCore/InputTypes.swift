@@ -124,6 +124,112 @@ public struct InputEventLimits: Equatable, Sendable {
     }
 }
 
+public enum InputEventPriority: Equatable, Sendable {
+    case regular
+    case stateEnding
+}
+
+public enum InputStateKey: Hashable, Sendable {
+    case pointerButton(UInt8)
+    case key(UInt16)
+}
+
+public enum InputStateTransition: Sendable {
+    case began(InputStateKey)
+    case ended(InputStateKey)
+}
+
+/// Tracks only input state that has been admitted to the outgoing event
+/// stream. The Viewer uses this to keep a pressed state alive until its
+/// matching release has been emitted, including during a readiness transition.
+public struct InputStateTracker: Sendable {
+    public private(set) var activeKeys: Set<InputStateKey> = []
+
+    public init() {}
+
+    public var isEmpty: Bool { activeKeys.isEmpty }
+
+    public func contains(_ key: InputStateKey) -> Bool {
+        activeKeys.contains(key)
+    }
+
+    @discardableResult
+    public mutating func apply(_ transition: InputStateTransition) -> Bool {
+        switch transition {
+        case let .began(key):
+            return activeKeys.insert(key).inserted
+        case let .ended(key):
+            return activeKeys.remove(key) != nil
+        }
+    }
+
+    public mutating func reset() {
+        activeKeys.removeAll(keepingCapacity: false)
+    }
+}
+
+public enum ModifierKeyTransition: Equatable, Sendable {
+    case pressed
+    case released
+}
+
+/// Tracks physical modifier transitions from AppKit flagsChanged events.
+///
+/// AppKit's modifierFlags are an aggregate mask, so they cannot distinguish a
+/// left-key release while the right key of the same modifier is still held.
+/// The flagsChanged keyCode is therefore treated as a per-key toggle.  After
+/// focus loss, the aggregate mask is used only to find an all-released point;
+/// events observed while the physical state is unknown are discarded so a
+/// stale release cannot become a new press.
+public struct ModifierKeyTracker: Sendable {
+    public private(set) var pressedKeyCodes: Set<UInt16> = []
+    public private(set) var isResynchronizing = false
+
+    public init() {}
+
+    public mutating func beginResynchronization() {
+        pressedKeyCodes.removeAll(keepingCapacity: false)
+        isResynchronizing = true
+    }
+
+    /// Completes focus resynchronization once the aggregate modifier mask is
+    /// observed clear. The event that clears the mask is consumed.
+    @discardableResult
+    public mutating func observeAggregateState(isPressed: Bool) -> Bool {
+        guard isResynchronizing else { return true }
+        guard !isPressed else { return false }
+        pressedKeyCodes.removeAll(keepingCapacity: false)
+        isResynchronizing = false
+        return false
+    }
+
+    /// Applies one physical flagsChanged transition for the specified key.
+    /// Returns nil while the tracker is waiting for a safe resynchronization
+    /// point.
+    @discardableResult
+    public mutating func toggle(keyCode: UInt16) -> ModifierKeyTransition? {
+        guard !isResynchronizing else { return nil }
+        if pressedKeyCodes.insert(keyCode).inserted {
+            return .pressed
+        }
+        pressedKeyCodes.remove(keyCode)
+        return .released
+    }
+
+    @discardableResult
+    public mutating func reconcile(keyCode: UInt16, isPressed: Bool) -> Bool {
+        if isPressed {
+            return pressedKeyCodes.insert(keyCode).inserted
+        }
+        return pressedKeyCodes.remove(keyCode) != nil
+    }
+
+    public mutating func reset() {
+        pressedKeyCodes.removeAll(keepingCapacity: false)
+        isResynchronizing = false
+    }
+}
+
 /// A platform-neutral input record. Wire serialization remains in the app
 /// composition layer so InputCore does not depend on RemoteProtocol.
 public struct InputEventRecord: Equatable, Sendable {
@@ -240,6 +346,8 @@ public struct InputEventNormalizer: Sendable {
     public let limits: InputEventLimits
 
     private var nextSequence: UInt64 = 0
+    private var activeButtons: Set<UInt8> = []
+    private var lastValidCoordinate: NormalizedInputCoordinate?
 
     public init(
         contentRect: InputContentRect,
@@ -255,6 +363,10 @@ public struct InputEventNormalizer: Sendable {
         contentRect: InputContentRect,
         readiness: InputReadiness
     ) {
+        if readiness != self.readiness {
+            activeButtons.removeAll(keepingCapacity: false)
+            lastValidCoordinate = nil
+        }
         self.contentRect = contentRect
         self.readiness = readiness
     }
@@ -264,12 +376,14 @@ public struct InputEventNormalizer: Sendable {
         timestampNanoseconds: UInt64
     ) throws -> InputEventRecord {
         let coordinate = try coordinate(for: point)
-        return try makeRecord(
+        let record = try makeRecord(
             timestampNanoseconds: timestampNanoseconds,
             kind: .pointerMove,
             x: coordinate.x,
             y: coordinate.y
         )
+        lastValidCoordinate = coordinate
+        return record
     }
 
     public mutating func pointerButton(
@@ -278,15 +392,27 @@ public struct InputEventNormalizer: Sendable {
         pressed: Bool,
         timestampNanoseconds: UInt64
     ) throws -> InputEventRecord {
-        let coordinate = try coordinate(for: point)
-        return try makeRecord(
+        let normalizedCoordinate: NormalizedInputCoordinate
+        if !pressed, activeButtons.contains(button), let lastValidCoordinate {
+            normalizedCoordinate = lastValidCoordinate
+        } else {
+            normalizedCoordinate = try coordinate(for: point)
+        }
+        let record = try makeRecord(
             timestampNanoseconds: timestampNanoseconds,
             kind: .pointerButton,
-            x: coordinate.x,
-            y: coordinate.y,
+            x: normalizedCoordinate.x,
+            y: normalizedCoordinate.y,
             button: button,
             pressed: pressed
         )
+        if pressed {
+            activeButtons.insert(button)
+        } else {
+            activeButtons.remove(button)
+        }
+        lastValidCoordinate = normalizedCoordinate
+        return record
     }
 
     public mutating func scroll(
@@ -301,7 +427,7 @@ public struct InputEventNormalizer: Sendable {
               abs(deltaY) <= limits.maxScrollDelta else {
             throw InputCoreError.invalidEvent
         }
-        return try makeRecord(
+        let record = try makeRecord(
             timestampNanoseconds: timestampNanoseconds,
             kind: .scroll,
             x: coordinate.x,
@@ -309,6 +435,8 @@ public struct InputEventNormalizer: Sendable {
             deltaX: try boundedInt32(deltaX),
             deltaY: try boundedInt32(deltaY)
         )
+        lastValidCoordinate = coordinate
+        return record
     }
 
     public mutating func key(
@@ -407,12 +535,23 @@ public struct InputEventRateLimiter: Sendable {
 
     private var timestamps: [UInt64] = []
     private var lastTimestamp: UInt64?
+    private var reservedStateEndingEvents = 0
 
     public init(limits: InputEventLimits = .default) {
         self.limits = limits
     }
 
-    public mutating func admit(timestampNanoseconds: UInt64) throws {
+    /// Reserves one bounded safety-lane admission for a state-ending event
+    /// corresponding to an already admitted press.
+    public mutating func reserveStateEndingEvent() {
+        guard limits.maxEventsPerSecond > reservedStateEndingEvents else { return }
+        reservedStateEndingEvents += 1
+    }
+
+    public mutating func admit(
+        timestampNanoseconds: UInt64,
+        priority: InputEventPriority = .regular
+    ) throws {
         guard limits.maxEventsPerSecond > 0 else {
             throw InputCoreError.rateLimited
         }
@@ -423,6 +562,16 @@ public struct InputEventRateLimiter: Sendable {
         let window = UInt64(1_000_000_000)
         let cutoff = timestampNanoseconds > window ? timestampNanoseconds - window : 0
         timestamps.removeAll { $0 < cutoff }
+        if priority == .stateEnding, reservedStateEndingEvents > 0 {
+            reservedStateEndingEvents -= 1
+            if timestamps.count < limits.maxEventsPerSecond {
+                timestamps.append(timestampNanoseconds)
+            }
+            // A release closes state that was already admitted. When the
+            // regular event budget is full it uses the reserved safety lane
+            // without evicting an earlier event from the accounting window.
+            return
+        }
         guard timestamps.count < limits.maxEventsPerSecond else {
             throw InputCoreError.rateLimited
         }
@@ -432,5 +581,6 @@ public struct InputEventRateLimiter: Sendable {
     public mutating func reset() {
         timestamps.removeAll(keepingCapacity: false)
         lastTimestamp = nil
+        reservedStateEndingEvents = 0
     }
 }

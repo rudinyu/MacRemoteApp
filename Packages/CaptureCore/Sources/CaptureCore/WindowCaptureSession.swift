@@ -90,22 +90,37 @@ public actor WindowCaptureSession {
         generation &+= 1
         let sessionGeneration = generation
         let newEngine = engineFactory.makeEngine()
+        let relayTermination = CaptureRelayTermination()
         selectedWindow = window
         state = .starting(windowIdentifier: window.identifier, generation: sessionGeneration)
         engine = newEngine
-        startRelay(for: newEngine, generation: sessionGeneration)
+        startRelay(
+            for: newEngine,
+            generation: sessionGeneration,
+            termination: relayTermination
+        )
 
         do {
             try await newEngine.start(window: window, generation: sessionGeneration)
         } catch {
+            guard owns(engine: newEngine, windowIdentifier: window.identifier, generation: sessionGeneration) else {
+                await newEngine.stop()
+                throw error
+            }
             await fail(.captureFailed(String(describing: error)))
             throw error
         }
 
-        guard generation == sessionGeneration,
-              state == .starting(windowIdentifier: window.identifier, generation: sessionGeneration) else {
+        guard owns(engine: newEngine, windowIdentifier: window.identifier, generation: sessionGeneration) else {
+            if case let .failed(failure) = state {
+                throw CaptureCoreError.sessionFailed(failure)
+            }
             await newEngine.stop()
             return
+        }
+        if let failure = relayTermination.completeStartup() {
+            await fail(failure)
+            throw CaptureCoreError.sessionFailed(failure)
         }
         state = .capturing(windowIdentifier: window.identifier, generation: sessionGeneration)
         startMonitor(generation: sessionGeneration)
@@ -169,7 +184,8 @@ public actor WindowCaptureSession {
 
     private func startRelay(
         for engine: any WindowCaptureEngine,
-        generation: UInt64
+        generation: UInt64,
+        termination: CaptureRelayTermination
     ) {
         relayTask?.cancel()
         relayTask = Task { [weak self] in
@@ -177,9 +193,17 @@ public actor WindowCaptureSession {
                 for try await frame in engine.frames {
                     await self?.receive(frame, generation: generation)
                 }
-                await self?.engineEnded(generation: generation)
+                let failure = CaptureFailure.captureFailed("capture stream ended during startup")
+                termination.markTerminated(failure)
+                await self?.engineEnded(generation: generation, startupFailure: failure)
             } catch {
-                await self?.fail(.captureFailed(String(describing: error)))
+                let failure = CaptureFailure.captureFailed(String(describing: error))
+                termination.markTerminated(failure)
+                await self?.relayFailed(
+                    failure,
+                    engine: engine,
+                    generation: generation
+                )
             }
         }
     }
@@ -217,7 +241,17 @@ public actor WindowCaptureSession {
         _ = frameContinuation.yield(frame)
     }
 
-    private func engineEnded(generation: UInt64) {
+    private func engineEnded(
+        generation: UInt64,
+        startupFailure: CaptureFailure
+    ) async {
+        guard generation == self.generation else {
+            return
+        }
+        if case .starting = state {
+            await fail(startupFailure)
+            return
+        }
         guard case let .capturing(_, currentGeneration) = state,
               currentGeneration == generation else {
             return
@@ -230,6 +264,51 @@ public actor WindowCaptureSession {
         selectedWindow = nil
     }
 
+    private func relayFailed(
+        _ failure: CaptureFailure,
+        engine failedEngine: any WindowCaptureEngine,
+        generation failedGeneration: UInt64
+    ) async {
+        guard owns(engine: failedEngine, generation: failedGeneration) else {
+            await failedEngine.stop()
+            return
+        }
+        await fail(failure)
+    }
+
+    private func owns(
+        engine candidate: any WindowCaptureEngine,
+        windowIdentifier: UInt64,
+        generation candidateGeneration: UInt64
+    ) -> Bool {
+        guard generation == candidateGeneration,
+              state == .starting(
+                  windowIdentifier: windowIdentifier,
+                  generation: candidateGeneration
+              ),
+              let engine else {
+            return false
+        }
+        return engine === candidate
+    }
+
+    private func owns(
+        engine candidate: any WindowCaptureEngine,
+        generation candidateGeneration: UInt64
+    ) -> Bool {
+        guard generation == candidateGeneration,
+              let engine,
+              engine === candidate else {
+            return false
+        }
+        switch state {
+        case let .starting(_, currentGeneration), let .capturing(_, currentGeneration):
+            return currentGeneration == candidateGeneration
+        default:
+            return false
+        }
+    }
+
     private func fail(_ failure: CaptureFailure) async {
         frameGenerationGate.advance(to: generation &+ 1)
         monitorTask?.cancel()
@@ -238,8 +317,41 @@ public actor WindowCaptureSession {
         relayTask = nil
         let activeEngine = engine
         engine = nil
-        await activeEngine?.stop()
         state = .failed(failure)
+        await activeEngine?.stop()
         frameContinuation.finish(throwing: failure)
+    }
+}
+
+private final class CaptureRelayTermination: @unchecked Sendable {
+    private let lock = NSLock()
+    private var termination: CaptureFailure?
+    private var startupCompleted = false
+
+    /// Records relay termination and races with startup completion under one
+    /// lock. The first terminal result is retained for the startup caller.
+    @discardableResult
+    func markTerminated(_ failure: CaptureFailure) -> Bool {
+        lock.withLock {
+            if termination == nil {
+                termination = failure
+            }
+            return startupCompleted
+        }
+    }
+
+    /// Claims the transition from starting to capturing. A relay that won the
+    /// race first returns its exact failure instead, so start() cannot report a
+    /// live capture for an already terminated stream. Once this claim wins, a
+    /// later relay termination is a post-start stop rather than a stale
+    /// failure of the startup operation.
+    func completeStartup() -> CaptureFailure? {
+        lock.withLock {
+            if let termination {
+                return termination
+            }
+            startupCompleted = true
+            return nil
+        }
     }
 }

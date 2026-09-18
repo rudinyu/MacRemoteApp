@@ -37,21 +37,6 @@ final class ViewerInputTransport {
             )
         }
 
-        let snapshot = await session.snapshot()
-        guard snapshot.authorized,
-              snapshot.authorizedWindowGeneration == record.windowGeneration else {
-            throw ViewerInputTransportError.inputNotReady
-        }
-        let requiredCapability: Capability = switch record.kind {
-        case .keyDown, .keyUp:
-            .keyboardInput
-        case .pointerMove, .pointerButton, .scroll, .focusIntent:
-            .mouseInput
-        }
-        guard snapshot.authorizedCapabilities.contains(requiredCapability) else {
-            throw ViewerInputTransportError.capabilityUnavailable
-        }
-
         let message = try Self.message(for: record)
         // Keep this explicit so a future schema extension cannot silently turn
         // an input event into an oversized control payload.
@@ -62,7 +47,30 @@ final class ViewerInputTransport {
                 maximum: limits.maxEncodedPayloadBytes
             )
         }
-        try await session.send(.inputEvent(message))
+        let admission: SessionInputAdmissionToken
+        do {
+            admission = try await session.makeInputAdmission(for: message)
+        } catch let error as SessionError {
+            switch error {
+            case .unauthorizedMessage(.inputEvent):
+                let snapshot = await session.snapshot()
+                if snapshot.authorized,
+                   snapshot.authorizedWindowGeneration == record.windowGeneration {
+                    throw ViewerInputTransportError.capabilityUnavailable
+                }
+                throw ViewerInputTransportError.inputNotReady
+            case .authorizationChanged, .reconnectRequired:
+                throw ViewerInputTransportError.inputNotReady
+            default:
+                throw error
+            }
+        }
+
+        do {
+            try await session.sendInput(message, using: admission)
+        } catch SessionError.authorizationChanged, SessionError.reconnectRequired {
+            throw ViewerInputTransportError.inputNotReady
+        }
     }
 
     private static func message(for record: InputEventRecord) throws -> InputEventMessage {

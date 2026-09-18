@@ -49,6 +49,149 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertEqual(stoppedSnapshot.state, .stopped(.cancelled))
     }
 
+    func testSupersededStartFailureDoesNotFailNewerGeneration() async throws {
+        let window = makeWindow(identifier: 43)
+        let provider = FakeWindowProvider(windows: [window], permission: .authorized)
+        let firstGate = TestAsyncSignal()
+        let firstEngine = GatedCaptureEngine(
+            startGate: firstGate,
+            startFailure: .captureFailed("superseded start")
+        )
+        let secondEngine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        let factory = SequencedCaptureEngineFactory(engines: [firstEngine, secondEngine])
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: factory,
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 0)
+        )
+
+        let firstStart = Task { () -> Bool in
+            do {
+                try await session.start(windowIdentifier: window.identifier)
+                return false
+            } catch {
+                return true
+            }
+        }
+        await firstEngine.waitUntilStartEntered()
+
+        let secondStart = Task { () -> Bool in
+            do {
+                try await session.start(windowIdentifier: window.identifier)
+                return true
+            } catch {
+                return false
+            }
+        }
+        let secondStartSucceeded = await secondStart.value
+        XCTAssertTrue(secondStartSucceeded)
+        let newerSnapshot = await session.snapshot()
+        XCTAssertEqual(
+            newerSnapshot.state,
+            .capturing(windowIdentifier: window.identifier, generation: 2)
+        )
+
+        await firstGate.signal()
+        let firstStartFailed = await firstStart.value
+        XCTAssertTrue(firstStartFailed)
+        let finalSnapshot = await session.snapshot()
+        XCTAssertEqual(
+            finalSnapshot.state,
+            .capturing(windowIdentifier: window.identifier, generation: 2)
+        )
+        XCTAssertEqual(secondEngine.stopCount(), 0)
+        XCTAssertGreaterThanOrEqual(firstEngine.stopCount(), 1)
+    }
+
+    func testRelayFailureDuringEngineStartupFailsStart() async throws {
+        let window = makeWindow(identifier: 44)
+        let provider = FakeWindowProvider(windows: [window], permission: .authorized)
+        let startGate = TestAsyncSignal()
+        let engine = GatedCaptureEngine(startGate: startGate)
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: FakeCaptureEngineFactory(engine: engine),
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 0)
+        )
+
+        let startTask = Task { () -> Result<Void, CaptureCoreError> in
+            do {
+                try await session.start(windowIdentifier: window.identifier)
+                return .success(())
+            } catch let error as CaptureCoreError {
+                return .failure(error)
+            } catch {
+                return .failure(.captureFailed(String(describing: error)))
+            }
+        }
+        await engine.waitUntilStartEntered()
+        engine.failFrames(CaptureCoreError.captureFailed("relay failed"))
+        await engine.waitUntilStopped()
+
+        let failedSnapshot = await session.snapshot()
+        if case let .failed(failure) = failedSnapshot.state {
+            XCTAssertEqual(failure, CaptureFailure.captureFailed("capture failed: relay failed"))
+        } else {
+            XCTFail("relay failure must invalidate the starting session")
+        }
+
+        await startGate.signal()
+        let startResult = await startTask.value
+        switch startResult {
+        case .success:
+            XCTFail("start must not succeed after the relay fails")
+        case let .failure(error):
+            XCTAssertEqual(
+                error,
+                .sessionFailed(.captureFailed("capture failed: relay failed"))
+            )
+        }
+    }
+
+    func testNormalRelayEOFDuringEngineStartupFailsStart() async throws {
+        let window = makeWindow(identifier: 45)
+        let provider = FakeWindowProvider(windows: [window], permission: .authorized)
+        let startGate = TestAsyncSignal()
+        let engine = GatedCaptureEngine(startGate: startGate)
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: FakeCaptureEngineFactory(engine: engine),
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 0)
+        )
+
+        let startTask = Task { () -> Result<Void, CaptureCoreError> in
+            do {
+                try await session.start(windowIdentifier: window.identifier)
+                return .success(())
+            } catch let error as CaptureCoreError {
+                return .failure(error)
+            } catch {
+                return .failure(.captureFailed(String(describing: error)))
+            }
+        }
+        await engine.waitUntilStartEntered()
+        engine.finishFrames()
+        await engine.waitUntilStopped()
+
+        let failedSnapshot = await session.snapshot()
+        XCTAssertEqual(
+            failedSnapshot.state,
+            .failed(.captureFailed("capture stream ended during startup"))
+        )
+
+        await startGate.signal()
+        let startResult = await startTask.value
+        switch startResult {
+        case .success:
+            XCTFail("start must not succeed after the relay ends during startup")
+        case let .failure(error):
+            XCTAssertEqual(
+                error,
+                .sessionFailed(.captureFailed("capture stream ended during startup"))
+            )
+        }
+    }
+
     func testPermissionLossStopsCaptureBeforeAnyFurtherFrame() async throws {
         let window = makeWindow(identifier: 7)
         let provider = FakeWindowProvider(windows: [window], permission: .authorized)
@@ -281,9 +424,9 @@ private actor FakeWindowProvider: WindowDiscoveryProvider {
 }
 
 private final class FakeCaptureEngineFactory: WindowCaptureEngineFactory, @unchecked Sendable {
-    private let engine: FakeCaptureEngine
+    private let engine: any WindowCaptureEngine
 
-    init(engine: FakeCaptureEngine) {
+    init(engine: any WindowCaptureEngine) {
         self.engine = engine
     }
 
@@ -323,6 +466,10 @@ private final class FakeCaptureEngine: WindowCaptureEngine, @unchecked Sendable 
         continuation.finish()
     }
 
+    func failFrames(_ error: Error) {
+        continuation.finish(throwing: error)
+    }
+
     func emit(_ frame: CapturedFrame) {
         _ = continuation.yield(frame)
     }
@@ -333,6 +480,105 @@ private final class FakeCaptureEngine: WindowCaptureEngine, @unchecked Sendable 
 
     func startedWindow() -> CaptureWindow? {
         lock.withLock { startedWindowValue }
+    }
+
+    func stopCount() -> Int {
+        lock.withLock { stopCountValue }
+    }
+}
+
+private actor TestAsyncSignal {
+    private var signaled: Bool
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(signaled: Bool = false) {
+        self.signaled = signaled
+    }
+
+    func wait() async {
+        if signaled { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func signal() {
+        guard !signaled else { return }
+        signaled = true
+        let pending = waiters
+        waiters.removeAll(keepingCapacity: false)
+        for waiter in pending {
+            waiter.resume()
+        }
+    }
+}
+
+private final class SequencedCaptureEngineFactory: WindowCaptureEngineFactory, @unchecked Sendable {
+    private let lock = NSLock()
+    private var engines: [GatedCaptureEngine]
+
+    init(engines: [GatedCaptureEngine]) {
+        self.engines = engines
+    }
+
+    func makeEngine() -> any WindowCaptureEngine {
+        lock.withLock { engines.removeFirst() }
+    }
+}
+
+private final class GatedCaptureEngine: WindowCaptureEngine, @unchecked Sendable {
+    let frames: AsyncThrowingStream<CapturedFrame, Error>
+
+    private let continuation: AsyncThrowingStream<CapturedFrame, Error>.Continuation
+    private let startGate: TestAsyncSignal
+    private let startEntered = TestAsyncSignal()
+    private let stopped = TestAsyncSignal()
+    private let startFailure: CaptureCoreError?
+    private let lock = NSLock()
+    private var stopCountValue = 0
+
+    init(startGate: TestAsyncSignal, startFailure: CaptureCoreError? = nil) {
+        let output = AsyncThrowingStream<CapturedFrame, Error>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        self.frames = output.stream
+        self.continuation = output.continuation
+        self.startGate = startGate
+        self.startFailure = startFailure
+    }
+
+    func start(window: CaptureWindow, generation: UInt64) async throws {
+        _ = window
+        _ = generation
+        await startEntered.signal()
+        await startGate.wait()
+        if let startFailure {
+            throw startFailure
+        }
+    }
+
+    func stop() async {
+        lock.withLock {
+            stopCountValue += 1
+        }
+        continuation.finish()
+        await stopped.signal()
+    }
+
+    func failFrames(_ error: Error) {
+        continuation.finish(throwing: error)
+    }
+
+    func finishFrames() {
+        continuation.finish()
+    }
+
+    func waitUntilStartEntered() async {
+        await startEntered.wait()
+    }
+
+    func waitUntilStopped() async {
+        await stopped.wait()
     }
 
     func stopCount() -> Int {

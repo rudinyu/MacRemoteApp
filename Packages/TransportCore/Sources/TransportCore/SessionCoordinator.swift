@@ -17,6 +17,7 @@ public enum SessionError: Error, Equatable, Sendable, CustomStringConvertible {
     case heartbeatTimeout
     case reconnectRequired
     case authorizationChanged
+    case incomingMessageBackpressure(Channel)
     case videoBoundsExceeded
     case transportFailure(String)
 
@@ -39,6 +40,9 @@ public enum SessionError: Error, Equatable, Sendable, CustomStringConvertible {
         case .heartbeatTimeout: return "heartbeat timed out"
         case .reconnectRequired: return "session must reconnect before authorization"
         case .authorizationChanged: return "session authorization changed while sending"
+        case let .incomingMessageBackpressure(channel):
+            let channelName = channel == .control ? "control" : "media"
+            return "incoming \(channelName) message delivery is backpressured"
         case .videoBoundsExceeded: return "video parameters exceed negotiated bounds"
         case let .transportFailure(detail): return "transport failure: \(detail)"
         }
@@ -99,6 +103,7 @@ public struct SessionSnapshot: Equatable, Sendable {
     public let authorizedWindowGeneration: UInt64?
     public let authorizedCapabilities: Set<Capability>
     public let reconnectGeneration: UInt64
+    public let authorizationGeneration: UInt64
     public let lastHeartbeatAt: Date?
     public let negotiatedMaxVideoWidth: UInt32?
     public let negotiatedMaxVideoHeight: UInt32?
@@ -115,7 +120,8 @@ public struct SessionSnapshot: Equatable, Sendable {
         lastHeartbeatAt: Date?,
         negotiatedMaxVideoWidth: UInt32? = nil,
         negotiatedMaxVideoHeight: UInt32? = nil,
-        negotiatedMaxFrameRate: UInt16? = nil
+        negotiatedMaxFrameRate: UInt16? = nil,
+        authorizationGeneration: UInt64 = 0
     ) {
         self.state = state
         self.peerIdentity = peerIdentity
@@ -124,6 +130,7 @@ public struct SessionSnapshot: Equatable, Sendable {
         self.authorizedWindowGeneration = authorizedWindowGeneration
         self.authorizedCapabilities = authorizedCapabilities
         self.reconnectGeneration = reconnectGeneration
+        self.authorizationGeneration = authorizationGeneration
         self.lastHeartbeatAt = lastHeartbeatAt
         self.negotiatedMaxVideoWidth = negotiatedMaxVideoWidth
         self.negotiatedMaxVideoHeight = negotiatedMaxVideoHeight
@@ -131,7 +138,24 @@ public struct SessionSnapshot: Equatable, Sendable {
     }
 }
 
+/// An admission issued for one authenticated input epoch.
+///
+/// The token is intentionally opaque to callers.  A Viewer may prepare an
+/// input message while the actor is reentrant, but the token must still match
+/// the receive, transport, authorization, window, and capability generations
+/// when the message is admitted to the wire.
+public struct SessionInputAdmissionToken: Equatable, Sendable {
+    fileprivate let receiveGeneration: UInt64
+    fileprivate let reconnectGeneration: UInt64
+    fileprivate let authorizationGeneration: UInt64
+    fileprivate let windowGeneration: UInt64
+    fileprivate let capability: Capability
+}
+
 public actor SessionCoordinator {
+    private static let incomingControlMessageCapacity = 64
+    private static let incomingMediaMessageCapacity = 3
+
     private static let protectedMessageTypes: Set<MessageType> = [
         .windowList,
         .windowSelection,
@@ -250,8 +274,8 @@ public actor SessionCoordinator {
     private var heartbeatTask: Task<Void, Never>?
     private var handshakeTask: Task<Void, Never>?
 
-    public nonisolated let incomingMessages: AsyncThrowingStream<MessagePayload, Error>
-    private let incomingMessageContinuation: AsyncThrowingStream<MessagePayload, Error>.Continuation
+    public nonisolated let incomingMessages: MessageStream
+    private let incomingMessageStorage: MessageStreamStorage
 
     public init(
         configuration: SessionConfiguration,
@@ -261,18 +285,19 @@ public actor SessionCoordinator {
         self.configuration = configuration
         self.transport = transport
         self.pairingCoordinator = pairingCoordinator
-        let stream = AsyncThrowingStream<MessagePayload, Error>.makeStream(
-            bufferingPolicy: .bufferingNewest(64)
+        let stream = try! MessageStream.makeBounded(
+            maxControlMessages: Self.incomingControlMessageCapacity,
+            maxMediaMessages: Self.incomingMediaMessageCapacity
         )
         self.incomingMessages = stream.stream
-        self.incomingMessageContinuation = stream.continuation
+        self.incomingMessageStorage = stream.storage
     }
 
     deinit {
         receiveTask?.cancel()
         heartbeatTask?.cancel()
         handshakeTask?.cancel()
-        incomingMessageContinuation.finish()
+        incomingMessageStorage.finish()
     }
 
     public func snapshot() -> SessionSnapshot {
@@ -287,7 +312,8 @@ public actor SessionCoordinator {
             lastHeartbeatAt: lastHeartbeatAt,
             negotiatedMaxVideoWidth: negotiatedMaxVideoWidth,
             negotiatedMaxVideoHeight: negotiatedMaxVideoHeight,
-            negotiatedMaxFrameRate: negotiatedMaxFrameRate
+            negotiatedMaxFrameRate: negotiatedMaxFrameRate,
+            authorizationGeneration: authorizationGeneration
         )
     }
 
@@ -296,9 +322,27 @@ public actor SessionCoordinator {
             throw SessionError.invalidState(state)
         }
 
+        let startReconnectGeneration = reconnectGeneration
+        let startReceiveGeneration = receiveGeneration
+        let startAuthorizationGeneration = authorizationGeneration
+
         do {
             try await transport.start()
+            guard isCurrent(
+                receiveGeneration: startReceiveGeneration,
+                reconnectGeneration: startReconnectGeneration,
+                authorizationGeneration: startAuthorizationGeneration
+            ) else {
+                throw SessionError.reconnectRequired
+            }
             let authentication = await transport.authentication()
+            guard isCurrent(
+                receiveGeneration: startReceiveGeneration,
+                reconnectGeneration: startReconnectGeneration,
+                authorizationGeneration: startAuthorizationGeneration
+            ) else {
+                throw SessionError.reconnectRequired
+            }
             switch authentication {
             case .trusted(let identity):
                 peerIdentity = identity
@@ -310,7 +354,12 @@ public actor SessionCoordinator {
                 peerIdentity = identity
                 state = .pairingRequired
                 if configuration.role == .host {
-                    try await sendPairingChallenge(to: identity)
+                    try await sendPairingChallenge(
+                        to: identity,
+                        receiveGeneration: startReceiveGeneration,
+                        reconnectGeneration: startReconnectGeneration,
+                        authorizationGeneration: startAuthorizationGeneration
+                    )
                 }
             case .pending:
                 throw SessionError.transportFailure("TLS authentication is still pending")
@@ -318,15 +367,36 @@ public actor SessionCoordinator {
                 throw SessionError.transportFailure("TLS peer authentication was rejected")
             }
 
-            try await sendHelloIfNeeded()
+            try await sendHelloIfNeeded(
+                receiveGeneration: startReceiveGeneration,
+                reconnectGeneration: startReconnectGeneration,
+                authorizationGeneration: startAuthorizationGeneration
+            )
+            guard isCurrent(
+                receiveGeneration: startReceiveGeneration,
+                reconnectGeneration: startReconnectGeneration,
+                authorizationGeneration: startAuthorizationGeneration
+            ) else {
+                throw SessionError.reconnectRequired
+            }
             startReceiving()
             startHandshakeDeadline()
         } catch let error as SessionError {
-            await fail(error)
+            await fail(
+                error,
+                expectedReceiveGeneration: startReceiveGeneration,
+                expectedReconnectGeneration: startReconnectGeneration,
+                expectedAuthorizationGeneration: startAuthorizationGeneration
+            )
             throw error
         } catch {
             let sessionError = SessionError.transportFailure(String(describing: error))
-            await fail(sessionError)
+            await fail(
+                sessionError,
+                expectedReceiveGeneration: startReceiveGeneration,
+                expectedReconnectGeneration: startReconnectGeneration,
+                expectedAuthorizationGeneration: startAuthorizationGeneration
+            )
             throw sessionError
         }
     }
@@ -342,10 +412,16 @@ public actor SessionCoordinator {
             throw SessionError.pairingFailed
         }
         let sessionGeneration = receiveGeneration
+        let sessionReconnectGeneration = reconnectGeneration
+        let sessionAuthorizationGeneration = authorizationGeneration
         guard let challenge = await pairingCoordinator.pendingChallenge() else {
             throw SessionError.pairingFailed
         }
-        guard sessionGeneration == receiveGeneration else {
+        guard isCurrent(
+            receiveGeneration: sessionGeneration,
+            reconnectGeneration: sessionReconnectGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else {
             throw SessionError.reconnectRequired
         }
 
@@ -357,18 +433,36 @@ public actor SessionCoordinator {
                 accepted: false,
                 displayName: displayName
             )
-            guard sessionGeneration == receiveGeneration else {
+            guard isCurrent(
+                receiveGeneration: sessionGeneration,
+                reconnectGeneration: sessionReconnectGeneration,
+                authorizationGeneration: sessionAuthorizationGeneration
+            ) else {
                 throw SessionError.reconnectRequired
             }
             let confirmation = PairingConfirmationMessage(
                 challengeID: challenge.challengeID,
                 accepted: false
             )
-            _ = try? await sendUnrestricted(.pairingConfirmation(confirmation))
-            state = .failed
-            authorized = false
-            await pairingCoordinator.abortPendingPairing()
-            await fail(.pairingDenied)
+            _ = try? await sendUnrestricted(
+                .pairingConfirmation(confirmation),
+                expectedReceiveGeneration: sessionGeneration,
+                expectedReconnectGeneration: sessionReconnectGeneration,
+                expectedAuthorizationGeneration: sessionAuthorizationGeneration
+            )
+            guard isCurrent(
+                receiveGeneration: sessionGeneration,
+                reconnectGeneration: sessionReconnectGeneration,
+                authorizationGeneration: sessionAuthorizationGeneration
+            ) else {
+                throw SessionError.reconnectRequired
+            }
+            await fail(
+                .pairingDenied,
+                expectedReceiveGeneration: sessionGeneration,
+                expectedReconnectGeneration: sessionReconnectGeneration,
+                expectedAuthorizationGeneration: sessionAuthorizationGeneration
+            )
             throw SessionError.pairingDenied
         }
 
@@ -381,13 +475,26 @@ public actor SessionCoordinator {
                 displayName: displayName
             )
         } catch {
-            guard sessionGeneration == receiveGeneration else {
+            guard isCurrent(
+                receiveGeneration: sessionGeneration,
+                reconnectGeneration: sessionReconnectGeneration,
+                authorizationGeneration: sessionAuthorizationGeneration
+            ) else {
                 throw SessionError.reconnectRequired
             }
-            await fail(.pairingFailed)
+            await fail(
+                .pairingFailed,
+                expectedReceiveGeneration: sessionGeneration,
+                expectedReconnectGeneration: sessionReconnectGeneration,
+                expectedAuthorizationGeneration: sessionAuthorizationGeneration
+            )
             throw SessionError.pairingFailed
         }
-        guard sessionGeneration == receiveGeneration else {
+        guard isCurrent(
+            receiveGeneration: sessionGeneration,
+            reconnectGeneration: sessionReconnectGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else {
             throw SessionError.reconnectRequired
         }
         let confirmation = PairingConfirmationMessage(
@@ -396,16 +503,45 @@ public actor SessionCoordinator {
             confirmationCode: confirmationCode
         )
         do {
-            _ = try await sendUnrestricted(.pairingConfirmation(confirmation))
+            _ = try await sendUnrestricted(
+                .pairingConfirmation(confirmation),
+                expectedReceiveGeneration: sessionGeneration,
+                expectedReconnectGeneration: sessionReconnectGeneration,
+                expectedAuthorizationGeneration: sessionAuthorizationGeneration
+            )
         } catch {
-            guard sessionGeneration == receiveGeneration else {
+            guard isCurrent(
+                receiveGeneration: sessionGeneration,
+                reconnectGeneration: sessionReconnectGeneration,
+                authorizationGeneration: sessionAuthorizationGeneration
+            ) else {
                 throw SessionError.reconnectRequired
             }
-            await fail(.transportFailure(String(describing: error)))
+            await fail(
+                .transportFailure(String(describing: error)),
+                expectedReceiveGeneration: sessionGeneration,
+                expectedReconnectGeneration: sessionReconnectGeneration,
+                expectedAuthorizationGeneration: sessionAuthorizationGeneration
+            )
             throw error
         }
-        try await synchronizePairingState(generation: sessionGeneration)
-        try await sendCapabilitiesIfNeeded()
+        try await synchronizePairingState(
+            generation: sessionGeneration,
+            reconnectGeneration: sessionReconnectGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        )
+        try await sendCapabilitiesIfNeeded(
+            receiveGeneration: sessionGeneration,
+            reconnectGeneration: sessionReconnectGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        )
+        guard isCurrent(
+            receiveGeneration: sessionGeneration,
+            reconnectGeneration: sessionReconnectGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else {
+            throw SessionError.reconnectRequired
+        }
     }
 
     public func authorize(
@@ -419,6 +555,8 @@ public actor SessionCoordinator {
             throw SessionError.invalidState(state)
         }
         let sessionGeneration = reconnectGeneration
+        let sessionReceiveGeneration = receiveGeneration
+        let sessionAuthorizationGeneration = authorizationGeneration
         let requested = capabilities ?? negotiatedCapabilities
         guard requested.isSubset(of: negotiatedCapabilities) else {
             let missing = requested.subtracting(negotiatedCapabilities).sorted { $0.rawValue < $1.rawValue }
@@ -440,20 +578,36 @@ public actor SessionCoordinator {
         // new authorization epoch begins.
         await outboundMutex.acquire()
         defer { outboundMutex.release() }
-        let operationAuthorizationGeneration = authorizationGeneration &+ 1
+        guard isCurrent(
+            receiveGeneration: sessionReceiveGeneration,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else {
+            throw SessionError.reconnectRequired
+        }
+        let operationAuthorizationGeneration = sessionAuthorizationGeneration &+ 1
         authorizationGeneration = operationAuthorizationGeneration
         clearAuthorization()
         await transport.invalidateProtectedMessages()
-        guard sessionGeneration == reconnectGeneration else {
+        guard isCurrent(
+            receiveGeneration: sessionReceiveGeneration,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: operationAuthorizationGeneration
+        ) else {
             throw SessionError.reconnectRequired
         }
         _ = try await sendUnrestrictedAfterAdmission(
             .sessionAuthorize(authorization),
             flags: [],
             operationGeneration: sessionGeneration,
+            operationReceiveGeneration: sessionReceiveGeneration,
             operationAuthorizationGeneration: operationAuthorizationGeneration
         )
-        guard sessionGeneration == reconnectGeneration else {
+        guard isCurrent(
+            receiveGeneration: sessionReceiveGeneration,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: operationAuthorizationGeneration
+        ) else {
             throw SessionError.reconnectRequired
         }
         guard operationAuthorizationGeneration == authorizationGeneration else {
@@ -469,26 +623,47 @@ public actor SessionCoordinator {
         guard configuration.role == .host else {
             throw SessionError.invalidState(state)
         }
+        let sessionGeneration = reconnectGeneration
+        let sessionReceiveGeneration = receiveGeneration
+        let sessionAuthorizationGeneration = authorizationGeneration
         await outboundMutex.acquire()
-        authorizationGeneration &+= 1
-        authorized = false
-        authorizedWindowGeneration = nil
-        authorizedCapabilities.removeAll()
-        if state == .windowSelectionAuthorized {
-            state = .capabilitiesNegotiated
+        guard isCurrent(
+            receiveGeneration: sessionReceiveGeneration,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else {
+            outboundMutex.release()
+            throw SessionError.reconnectRequired
         }
+        authorizationGeneration &+= 1
+        let operationAuthorizationGeneration = authorizationGeneration
+        clearAuthorization()
         await transport.invalidateProtectedMessages()
+        guard isCurrent(
+            receiveGeneration: sessionReceiveGeneration,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: operationAuthorizationGeneration
+        ) else {
+            outboundMutex.release()
+            throw SessionError.reconnectRequired
+        }
         let message = SessionAuthorizeMessage(authorized: false, capabilities: [])
         do {
             _ = try await sendUnrestrictedAfterAdmission(
                 .sessionAuthorize(message),
                 flags: [],
-                operationGeneration: reconnectGeneration,
-                operationAuthorizationGeneration: authorizationGeneration
+                operationGeneration: sessionGeneration,
+                operationReceiveGeneration: sessionReceiveGeneration,
+                operationAuthorizationGeneration: operationAuthorizationGeneration
             )
         } catch {
             outboundMutex.release()
-            await fail(.transportFailure(String(describing: error)))
+            await fail(
+                .transportFailure(String(describing: error)),
+                expectedReceiveGeneration: sessionReceiveGeneration,
+                expectedReconnectGeneration: sessionGeneration,
+                expectedAuthorizationGeneration: operationAuthorizationGeneration
+            )
             throw error
         }
         outboundMutex.release()
@@ -499,14 +674,72 @@ public actor SessionCoordinator {
         _ = try await sendUnrestricted(payload, flags: flags)
     }
 
+    /// Issues an opaque admission for a Viewer input message.  The caller may
+    /// do local encoding or UI work after this returns, but the token is
+    /// single-epoch: a reconnect or authorization transition invalidates it.
+    public func makeInputAdmission(
+        for input: InputEventMessage
+    ) throws -> SessionInputAdmissionToken {
+        let payload = MessagePayload.inputEvent(input)
+        try validateMessageDirection(for: payload.messageType, incoming: false)
+        try validateAuthorization(for: payload)
+        guard let capability = requiredCapabilities(for: payload).first else {
+            throw SessionError.unauthorizedMessage(.inputEvent)
+        }
+        return SessionInputAdmissionToken(
+            receiveGeneration: receiveGeneration,
+            reconnectGeneration: reconnectGeneration,
+            authorizationGeneration: authorizationGeneration,
+            windowGeneration: input.windowGeneration,
+            capability: capability
+        )
+    }
+
+    /// Admits and sends one Viewer input event under the same outbound mutex.
+    /// The authorization and reconnect generations are checked both before
+    /// admission and after the transport await, so a token issued for an old
+    /// authorization epoch cannot enter a later epoch with the same window
+    /// generation.
+    public func sendInput(
+        _ input: InputEventMessage,
+        using admission: SessionInputAdmissionToken
+    ) async throws {
+        let payload = MessagePayload.inputEvent(input)
+        try validateMessageDirection(for: payload.messageType, incoming: false)
+        guard admission.windowGeneration == input.windowGeneration,
+              admission.capability == requiredCapabilities(for: payload).first else {
+            throw SessionError.authorizationChanged
+        }
+
+        await outboundMutex.acquire()
+        defer { outboundMutex.release() }
+        guard admission.receiveGeneration == receiveGeneration,
+              admission.reconnectGeneration == reconnectGeneration else {
+            throw SessionError.reconnectRequired
+        }
+        guard admission.authorizationGeneration == authorizationGeneration else {
+            throw SessionError.authorizationChanged
+        }
+        try validateAuthorization(for: payload)
+        _ = try await sendUnrestrictedAfterAdmission(
+            payload,
+            flags: [],
+            operationGeneration: admission.reconnectGeneration,
+            operationReceiveGeneration: admission.receiveGeneration,
+            operationAuthorizationGeneration: admission.authorizationGeneration
+        )
+    }
+
     public func stop(reason: CloseReason = .normal) async {
         guard state != .stopping else { return }
         await outboundMutex.acquire()
         defer { outboundMutex.release() }
         state = .stopping
+        incomingMessageStorage.finish()
         authorizationGeneration &+= 1
         clearAuthorization()
         receiveGeneration &+= 1
+        let closeReceiveGeneration = receiveGeneration
         heartbeatGeneration &+= 1
         heartbeatTask?.cancel()
         handshakeTask?.cancel()
@@ -521,6 +754,7 @@ public actor SessionCoordinator {
             .close(close),
             flags: [],
             operationGeneration: reconnectGeneration,
+            operationReceiveGeneration: closeReceiveGeneration,
             operationAuthorizationGeneration: authorizationGeneration
         )
         await transport.close()
@@ -543,6 +777,7 @@ public actor SessionCoordinator {
         await pairingCoordinator?.abortPendingPairing()
         await transport.invalidateProtectedMessages()
         await transport.close()
+        incomingMessageStorage.reset()
         transport = newTransport
         peerIdentity = nil
         peerHello = nil
@@ -561,36 +796,101 @@ public actor SessionCoordinator {
         try await start()
     }
 
-    private func sendPairingChallenge(to identity: PeerIdentity) async throws {
+    private func sendPairingChallenge(
+        to identity: PeerIdentity,
+        receiveGeneration expectedReceiveGeneration: UInt64,
+        reconnectGeneration expectedReconnectGeneration: UInt64,
+        authorizationGeneration expectedAuthorizationGeneration: UInt64
+    ) async throws {
         guard let pairingCoordinator else { return }
+        guard isCurrent(
+            receiveGeneration: expectedReceiveGeneration,
+            reconnectGeneration: expectedReconnectGeneration,
+            authorizationGeneration: expectedAuthorizationGeneration
+        ) else {
+            throw SessionError.reconnectRequired
+        }
         let challengeID = UInt64.random(in: 1 ... UInt64.max)
         let challenge = try await pairingCoordinator.beginSessionPairing(
             with: identity,
             challengeID: challengeID
         )
+        guard isCurrent(
+            receiveGeneration: expectedReceiveGeneration,
+            reconnectGeneration: expectedReconnectGeneration,
+            authorizationGeneration: expectedAuthorizationGeneration
+        ) else {
+            throw SessionError.reconnectRequired
+        }
         let message = PairingChallengeMessage(
             challengeID: challenge.challengeID,
             confirmationCode: challenge.confirmationCode
         )
-        _ = try await sendUnrestricted(.pairingChallenge(message))
+        _ = try await sendUnrestricted(
+            .pairingChallenge(message),
+            expectedReceiveGeneration: expectedReceiveGeneration,
+            expectedReconnectGeneration: expectedReconnectGeneration,
+            expectedAuthorizationGeneration: expectedAuthorizationGeneration
+        )
+        guard isCurrent(
+            receiveGeneration: expectedReceiveGeneration,
+            reconnectGeneration: expectedReconnectGeneration,
+            authorizationGeneration: expectedAuthorizationGeneration
+        ) else {
+            throw SessionError.reconnectRequired
+        }
     }
 
-    private func sendHelloIfNeeded() async throws {
+    private func sendHelloIfNeeded(
+        receiveGeneration expectedReceiveGeneration: UInt64,
+        reconnectGeneration expectedReconnectGeneration: UInt64,
+        authorizationGeneration expectedAuthorizationGeneration: UInt64
+    ) async throws {
         guard !helloSent else { return }
+        guard isCurrent(
+            receiveGeneration: expectedReceiveGeneration,
+            reconnectGeneration: expectedReconnectGeneration,
+            authorizationGeneration: expectedAuthorizationGeneration
+        ) else {
+            throw SessionError.reconnectRequired
+        }
         let hello = HelloMessage(
             protocolVersion: .current,
             role: configuration.role,
             implementationIdentifier: configuration.implementationIdentifier,
             limits: configuration.limits
         )
-        _ = try await sendUnrestricted(.hello(hello))
+        _ = try await sendUnrestricted(
+            .hello(hello),
+            expectedReceiveGeneration: expectedReceiveGeneration,
+            expectedReconnectGeneration: expectedReconnectGeneration,
+            expectedAuthorizationGeneration: expectedAuthorizationGeneration
+        )
+        guard isCurrent(
+            receiveGeneration: expectedReceiveGeneration,
+            reconnectGeneration: expectedReconnectGeneration,
+            authorizationGeneration: expectedAuthorizationGeneration
+        ) else {
+            throw SessionError.reconnectRequired
+        }
         helloSent = true
     }
 
-    private func sendCapabilitiesIfNeeded() async throws {
+    private func sendCapabilitiesIfNeeded(
+        receiveGeneration expectedReceiveGeneration: UInt64,
+        reconnectGeneration expectedReconnectGeneration: UInt64,
+        authorizationGeneration expectedAuthorizationGeneration: UInt64
+    ) async throws {
         guard !capabilitiesSent else { return }
         guard state == .trusted || state == .capabilitiesNegotiated || state == .windowSelectionAuthorized else {
             return
+        }
+        guard isCurrent(
+            receiveGeneration: expectedReceiveGeneration,
+            reconnectGeneration: expectedReconnectGeneration,
+            authorizationGeneration: expectedAuthorizationGeneration
+        ) else {
+            throw SessionError.reconnectRequired
         }
         let capabilities = CapabilitiesMessage(
             capabilities: configuration.capabilities.sorted { $0.rawValue < $1.rawValue },
@@ -599,27 +899,48 @@ public actor SessionCoordinator {
             maxFrameRate: configuration.maxFrameRate,
             mandatoryCapabilities: configuration.mandatoryCapabilities
         )
-        _ = try await sendUnrestricted(.capabilities(capabilities))
+        _ = try await sendUnrestricted(
+            .capabilities(capabilities),
+            expectedReceiveGeneration: expectedReceiveGeneration,
+            expectedReconnectGeneration: expectedReconnectGeneration,
+            expectedAuthorizationGeneration: expectedAuthorizationGeneration
+        )
+        guard isCurrent(
+            receiveGeneration: expectedReceiveGeneration,
+            reconnectGeneration: expectedReconnectGeneration,
+            authorizationGeneration: expectedAuthorizationGeneration
+        ) else {
+            throw SessionError.reconnectRequired
+        }
         capabilitiesSent = true
     }
 
     private func sendUnrestricted(
         _ payload: MessagePayload,
-        flags: EnvelopeFlags = []
+        flags: EnvelopeFlags = [],
+        expectedReceiveGeneration: UInt64? = nil,
+        expectedReconnectGeneration: UInt64? = nil,
+        expectedAuthorizationGeneration: UInt64? = nil
     ) async throws -> TransportSendResult {
         try validateMessageDirection(for: payload.messageType, incoming: false)
-        let operationGeneration = reconnectGeneration
-        let operationAuthorizationGeneration = authorizationGeneration
+        let operationGeneration = expectedReconnectGeneration ?? reconnectGeneration
+        let operationReceiveGeneration = expectedReceiveGeneration ?? receiveGeneration
+        let operationAuthorizationGeneration = expectedAuthorizationGeneration ?? authorizationGeneration
         await outboundMutex.acquire()
         defer { outboundMutex.release() }
 
-        guard operationGeneration == reconnectGeneration else {
-            throw SessionError.reconnectRequired
+        guard isCurrent(
+            receiveGeneration: operationReceiveGeneration,
+            reconnectGeneration: operationGeneration,
+            authorizationGeneration: operationAuthorizationGeneration
+        ) else {
+            if operationReceiveGeneration != receiveGeneration ||
+                operationGeneration != reconnectGeneration {
+                throw SessionError.reconnectRequired
+            }
+            throw SessionError.authorizationChanged
         }
         if Self.protectedMessageTypes.contains(payload.messageType) {
-            guard operationAuthorizationGeneration == authorizationGeneration else {
-                throw SessionError.authorizationChanged
-            }
             try validateAuthorization(for: payload)
         }
 
@@ -627,6 +948,7 @@ public actor SessionCoordinator {
             payload,
             flags: flags,
             operationGeneration: operationGeneration,
+            operationReceiveGeneration: operationReceiveGeneration,
             operationAuthorizationGeneration: operationAuthorizationGeneration
         )
     }
@@ -635,8 +957,16 @@ public actor SessionCoordinator {
         _ payload: MessagePayload,
         flags: EnvelopeFlags,
         operationGeneration: UInt64,
+        operationReceiveGeneration: UInt64,
         operationAuthorizationGeneration: UInt64
     ) async throws -> TransportSendResult {
+        guard operationReceiveGeneration == receiveGeneration,
+              operationGeneration == reconnectGeneration else {
+            throw SessionError.reconnectRequired
+        }
+        guard operationAuthorizationGeneration == authorizationGeneration else {
+            throw SessionError.authorizationChanged
+        }
         let channel = payload.messageType.defaultChannel
         let sequence = outgoingSequence[channel] ?? 0
         guard sequence < UInt64.max else {
@@ -652,21 +982,23 @@ public actor SessionCoordinator {
             limits: limits
         )
         let targetTransport = transport
-        let isProtected = Self.protectedMessageTypes.contains(payload.messageType)
         do {
             let result = try await targetTransport.send(envelope)
             // Keep sequence numbers monotonic for an unchanged transport even
             // when an authorization transition invalidates a queued media
             // frame. Reconnect resets the sequence space for the new transport.
-            if operationGeneration == reconnectGeneration {
-                outgoingSequence[channel] = sequence + 1
-            }
-            guard operationGeneration == reconnectGeneration else {
-                throw SessionError.reconnectRequired
-            }
-            if isProtected, operationAuthorizationGeneration != authorizationGeneration {
+            guard isCurrent(
+                receiveGeneration: operationReceiveGeneration,
+                reconnectGeneration: operationGeneration,
+                authorizationGeneration: operationAuthorizationGeneration
+            ) else {
+                if operationReceiveGeneration != receiveGeneration ||
+                    operationGeneration != reconnectGeneration {
+                    throw SessionError.reconnectRequired
+                }
                 throw SessionError.authorizationChanged
             }
+            outgoingSequence[channel] = sequence + 1
             return result
         } catch let error as SessionError {
             throw error
@@ -679,22 +1011,42 @@ public actor SessionCoordinator {
         receiveTask?.cancel()
         receiveGeneration &+= 1
         let generation = receiveGeneration
+        let sessionGeneration = reconnectGeneration
         let stream = transport.incoming
         receiveTask = Task { [weak self] in
             do {
                 for try await envelope in stream {
-                    await self?.handle(envelope, generation: generation)
+                    await self?.handle(
+                        envelope,
+                        generation: generation,
+                        reconnectGeneration: sessionGeneration
+                    )
                 }
-                await self?.handleTransportEOF(generation: generation)
+                await self?.handleTransportEOF(
+                    generation: generation,
+                    reconnectGeneration: sessionGeneration
+                )
             } catch {
-                await self?.handleTransportFailure(String(describing: error), generation: generation)
+                await self?.handleTransportFailure(
+                    String(describing: error),
+                    generation: generation,
+                    reconnectGeneration: sessionGeneration
+                )
             }
         }
     }
 
-    private func handle(_ envelope: Envelope, generation: UInt64) async {
-        guard generation == receiveGeneration else { return }
+    private func handle(
+        _ envelope: Envelope,
+        generation: UInt64,
+        reconnectGeneration sessionGeneration: UInt64
+    ) async {
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration
+        ) else { return }
         guard state != .stopping, state != .failed else { return }
+        let operationAuthorizationGeneration = authorizationGeneration
         do {
             try validateIncomingSequence(envelope)
             if case .unknown = envelope.messageType,
@@ -702,25 +1054,65 @@ public actor SessionCoordinator {
                 return
             }
             let message = try envelope.decodedMessage(using: effectiveProtocolLimits())
-            try await handle(message, generation: generation)
+            try await handle(
+                message,
+                generation: generation,
+                reconnectGeneration: sessionGeneration
+            )
         } catch let error as SessionError {
-            guard generation == receiveGeneration else { return }
-            await fail(error)
+            guard isCurrent(
+                receiveGeneration: generation,
+                reconnectGeneration: sessionGeneration,
+                authorizationGeneration: operationAuthorizationGeneration
+            ) else { return }
+            await fail(
+                error,
+                expectedReceiveGeneration: generation,
+                expectedReconnectGeneration: sessionGeneration,
+                expectedAuthorizationGeneration: operationAuthorizationGeneration
+            )
         } catch {
-            guard generation == receiveGeneration else { return }
-            await fail(.transportFailure(String(describing: error)))
+            guard isCurrent(
+                receiveGeneration: generation,
+                reconnectGeneration: sessionGeneration,
+                authorizationGeneration: operationAuthorizationGeneration
+            ) else { return }
+            await fail(
+                .transportFailure(String(describing: error)),
+                expectedReceiveGeneration: generation,
+                expectedReconnectGeneration: sessionGeneration,
+                expectedAuthorizationGeneration: operationAuthorizationGeneration
+            )
         }
     }
 
-    private func handle(_ message: MessagePayload, generation: UInt64) async throws {
-        guard generation == receiveGeneration else { return }
+    private func handle(
+        _ message: MessagePayload,
+        generation: UInt64,
+        reconnectGeneration sessionGeneration: UInt64
+    ) async throws {
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration
+        ) else { return }
+        let operationAuthorizationGeneration = authorizationGeneration
         try validateMessageDirection(for: message.messageType, incoming: true)
         try validateAuthorization(for: message)
         switch message {
         case let .hello(hello):
-            try await handleHello(hello, generation: generation)
+            try await handleHello(
+                hello,
+                generation: generation,
+                reconnectGeneration: sessionGeneration,
+                authorizationGeneration: operationAuthorizationGeneration
+            )
         case let .capabilities(capabilities):
-            try await handleCapabilities(capabilities, generation: generation)
+            try await handleCapabilities(
+                capabilities,
+                generation: generation,
+                reconnectGeneration: sessionGeneration,
+                authorizationGeneration: operationAuthorizationGeneration
+            )
         case let .pairingChallenge(challenge):
             guard state == .pairingRequired,
                   configuration.role == .viewer,
@@ -728,61 +1120,170 @@ public actor SessionCoordinator {
                   let pairingCoordinator else {
                 throw SessionError.pairingFailed
             }
-            guard await pairingCoordinator.pendingChallenge() == nil else {
+            let hasPendingChallenge = await pairingCoordinator.pendingChallenge() != nil
+            guard isCurrent(
+                receiveGeneration: generation,
+                reconnectGeneration: sessionGeneration,
+                authorizationGeneration: operationAuthorizationGeneration
+            ) else { return }
+            guard !hasPendingChallenge else {
                 throw SessionError.invalidState(state)
             }
-            guard generation == receiveGeneration else { return }
+            guard isCurrent(
+                receiveGeneration: generation,
+                reconnectGeneration: sessionGeneration,
+                authorizationGeneration: operationAuthorizationGeneration
+            ) else { return }
             _ = try await pairingCoordinator.adoptRemoteSessionChallenge(
                 challengeID: challenge.challengeID,
                 from: peerIdentity,
                 confirmationCode: challenge.confirmationCode
             )
-            guard generation == receiveGeneration else { return }
+            guard isCurrent(
+                receiveGeneration: generation,
+                reconnectGeneration: sessionGeneration,
+                authorizationGeneration: operationAuthorizationGeneration
+            ) else { return }
         case let .pairingConfirmation(confirmation):
-            try await handlePairingConfirmation(confirmation, generation: generation)
+            try await handlePairingConfirmation(
+                confirmation,
+                generation: generation,
+                reconnectGeneration: sessionGeneration,
+                authorizationGeneration: operationAuthorizationGeneration
+            )
         case let .sessionAuthorize(authorizationMessage):
-            try await handleAuthorization(authorizationMessage)
+            try await handleAuthorization(
+                authorizationMessage,
+                generation: generation,
+                reconnectGeneration: sessionGeneration,
+                authorizationGeneration: operationAuthorizationGeneration
+            )
         case let .ping(ping):
-            _ = try await sendUnrestricted(.pong(PongMessage(nonce: ping.nonce)))
+            _ = try await sendUnrestricted(
+                .pong(PongMessage(nonce: ping.nonce)),
+                expectedReceiveGeneration: generation,
+                expectedReconnectGeneration: sessionGeneration,
+                expectedAuthorizationGeneration: operationAuthorizationGeneration
+            )
         case let .pong(pong):
             guard pendingPing?.nonce == pong.nonce else { throw SessionError.replayDetected }
             pendingPing = nil
             lastHeartbeatAt = Date()
         case let .sessionState(sessionState):
-            if sessionState.state == .stopping || sessionState.state == .failed {
-                authorizationGeneration &+= 1
-                clearAuthorization()
-                await outboundMutex.acquire()
-                await transport.invalidateProtectedMessages()
-                outboundMutex.release()
-            }
-            publish(message)
+            try await handleSessionState(
+                sessionState,
+                message: message,
+                generation: generation,
+                reconnectGeneration: sessionGeneration,
+                authorizationGeneration: operationAuthorizationGeneration
+            )
         case .error:
-            publish(message)
-            await fail(.transportFailure("peer reported a session error"))
+            try publish(message)
+            await fail(
+                .transportFailure("peer reported a session error"),
+                expectedReceiveGeneration: generation,
+                expectedReconnectGeneration: sessionGeneration,
+                expectedAuthorizationGeneration: operationAuthorizationGeneration
+            )
         case .close:
-            publish(message)
-            authorizationGeneration &+= 1
-            clearAuthorization()
-            state = .stopping
-            heartbeatTask?.cancel()
-            handshakeTask?.cancel()
-            receiveTask?.cancel()
-            heartbeatTask = nil
-            handshakeTask = nil
-            receiveTask = nil
-            await pairingCoordinator?.abortPendingPairing()
-            guard generation == receiveGeneration else { return }
-            await outboundMutex.acquire()
-            await transport.invalidateProtectedMessages()
-            await transport.close()
-            outboundMutex.release()
+            try await handleClose(
+                message,
+                generation: generation,
+                reconnectGeneration: sessionGeneration,
+                authorizationGeneration: operationAuthorizationGeneration
+            )
         default:
-            publish(message)
+            try publish(message)
         }
     }
 
-    private func handleHello(_ hello: HelloMessage, generation: UInt64) async throws {
+    private func handleSessionState(
+        _ sessionState: SessionStateMessage,
+        message: MessagePayload,
+        generation: UInt64,
+        reconnectGeneration sessionGeneration: UInt64,
+        authorizationGeneration sessionAuthorizationGeneration: UInt64
+    ) async throws {
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else { return }
+
+        guard sessionState.state == .stopping || sessionState.state == .failed else {
+            try publish(message)
+            return
+        }
+
+        await outboundMutex.acquire()
+        defer { outboundMutex.release() }
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else { return }
+        authorizationGeneration &+= 1
+        let operationAuthorizationGeneration = authorizationGeneration
+        clearAuthorization()
+        await transport.invalidateProtectedMessages()
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: operationAuthorizationGeneration
+        ) else { return }
+        try publish(message)
+    }
+
+    private func handleClose(
+        _ message: MessagePayload,
+        generation: UInt64,
+        reconnectGeneration sessionGeneration: UInt64,
+        authorizationGeneration sessionAuthorizationGeneration: UInt64
+    ) async throws {
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else { return }
+        try publish(message)
+
+        await outboundMutex.acquire()
+        defer { outboundMutex.release() }
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else { return }
+
+        authorizationGeneration &+= 1
+        clearAuthorization()
+        state = .stopping
+        incomingMessageStorage.finish()
+        receiveGeneration &+= 1
+        heartbeatGeneration &+= 1
+        handshakeGeneration &+= 1
+        heartbeatTask?.cancel()
+        handshakeTask?.cancel()
+        receiveTask?.cancel()
+        heartbeatTask = nil
+        handshakeTask = nil
+        receiveTask = nil
+        await pairingCoordinator?.abortPendingPairing()
+        await transport.invalidateProtectedMessages()
+        await transport.close()
+    }
+
+    private func handleHello(
+        _ hello: HelloMessage,
+        generation: UInt64,
+        reconnectGeneration sessionGeneration: UInt64,
+        authorizationGeneration sessionAuthorizationGeneration: UInt64
+    ) async throws {
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else { return }
         guard hello.role != configuration.role else {
             throw SessionError.peerRoleMismatch
         }
@@ -796,11 +1297,29 @@ public actor SessionCoordinator {
         if state == .authenticated {
             state = .trusted
         }
-        try await sendCapabilitiesIfNeeded()
-        guard generation == receiveGeneration else { return }
+        try await sendCapabilitiesIfNeeded(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        )
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else { return }
     }
 
-    private func handleCapabilities(_ capabilities: CapabilitiesMessage, generation: UInt64) async throws {
+    private func handleCapabilities(
+        _ capabilities: CapabilitiesMessage,
+        generation: UInt64,
+        reconnectGeneration sessionGeneration: UInt64,
+        authorizationGeneration sessionAuthorizationGeneration: UInt64
+    ) async throws {
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else { return }
         guard peerHello != nil,
               peerCapabilities == nil,
               state == .trusted else {
@@ -817,15 +1336,30 @@ public actor SessionCoordinator {
         negotiatedMaxVideoHeight = negotiatedLimit(configuration.maxVideoHeight, capabilities.maxVideoHeight)
         negotiatedMaxFrameRate = negotiatedLimit(configuration.maxFrameRate, capabilities.maxFrameRate)
         state = .capabilitiesNegotiated
-        try await sendCapabilitiesIfNeeded()
-        guard generation == receiveGeneration else { return }
+        try await sendCapabilitiesIfNeeded(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        )
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else { return }
         startHeartbeatIfReady()
     }
 
     private func handlePairingConfirmation(
         _ confirmation: PairingConfirmationMessage,
-        generation: UInt64
+        generation: UInt64,
+        reconnectGeneration sessionGeneration: UInt64,
+        authorizationGeneration sessionAuthorizationGeneration: UInt64
     ) async throws {
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else { return }
         guard state == .pairingRequired,
               let peerIdentity,
               let pairingCoordinator else {
@@ -838,6 +1372,11 @@ public actor SessionCoordinator {
                 confirmationCode: confirmation.confirmationCode ?? "",
                 accepted: false
             )
+            guard isCurrent(
+                receiveGeneration: generation,
+                reconnectGeneration: sessionGeneration,
+                authorizationGeneration: sessionAuthorizationGeneration
+            ) else { return }
             throw SessionError.pairingDenied
         }
         do {
@@ -848,14 +1387,46 @@ public actor SessionCoordinator {
                 accepted: confirmation.accepted
             )
         } catch {
+            guard isCurrent(
+                receiveGeneration: generation,
+                reconnectGeneration: sessionGeneration,
+                authorizationGeneration: sessionAuthorizationGeneration
+            ) else { return }
             throw SessionError.pairingFailed
         }
-        guard generation == receiveGeneration else { return }
-        try await synchronizePairingState(generation: generation)
-        try await sendCapabilitiesIfNeeded()
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else { return }
+        try await synchronizePairingState(
+            generation: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        )
+        try await sendCapabilitiesIfNeeded(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        )
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else { return }
     }
 
-    private func handleAuthorization(_ authorization: SessionAuthorizeMessage) async throws {
+    private func handleAuthorization(
+        _ authorization: SessionAuthorizeMessage,
+        generation: UInt64,
+        reconnectGeneration sessionGeneration: UInt64,
+        authorizationGeneration sessionAuthorizationGeneration: UInt64
+    ) async throws {
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else { return }
         guard configuration.role == .viewer else {
             throw SessionError.invalidState(state)
         }
@@ -875,24 +1446,63 @@ public actor SessionCoordinator {
             capabilities: requested,
             mandatoryCapabilities: authorization.mandatoryCapabilities
         )
+        // Authorization changes are serialized with reconnect, stop, and all
+        // outbound admissions. The receive generation is checked again after
+        // every await so an old receive task cannot authorize a new session.
+        await outboundMutex.acquire()
+        defer { outboundMutex.release() }
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else {
+            throw SessionError.reconnectRequired
+        }
+        let operationAuthorizationGeneration = sessionAuthorizationGeneration &+ 1
+        authorizationGeneration = operationAuthorizationGeneration
+        clearAuthorization()
+        await transport.invalidateProtectedMessages()
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: operationAuthorizationGeneration
+        ) else {
+            throw SessionError.reconnectRequired
+        }
+        guard operationAuthorizationGeneration == authorizationGeneration else {
+            throw SessionError.authorizationChanged
+        }
         authorized = authorization.authorized
         authorizedWindowGeneration = authorization.authorized ? authorization.windowGeneration : nil
         authorizedCapabilities = authorization.authorized ? requested : []
         state = authorization.authorized ? .windowSelectionAuthorized : .capabilitiesNegotiated
     }
 
-    private func synchronizePairingState(generation: UInt64) async throws {
-        guard generation == receiveGeneration else {
+    private func synchronizePairingState(
+        generation: UInt64,
+        reconnectGeneration sessionGeneration: UInt64,
+        authorizationGeneration sessionAuthorizationGeneration: UInt64
+    ) async throws {
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else {
             throw SessionError.reconnectRequired
         }
         guard let pairingCoordinator else {
             throw SessionError.pairingFailed
         }
-        switch await pairingCoordinator.state() {
+        let pairingState = await pairingCoordinator.state()
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration,
+            authorizationGeneration: sessionAuthorizationGeneration
+        ) else {
+            throw SessionError.reconnectRequired
+        }
+        switch pairingState {
         case .paired:
-            guard generation == receiveGeneration else {
-                throw SessionError.reconnectRequired
-            }
             state = .trusted
         case .awaitingConfirmation:
             state = .pairingRequired
@@ -926,6 +1536,7 @@ public actor SessionCoordinator {
         authorized = false
         authorizedWindowGeneration = nil
         authorizedCapabilities.removeAll()
+        incomingMessageStorage.removeProtectedMessages()
         if state == .windowSelectionAuthorized {
             state = .capabilitiesNegotiated
         }
@@ -1044,8 +1655,14 @@ public actor SessionCoordinator {
         )
     }
 
-    private func publish(_ message: MessagePayload) {
-        _ = incomingMessageContinuation.yield(message)
+    private func publish(_ message: MessagePayload) throws {
+        do {
+            _ = try incomingMessageStorage.yield(message)
+        } catch TransportError.controlBackpressure {
+            throw SessionError.incomingMessageBackpressure(.control)
+        } catch TransportError.mediaBackpressure {
+            throw SessionError.incomingMessageBackpressure(.media)
+        }
     }
 
     private func negotiatedLimit<T: Comparable>(_ local: T?, _ remote: T?) -> T? {
@@ -1119,16 +1736,34 @@ public actor SessionCoordinator {
               state != .failed else {
             return
         }
-        await fail(.handshakeTimeout)
+        let sessionReceiveGeneration = receiveGeneration
+        let sessionReconnectGeneration = reconnectGeneration
+        let sessionAuthorizationGeneration = authorizationGeneration
+        await fail(
+            .handshakeTimeout,
+            expectedReceiveGeneration: sessionReceiveGeneration,
+            expectedReconnectGeneration: sessionReconnectGeneration,
+            expectedAuthorizationGeneration: sessionAuthorizationGeneration,
+            expectedHandshakeGeneration: generation
+        )
     }
 
     private func heartbeatTick(generation: UInt64) async {
         guard generation == heartbeatGeneration else { return }
         guard state != .stopping, state != .failed else { return }
+        let sessionReceiveGeneration = receiveGeneration
+        let sessionReconnectGeneration = reconnectGeneration
+        let sessionAuthorizationGeneration = authorizationGeneration
         let now = Date()
         if let pendingPing,
            now.timeIntervalSince(pendingPing.sentAt) * 1_000_000_000 >= Double(configuration.heartbeatTimeoutNanoseconds) {
-            await fail(.heartbeatTimeout)
+            await fail(
+                .heartbeatTimeout,
+                expectedReceiveGeneration: sessionReceiveGeneration,
+                expectedReconnectGeneration: sessionReconnectGeneration,
+                expectedAuthorizationGeneration: sessionAuthorizationGeneration,
+                expectedHeartbeatGeneration: generation
+            )
             return
         }
         guard pendingPing == nil else { return }
@@ -1136,30 +1771,94 @@ public actor SessionCoordinator {
         nextPingNonce = nextPingNonce == UInt64.max ? 1 : nextPingNonce + 1
         pendingPing = (nonce: nonce, sentAt: now)
         do {
-            _ = try await sendUnrestricted(.ping(PingMessage(nonce: nonce)))
+            _ = try await sendUnrestricted(
+                .ping(PingMessage(nonce: nonce)),
+                expectedReceiveGeneration: sessionReceiveGeneration,
+                expectedReconnectGeneration: sessionReconnectGeneration,
+                expectedAuthorizationGeneration: sessionAuthorizationGeneration
+            )
         } catch {
-            await fail(.transportFailure(String(describing: error)))
+            await fail(
+                .transportFailure(String(describing: error)),
+                expectedReceiveGeneration: sessionReceiveGeneration,
+                expectedReconnectGeneration: sessionReconnectGeneration,
+                expectedAuthorizationGeneration: sessionAuthorizationGeneration,
+                expectedHeartbeatGeneration: generation
+            )
         }
     }
 
-    private func handleTransportFailure(_ detail: String, generation: UInt64) async {
-        guard generation == receiveGeneration else { return }
+    private func handleTransportFailure(
+        _ detail: String,
+        generation: UInt64,
+        reconnectGeneration sessionGeneration: UInt64
+    ) async {
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration
+        ) else { return }
         guard state != .stopping, state != .failed else { return }
-        await fail(.transportFailure(detail))
+        let sessionAuthorizationGeneration = authorizationGeneration
+        await fail(
+            .transportFailure(detail),
+            expectedReceiveGeneration: generation,
+            expectedReconnectGeneration: sessionGeneration,
+            expectedAuthorizationGeneration: sessionAuthorizationGeneration
+        )
     }
 
-    private func handleTransportEOF(generation: UInt64) async {
-        guard generation == receiveGeneration else { return }
+    private func handleTransportEOF(
+        generation: UInt64,
+        reconnectGeneration sessionGeneration: UInt64
+    ) async {
+        guard isCurrent(
+            receiveGeneration: generation,
+            reconnectGeneration: sessionGeneration
+        ) else { return }
         guard state != .stopping, state != .failed else { return }
-        await fail(.transportFailure("transport reached EOF"))
+        let sessionAuthorizationGeneration = authorizationGeneration
+        await fail(
+            .transportFailure("transport reached EOF"),
+            expectedReceiveGeneration: generation,
+            expectedReconnectGeneration: sessionGeneration,
+            expectedAuthorizationGeneration: sessionAuthorizationGeneration
+        )
     }
 
-    private func fail(_ error: SessionError) async {
+    private func fail(
+        _ error: SessionError,
+        expectedReceiveGeneration: UInt64? = nil,
+        expectedReconnectGeneration: UInt64? = nil,
+        expectedAuthorizationGeneration: UInt64? = nil,
+        expectedHeartbeatGeneration: UInt64? = nil,
+        expectedHandshakeGeneration: UInt64? = nil
+    ) async {
         await outboundMutex.acquire()
         defer { outboundMutex.release() }
+        if let expectedReceiveGeneration,
+           expectedReceiveGeneration != receiveGeneration {
+            return
+        }
+        if let expectedReconnectGeneration,
+           expectedReconnectGeneration != reconnectGeneration {
+            return
+        }
+        if let expectedAuthorizationGeneration,
+           expectedAuthorizationGeneration != authorizationGeneration {
+            return
+        }
+        if let expectedHeartbeatGeneration,
+           expectedHeartbeatGeneration != heartbeatGeneration {
+            return
+        }
+        if let expectedHandshakeGeneration,
+           expectedHandshakeGeneration != handshakeGeneration {
+            return
+        }
         authorizationGeneration &+= 1
         clearAuthorization()
         state = .failed
+        incomingMessageStorage.finish(throwing: error)
         receiveGeneration &+= 1
         heartbeatGeneration &+= 1
         handshakeGeneration &+= 1
@@ -1173,6 +1872,17 @@ public actor SessionCoordinator {
         await transport.invalidateProtectedMessages()
         await transport.close()
         _ = error
+    }
+
+    private func isCurrent(
+        receiveGeneration expectedReceiveGeneration: UInt64,
+        reconnectGeneration expectedReconnectGeneration: UInt64,
+        authorizationGeneration expectedAuthorizationGeneration: UInt64? = nil
+    ) -> Bool {
+        expectedReceiveGeneration == receiveGeneration &&
+            expectedReconnectGeneration == reconnectGeneration &&
+            (expectedAuthorizationGeneration == nil ||
+                expectedAuthorizationGeneration == authorizationGeneration)
     }
 
 }
