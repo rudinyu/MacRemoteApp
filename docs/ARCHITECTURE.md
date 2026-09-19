@@ -130,9 +130,10 @@ Additional rules:
   selected-window generation before sending or accepting protected messages.
   It clears that record before teardown or revoke notification and fails closed
   if notification delivery fails.
-- `Apps/Host` supplies the selected-window and permission/focus facts. `InputCore`
-  performs the final check immediately before any future Host-side injection;
-  a TransportCore authorization decision alone never authorizes an OS event.
+- `Apps/Host` supplies the selected-window and permission/focus facts.
+  `InputCore.HostInputController` performs the final check immediately before
+  every Host-side injection; a TransportCore authorization decision alone
+  never authorizes an OS event.
 - In M3, `CaptureCore` is the source of truth for the Host window catalog,
   Screen Recording permission state, selected-window generation, and raw
   timestamped pixel-buffer lifecycle. `Apps/Host` may map those values to
@@ -144,8 +145,52 @@ Additional rules:
   maps that record to `RemoteProtocol.InputEventMessage` through
   `ViewerInputTransport`, and `TransportCore.SessionCoordinator` is the
   authenticated capability/window-generation delivery gate. No M5 component
-  calls CoreGraphics or Accessibility APIs; Host-side mapping and injection
-  remain M6.
+  calls CoreGraphics or Accessibility APIs.
+- In M6, `Apps/Host/HostInputMessageHandler` maps the authenticated input
+  message to an `InputCore.InputEventRecord`. `InputCore.HostInputController`
+  rechecks session/window/capability facts and asks the
+  `CoreGraphicsAccessibilityContextProvider` for current permission and
+  foreground identity and current geometry before calling the typed
+  `CoreGraphicsAccessibilityInputAdapter`. Each command carries the selected
+  window identity, owning application identifier, and generation, and the
+  adapter repeats that target/focus/owning-application check immediately before
+  target-bound process posting. `HostInputSessionLoop` is the single-consumer
+  stream dispatcher: it forwards non-input messages to the app dispatcher
+  instead of dropping them. The adapter is the only M6 code that
+  constructs/posts `CGEvent` values; it never activates background windows.
+  `TransportCore.SessionCoordinator.withIncomingInputAdmission` keeps an input
+  already delivered directly to the stream waiter in the same non-reentrant
+  authorization fence as local revoke, reconnect, and stop transitions.
+  `HostInputSessionRuntime`, started by the Host app's per-session composition
+  entry point, owns the loop lifetime and resets it on authorization/reconnect
+  transitions. Host lifecycle code uses `withSelectionReplacement()` (or pairs
+  `selectionWillChange()`/`selectionDidChange()`) while changing CaptureCore's
+  selected-window provider; the admission barrier remains held until the
+  replacement is published. The loop has a polling
+  backstop and closes the session if a missed transition cannot safely release
+  the old target. Unknown secure-input or console state remains fail-closed,
+  and controller-owned state releases retain a restricted target-bound path
+  after authorization loss or a known focus loss. A local selection
+  transition should be announced before the provider changes; if it is missed,
+  the provider must still be able to identify the old target for a safe release
+  or the session is closed. Permission loss leaves cleanup pending and visible
+  as unavailable until a safe snapshot permits retry. Local safety transitions also discard queued input messages, and a
+  stream-ending runtime retains a target-bound cleanup retry until safe
+  target-bound recovery, even when the runtime handle is released. If
+  CaptureCore has already published a replacement selection, the provider
+  supplies a live release context for the originally admitted target; the new
+  selection is never reused to release old state. Lifecycle stop/replacement
+  waits for that safe recovery before a replacement Host session can reuse the
+  selected target. A permission/focus outage can therefore temporarily block
+  reconnection; cancelling the cleanup lease could leave an OS key/button
+  pressed indefinitely.
+- The physical M2 diagnostic orchestration remains in `Apps/Host` and
+  `Apps/Viewer`; `TransportCore` only exposes the Bonjour/TLS/session APIs.
+  `SecurityCore.PublicCertificateIdentity` derives a pinned peer identity from
+  a public DER certificate, while each app imports its own private PKCS#12
+  identity. This keeps certificate provisioning and private-key handling out
+  of the transport package and prevents the cross-machine test from copying
+  private keys between devices.
 - Cross-cutting diagnostics use a narrow structured logging interface. They do
   not pass raw clipboard text, secrets, or full captured frames.
 
@@ -261,6 +306,9 @@ selected-window identity, and permission state.
 
 - Intel Host and Apple Silicon Viewer are intentional V1 targets; the
   architecture must not assume identical CPU/GPU characteristics.
+- The Host executable is validated for both `x86_64` and `arm64` builds for
+  development and packaging portability; this does not change the V1 physical
+  integration target of an Intel Host.
 - H.264 is the V1 interoperability baseline. HEVC or other codecs are not
   added as speculative features.
 - Screen Recording and Accessibility permissions are Host capabilities and are

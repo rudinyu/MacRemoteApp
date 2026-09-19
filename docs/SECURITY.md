@@ -159,6 +159,38 @@ be treated as equivalent to "authorized to control".
 - A malformed input event must fail closed without partially applying a
   sequence of unrelated events.
 
+M6 enforcement is split explicitly: `TransportCore` admits the authenticated
+  message, `Apps/Host` supplies the current session and selected-window facts,
+  and `InputCore.HostInputController` performs the final per-event check.
+  `CoreGraphicsAccessibilityContextProvider` rechecks Accessibility/post-event
+  permission, current bounds, on-screen window identity, foreground ordering,
+  and lock state; each typed command carries the target window, owning
+  application identifier, process, and generation, and
+  `CoreGraphicsAccessibilityInputAdapter` repeats the complete target/focus/
+  permission check immediately before posting. The adapter never activates a
+  background window. Unknown secure-input or console state is rejected because
+  macOS does not provide a reliable general public status API; no private API
+  or bypass is used. Host reset attempts safe release of admitted pressed
+  state before clearing it and uses a reserved state-ending rate lane. If
+  session authorization has already been revoked, that cleanup path may only
+  release controller-admitted state while the same window identity,
+  generation, current bounds, and permission still match. A selected target
+  that is known to be not foreground is allowed only for this target-bound
+  release path; normal input still requires eligible foreground focus. A local
+  selection transition must be announced before the provider changes so the
+  old target can be released while it is still selected. If the ordering is
+  missed, the stale release is rejected and the Host closes the session rather
+  than carrying pressed state into the replacement target. If permission
+  temporarily disappears, cleanup remains pending and is surfaced as
+  unavailable until a safe snapshot returns; if the session stream ends first,
+  the Host retains a target-bound cleanup retry until recovery or target
+  replacement. Queued input is discarded on local authorization, permission,
+  focus, and selection transitions. Input already handed directly to the sole
+  stream waiter is additionally fenced by the non-reentrant
+  `SessionCoordinator.withIncomingInputAdmission` operation, so local revoke,
+  reconnect, or stop cannot invalidate authorization between the check and the
+  Host injection call. Unmatched releases are rejected.
+
 ## Clipboard privacy
 
 - Clipboard synchronization is disabled by default and visibly opt-in.
@@ -244,4 +276,6 @@ reinstall/rotation behavior, locked-Keychain failure, and access-control
 configuration remain deployment-specific. The M5 environment has now passed
 real loopback mutual-TLS/session startup with temporary identities; that is not
 evidence of physical Intel Host to Apple Silicon Viewer Bonjour/TLS
-interoperability, which remains an environment validation item.
+interoperability, which remains an environment validation item. M6
+deterministic authorization and adapter gates now pass; real OS input posting
+still requires the documented disposable-application manual test.

@@ -8,17 +8,23 @@ Host; this is deliberately not a full remote-desktop product.
 ## Current status
 
 The M0 Repository Foundation and M1 RemoteProtocol wire contract are complete.
+The Host target is validated for both `x86_64` and `arm64` builds; the V1
+physical Host target remains Intel, while the Viewer target is Apple Silicon.
 The M2 secure LAN session implementation, PKCS#12/Keychain identity
 provisioning, and real loopback mutual-TLS/session smoke test are complete.
-Physical Intel Host to Apple Silicon Viewer Bonjour/TLS evidence remains an
-explicit hardware-environment gate. M3 now contains the Host window catalog
+The repository now includes a repeatable physical Intel Host to Apple Silicon
+Viewer Bonjour/TLS/capability smoke harness and signed app-bundle packaging;
+the actual two-machine run remains an environment evidence gate. M3 now
+contains the Host window catalog
 and ScreenCaptureKit capture foundation with deterministic fake-provider tests
 and a successful M5 live frame smoke test. M4 now contains bounded H.264
 VideoToolbox encode/decode adapters, decoder-generation recovery rules, and a
 Viewer Metal presentation surface with deterministic layout/queue tests. The
-repository still contains no input injection or clipboard product capability
-implementation. M5 adds the Viewer-side typed input foundation and authenticated
-event transport; Host-side OS injection remains M6.
+repository still contains no clipboard product capability implementation. M5
+adds the Viewer-side typed input foundation and authenticated event transport.
+M6 now adds Host-side authorization-aware coordinate mapping and typed
+CoreGraphics/Accessibility injection adapters with deterministic fake-adapter
+tests. Actual OS event posting remains an explicit local evidence step.
 
 The repository root is:
 
@@ -37,15 +43,21 @@ MacRemoteApp/
 │   ├── InputCore/
 │   └── SecurityCore/
 ├── Tests/
+├── Resources/
+│   ├── Host-Info.plist
+│   ├── Viewer-Info.plist
+│   └── MacRemoteAppIcon.svg
 └── docs/
     ├── ARCHITECTURE.md
     ├── DEVELOPMENT_PLAN.md
     ├── M0_FOUNDATION.md
     ├── M1_PROTOCOL.md
     ├── M2_SESSION.md
+    ├── M2_PHYSICAL_SMOKE.md
     ├── M3_CAPTURE.md
     ├── M4_CODEC.md
     ├── M5_INPUT.md
+    ├── M6_INPUT_INJECTION.md
     ├── PRODUCT_SPEC.md
     ├── PROTOCOL.md
     └── SECURITY.md
@@ -73,6 +85,14 @@ MacRemoteApp/
 The exact M0 toolchain and architecture matrix are recorded in
 `docs/M0_FOUNDATION.md`. The repeatable foundation validation uses Swift
 Package Manager commands from the repository root.
+
+## Physical M2 test
+
+Use [`docs/M2_PHYSICAL_SMOKE.md`](docs/M2_PHYSICAL_SMOKE.md) to build the
+universal Host/arm64 Viewer bundles, generate non-secret public certificate
+files, and run the two-machine Bonjour/TLS smoke. The packaging source icon is
+[`Resources/MacRemoteAppIcon.svg`](Resources/MacRemoteAppIcon.svg); generated
+`.icns`, app bundles, and test identities stay outside version control.
 
 ## V1 in one paragraph
 
@@ -121,8 +141,8 @@ appropriate document before implementation.
 | M2 | Secure LAN discovery, pairing, and session lifecycle |
 | M3 | Host window discovery and ScreenCaptureKit capture |
 | M4 | H.264 encode/decode and Metal presentation (complete; hardware smoke is opt-in) |
-| M5 | Viewer mouse/keyboard capture and event transport (complete; Host injection remains M6) |
-| M6 | Host-side focus-aware input mapping and injection |
+| M5 | Viewer mouse/keyboard capture and event transport (complete) |
+| M6 | Host-side focus-aware input mapping and injection (implementation/test gate complete; OS evidence pending) |
 | M7 | Text clipboard synchronization and session UX |
 | M8 | Latency, frame-rate, backpressure, reconnect, and resilience work |
 | M9 | Security hardening, permission/error review, and release readiness |

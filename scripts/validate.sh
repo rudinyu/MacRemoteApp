@@ -17,9 +17,23 @@ cd "${repo_root}"
 echo "Validating Swift package graph"
 swift package describe >/dev/null
 
-echo "Checking M5 boundary"
+echo "Validating physical smoke and app bundle inputs"
+bash -n scripts/create-m2-identities.sh scripts/package-device-apps.sh
+plutil -lint Resources/Host-Info.plist Resources/Viewer-Info.plist >/dev/null
+test -s Resources/MacRemoteAppIcon.svg
+for forbidden_identity_path in \
+    "${repo_root}" \
+    "${repo_root}/Tests"
+do
+    if bash scripts/create-m2-identities.sh "${forbidden_identity_path}" >/dev/null 2>&1; then
+        echo "Validation failed: identity material was accepted inside the repository" >&2
+        exit 1
+    fi
+done
+
+echo "Checking M6 boundary"
 forbidden_hits="$(rg -n \
-    'CGEvent|AXUIElement|NSPasteboard|WebRTC|AVAudio' \
+    'NSPasteboard|WebRTC|AVAudio' \
     Apps Packages Tests --glob '*.swift' || true)"
 if [[ -n "${forbidden_hits}" ]]; then
     echo "Validation failed: a later-milestone product API or feature was added" >&2
@@ -36,18 +50,35 @@ for document in \
     docs/DEVELOPMENT_PLAN.md \
     docs/M1_PROTOCOL.md \
     docs/M2_SESSION.md \
+    docs/M2_PHYSICAL_SMOKE.md \
     docs/M3_CAPTURE.md \
     docs/M4_CODEC.md \
-    docs/M5_INPUT.md
+    docs/M5_INPUT.md \
+    docs/M6_INPUT_INJECTION.md
 do
     test -s "${document}"
 done
 
-echo "Building Host"
-swift build --configuration debug --target Host --scratch-path "${build_root}/host"
+echo "Building Host (arm64)"
+swift build \
+    --configuration debug \
+    --arch arm64 \
+    --target Host \
+    --scratch-path "${build_root}/host-arm64"
 
-echo "Building Viewer"
-swift build --configuration debug --target Viewer --scratch-path "${build_root}/viewer"
+echo "Building Host (x86_64)"
+swift build \
+    --configuration debug \
+    --arch x86_64 \
+    --target Host \
+    --scratch-path "${build_root}/host-x86_64"
+
+echo "Building Viewer (arm64)"
+swift build \
+    --configuration debug \
+    --arch arm64 \
+    --target Viewer \
+    --scratch-path "${build_root}/viewer-arm64"
 
 echo "Testing root smoke target"
 swift test --configuration debug --scratch-path "${build_root}/root"

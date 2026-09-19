@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import CaptureCore
 import CodecCore
 import InputCore
@@ -8,6 +9,25 @@ import TransportCore
 
 @main
 struct HostApp {
+    /// Host session composition entry point. The concrete listener/window
+    /// lifecycle calls this once per authenticated SessionCoordinator so the
+    /// input stream always has one consumer tied to that session.
+    static func startInputSession(
+        _ session: SessionCoordinator,
+        contextProvider: any HostInputContextProvider,
+        injectionAdapter: any HostInputInjectionAdapter,
+        onNonInputMessage: @escaping @Sendable (MessagePayload) async -> Void
+    ) async -> HostInputSessionRuntime {
+        let runtime = HostInputSessionRuntime(
+            session: session,
+            contextProvider: contextProvider,
+            injectionAdapter: injectionAdapter,
+            onNonInputMessage: onNonInputMessage
+        )
+        await runtime.start()
+        return runtime
+    }
+
     static func main() async {
         if CommandLine.arguments.contains("--m3-list-windows") {
             await MainActor.run {
@@ -15,6 +35,16 @@ struct HostApp {
                 NSApplication.shared.setActivationPolicy(.prohibited)
             }
             await listWindows()
+            return
+        }
+
+        if CommandLine.arguments.contains("--m2-physical-host") {
+            do {
+                try await M2PhysicalHostSmoke.run()
+            } catch {
+                fputs("M2 physical host smoke failed: \(error)\n", stderr)
+                exit(EXIT_FAILURE)
+            }
             return
         }
 
@@ -27,7 +57,7 @@ struct HostApp {
             SecurityCoreModule.name
         ]
 
-        print("MacRemoteApp Host M3 foundation: \(modules.joined(separator: ", "))")
+        print("MacRemoteApp Host M6 input foundation: \(modules.joined(separator: ", "))")
     }
 
     private static func listWindows() async {

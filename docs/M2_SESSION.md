@@ -109,10 +109,13 @@ The deterministic M2 tests use in-memory transport doubles and cover:
 
 The current Apple Silicon environment has validated native compilation,
 deterministic in-memory tests, and real loopback mutual TLS/session startup.
-A physical Intel Host to Apple Silicon Viewer Bonjour/TLS smoke test remains
-an environment validation item. The typed consent API is exercised by the
-pairing tests; product UI remains outside M2 and belongs to the later session
-UX milestone.
+`docs/M2_PHYSICAL_SMOKE.md` and the `--m2-physical-host` /
+`--m2-physical-viewer` diagnostic flags now provide the repeatable physical
+Intel Host to Apple Silicon Viewer Bonjour/TLS/capability smoke. The actual
+two-machine pass is still an environment evidence item until it is run on the
+Intel Host and recorded. The typed consent API is exercised by the pairing
+tests; product UI remains outside M2 and belongs to the later session UX
+milestone.
 
 ## M2 boundary
 

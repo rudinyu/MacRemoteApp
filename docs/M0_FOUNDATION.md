@@ -41,13 +41,15 @@ The following environment was verified for the M0 skeleton:
 
 | Role | Intended architecture | M0 foundation status |
 | --- | --- | --- |
-| Host | Intel `x86_64` | Verified: `Host` cross-build completed for `x86_64`; runtime/tests on physical Intel hardware remain pending |
+| Host (V1 integration) | Intel `x86_64` | Verified: `Host` cross-build completed for `x86_64`; runtime/tests on physical Intel hardware remain pending |
+| Host (build portability) | Apple Silicon `arm64` | Verified: `Host` build completed for `arm64`; this does not claim a separate Apple Silicon Host product target |
 | Viewer | Apple Silicon `arm64` | Verified: root targets, local packages, and smoke tests run natively |
 
-The native arm64 result and the x86_64 cross-build verify only the repository
-foundation. They do not verify ScreenCaptureKit, VideoToolbox, Metal,
-Network.framework, input injection, physical Intel runtime behavior, or
-cross-machine interoperability; those belong to later milestones.
+The Host arm64 build, native Viewer arm64 result, and Host x86_64 cross-build
+verify only the repository foundation. They do not verify ScreenCaptureKit,
+VideoToolbox, Metal, Network.framework, input injection, physical Intel
+runtime behavior, or cross-machine interoperability; those belong to later
+milestones.
 
 ## Repeatable validation
 
@@ -63,8 +65,9 @@ probe, run:
 
 ```sh
 swift package describe
-swift build --configuration debug --target Host
-swift build --configuration debug --target Viewer
+swift build --configuration debug --arch arm64 --target Host
+swift build --configuration debug --arch x86_64 --target Host
+swift build --configuration debug --arch arm64 --target Viewer
 swift test --configuration debug
 ```
 
@@ -84,9 +87,8 @@ running the Host and its tests on physical Intel hardware.
 
 ## Deferred decisions and gaps
 
-- Intel `x86_64` compilation and runtime behavior require an Intel Mac or an
-  explicitly supported cross-compilation environment and are not claimed by
-  this run.
+- Intel `x86_64` runtime behavior requires an Intel Mac or an explicitly
+  supported translation environment and is not claimed by this run.
 - The final macOS support range, Xcode support range, app bundle/signing
   configuration, and platform API availability checks remain open for the
   milestones that add those concerns.

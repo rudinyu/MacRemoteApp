@@ -31,6 +31,33 @@ public final class ProvisionedIdentity: @unchecked Sendable {
     }
 }
 
+/// Loads only the public identity from a DER-encoded X.509 certificate.
+///
+/// Physical M2 smoke tests exchange these public certificates so each device
+/// can pin its peer without ever copying the peer's private key. Production
+/// enrollment may use a different certificate delivery mechanism, but the
+/// identity derivation stays in SecurityCore so it remains identical to the
+/// PKCS#12 and Network.framework paths.
+public enum PublicCertificateIdentity {
+    public static func load(from url: URL) throws -> DeviceIdentity {
+        let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+        guard let certificate = SecCertificateCreateWithData(nil, data as CFData) else {
+            throw SecurityCoreError.certificateUnavailable
+        }
+        guard let publicKey = SecCertificateCopyKey(certificate) else {
+            throw SecurityCoreError.invalidPublicKey
+        }
+        var error: Unmanaged<CFError>?
+        guard let representation = SecKeyCopyExternalRepresentation(
+            publicKey,
+            &error
+        ) as Data? else {
+            throw SecurityCoreError.invalidPublicKey
+        }
+        return try DeviceIdentity(publicKeyRepresentation: representation)
+    }
+}
+
 /// Loads an identity already provisioned in the macOS Keychain or imports a
 /// PKCS#12 bundle supplied by a provisioning/test workflow. Production code
 /// should obtain the PKCS#12 data from its installer or enrollment flow; no

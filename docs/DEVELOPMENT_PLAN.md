@@ -11,12 +11,17 @@ The repository contains the completed M0 foundation and M1 RemoteProtocol
 contract, an M2 secure-session implementation with real loopback mutual-TLS
 verification, an M3 CaptureCore foundation with deterministic fake-provider
 tests, and the M4 CodecCore/Viewer presentation foundation. M2 code gates are
-complete; physical Intel-to-Apple-Silicon Bonjour/TLS smoke validation remains
-an environment evidence item. M3's live frame evidence is verified on the
+complete and a repeatable two-machine Bonjour/TLS smoke harness is available;
+the physical Intel-to-Apple-Silicon pass remains an environment evidence item.
+M3's live frame evidence is verified on the
 current M5 logged-in window-server session. M4's deterministic gates are
 complete; its VideoToolbox encode/decode smoke is an explicit opt-in hardware
-check. Later milestones remain blocked by their documented dependencies and
-exit criteria.
+check. M5's Viewer input transport gate and M6's Host authorization/mapping
+implementation gate are complete with deterministic tests. M6 real OS event
+posting remains an environment evidence item requiring a disposable foreground
+test application and Accessibility permission; the secure-input provider is
+fail-closed when its state is unknown. M7 and later milestones remain blocked
+by their documented dependencies and exit criteria.
 
 ## Delivery principles
 
@@ -87,8 +92,9 @@ or product UI behavior.
 ### Tests and verification
 
 - Run the documented Swift Package Manager build and test commands.
-- Build and test on the available architecture; record the unavailable
-  architecture as a gap rather than implying it passed.
+- Build and test the available `arm64` architecture, cross-build the Host for
+  `x86_64`, and record physical runtime/interoperability gaps rather than
+  implying a cross-build passed on real Intel hardware.
 - Confirm no forbidden product API or feature was added by inspecting the diff
   and dependency graph.
 
@@ -166,6 +172,9 @@ or WebRTC.
 
 - Protocol/session tests using in-memory transport doubles.
 - Two-process or two-machine LAN smoke test when available.
+- The repeatable two-machine runbook is `docs/M2_PHYSICAL_SMOKE.md`; it uses
+  `scripts/create-m2-identities.sh` and the Host/Viewer `--m2-physical-*`
+  diagnostic flags without copying private keys.
 - Tests for required peer authentication, TLS/configuration failure, wrong
   peer identity, stale trust, two-sided consent, replay/freshness, handshake
   and connection deadlines, normal EOF, heartbeat timeout, bounded buffering,
@@ -173,10 +182,10 @@ or WebRTC.
 - Verify no protected content is sent before authorization.
 
 M3 cannot claim its dependency is complete while any M2 security gate remains
-open. M2's code gates are now complete; lack of an Intel machine may be
-recorded as an environment exception for cross-hardware LAN evidence, but it
-is not an exception for peer-authentication, consent, authorization, queue, or
-teardown correctness.
+open. M2's code gates and repeatable physical-test harness are complete; lack
+of an Intel machine may be recorded as an environment exception for the final
+cross-hardware LAN evidence, but it is not an exception for peer-authentication,
+consent, authorization, queue, or teardown correctness.
 
 ## M3 — Host window discovery and capture
 
@@ -297,6 +306,17 @@ handling, no clipboard, and no arbitrary serialized `CGEvent` transport.
 - Manual Viewer test with a local synthetic stream fixture.
 
 ## M6 — Host focus-aware input injection
+
+### Status
+
+The Host-side `InputCore` authorization matrix, normalized-window mapping,
+serialized controller, CoreGraphics/Accessibility context provider, typed
+event adapter, Host wire-message bridge, and per-session input-loop lifecycle
+are implemented. Deterministic
+fake-adapter tests cover authorization, permission, focus, stale identity/
+generation, malformed events, rate, replay, reset, lock, and secure-input
+rejection. Real OS event posting is intentionally a manual evidence gate and
+has not been run automatically.
 
 ### Scope
 

@@ -33,6 +33,9 @@ An event is emitted only when the Viewer session is authenticated and
 authorized, the selected window generation matches, the input capability is
 enabled, and the content rectangle is valid. Pointer coordinates are rejected
 outside the displayed content rectangle and normalized to `0...65535` per axis.
+The input surface uses a flipped AppKit coordinate system, so normalized `y=0`
+is the top edge and `y=65535` is the bottom edge; this matches Host global
+screen coordinates.
 The local input surface enforces the 240-events-per-second default and the
 512-byte encoded event-payload bound. Rejected events are reported as local
 readiness/validation failures and are not serialized as arbitrary platform

@@ -7,11 +7,15 @@ acceptance boundaries; implementation details belong in the architecture and
 protocol documents. The repository currently contains the M0 foundation, the
 M1 wire contract, the M2 secure-session implementation, the M3 Host capture
 foundation, and the M4 H.264/Metal foundation. M2 code and loopback security
-gates are complete; physical Intel-to-Apple-Silicon LAN evidence remains
+gates are complete, and a repeatable physical Bonjour/TLS smoke harness is
+available; the actual Intel-to-Apple-Silicon LAN evidence remains
 environment-dependent. Product capability implementation remains limited to
 the owning milestone boundaries. M5 now contains the Viewer input surface,
 typed event normalization, and authenticated event-transport foundation; it
-does not inject events into the Host OS.
+does not inject events into the Host OS. M6 now contains the Host-side
+authorization, current-window mapping, typed CoreGraphics/Accessibility
+adapter, per-session input-stream lifecycle wiring, and deterministic safety
+tests; actual OS event posting remains a manual evidence gate.
 
 ## Product goal
 
@@ -47,6 +51,11 @@ mouse and keyboard interaction, and text clipboard exchange.
 | Video | H.264, target 1080p, up to 60 fps |
 | Interaction | Mouse, keyboard, and text clipboard |
 | Connection | Explicit discovery, pairing, authentication, and session authorization |
+
+The Host executable is build-compatible with both `x86_64` and `arm64`; the V1
+integration target remains a physical Intel Host and an Apple Silicon Viewer.
+Build compatibility does not claim Host runtime, permission, or cross-machine
+interoperability on Apple Silicon.
 
 The exact supported macOS deployment target and toolchain matrix must be
 verified and recorded in M0. No document should silently assume that an API is

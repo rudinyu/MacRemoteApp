@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="background" x1="120" y1="80" x2="900" y2="960" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#172B62"/>
+      <stop offset="0.52" stop-color="#101D45"/>
+      <stop offset="1" stop-color="#09132F"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="190" y1="220" x2="824" y2="790" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#72F1FF"/>
+      <stop offset="1" stop-color="#4EA8FF"/>
+    </linearGradient>
+    <linearGradient id="link" x1="308" y1="492" x2="716" y2="552" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#58F0D0"/>
+      <stop offset="1" stop-color="#64D7FF"/>
+    </linearGradient>
+    <filter id="shadow" x="80" y="90" width="864" height="864" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="24" stdDeviation="24" flood-color="#020719" flood-opacity="0.48"/>
+    </filter>
+    <filter id="glow" x="230" y="390" width="564" height="244" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="18" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect x="64" y="64" width="896" height="896" rx="220" fill="url(#background)" filter="url(#shadow)"/>
+  <path d="M180 270C180 213.7 225.7 168 282 168H742C798.3 168 844 213.7 844 270V754C844 810.3 798.3 856 742 856H282C225.7 856 180 810.3 180 754V270Z" fill="#0D1A3C" fill-opacity="0.62"/>
+
+  <g fill="none" stroke="url(#glass)" stroke-width="28" stroke-linejoin="round">
+    <rect x="176" y="266" width="292" height="232" rx="48"/>
+    <rect x="556" y="526" width="292" height="232" rx="48"/>
+    <path d="M260 582H384" stroke-linecap="round"/>
+    <path d="M640 442H764" stroke-linecap="round"/>
+  </g>
+
+  <path d="M428 500L596 524" stroke="url(#link)" stroke-width="26" stroke-linecap="round" filter="url(#glow)"/>
+  <path d="M428 500L596 524" stroke="url(#link)" stroke-width="14" stroke-linecap="round"/>
+  <circle cx="428" cy="500" r="26" fill="#58F0D0"/>
+  <circle cx="596" cy="524" r="26" fill="#64D7FF"/>
+  <circle cx="428" cy="500" r="10" fill="#F2FFFF"/>
+  <circle cx="596" cy="524" r="10" fill="#F2FFFF"/>
+
+  <path d="M280 542V590C280 608 294 622 312 622H332" fill="none" stroke="#4E8BCE" stroke-width="18" stroke-linecap="round"/>
+  <path d="M692 466V418C692 400 706 386 724 386H744" fill="none" stroke="#4E8BCE" stroke-width="18" stroke-linecap="round"/>
+  <circle cx="260" cy="622" r="12" fill="#58F0D0"/>
+  <circle cx="764" cy="386" r="12" fill="#64D7FF"/>
+
+  <rect x="222" y="310" width="200" height="12" rx="6" fill="#A9F8FF" fill-opacity="0.55"/>
+  <rect x="602" y="570" width="200" height="12" rx="6" fill="#A9F8FF" fill-opacity="0.55"/>
+</svg>

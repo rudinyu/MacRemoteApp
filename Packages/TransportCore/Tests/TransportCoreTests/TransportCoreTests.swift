@@ -9,6 +9,30 @@ final class TransportCoreTests: XCTestCase {
         XCTAssertEqual(TransportCoreModule.name, "TransportCore")
     }
 
+    func testMessageStreamCanDiscardOnlyQueuedInputMessages() async throws {
+        let stream = try MessageStream.makeBounded(
+            maxControlMessages: 8,
+            maxMediaMessages: 2
+        )
+        _ = try stream.storage.yield(
+            .inputEvent(
+                InputEventMessage(
+                    kind: .pointerMove,
+                    windowGeneration: 1,
+                    x: 1,
+                    y: 2
+                )
+            )
+        )
+        _ = try stream.storage.yield(.ping(PingMessage(nonce: 7)))
+
+        stream.storage.removePendingInputMessages()
+
+        var iterator = stream.stream.makeAsyncIterator()
+        let message = try await iterator.next()
+        XCTAssertEqual(message, .ping(PingMessage(nonce: 7)))
+    }
+
     func testBoundedQueuesPrioritizeControlAndDropOnlyDiscardableMedia() async throws {
         let queue = try BoundedFrameQueue(maxControlFrames: 2, maxMediaFrames: 2)
         let control = try Envelope(
@@ -1305,6 +1329,107 @@ final class TransportCoreTests: XCTestCase {
             await Task.yield()
         }
         XCTAssertEqual(host.incomingMessages.storage.counts().control, 1)
+
+        await host.stop()
+        await viewer.stop()
+    }
+
+    func testIncomingInputAdmissionIsFencedAgainstAuthorizationRevocation() async throws {
+        let hostIdentity = try PeerIdentity(publicKeyRepresentation: Data("host-incoming-fence".utf8))
+        let viewerIdentity = try PeerIdentity(publicKeyRepresentation: Data("viewer-incoming-fence".utf8))
+        let pair = InMemoryTransport.makePair(
+            firstAuthentication: .trusted(viewerIdentity),
+            secondAuthentication: .trusted(hostIdentity)
+        )
+        try await pair.first.start()
+        try await pair.second.start()
+
+        let capabilities: Set<Capability> = [.pingPong, .mouseInput]
+        let host = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .host,
+                implementationIdentifier: "incoming-fence-host",
+                capabilities: capabilities
+            ),
+            transport: pair.first
+        )
+        let viewer = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .viewer,
+                implementationIdentifier: "incoming-fence-viewer",
+                capabilities: capabilities
+            ),
+            transport: pair.second
+        )
+
+        async let hostStart: Void = host.start()
+        async let viewerStart: Void = viewer.start()
+        try await hostStart
+        try await viewerStart
+        for _ in 0 ..< 100 {
+            if (await host.snapshot()).state == .capabilitiesNegotiated,
+               (await viewer.snapshot()).state == .capabilitiesNegotiated {
+                break
+            }
+            await Task.yield()
+        }
+        try await host.authorize(windowGeneration: 5, capabilities: [.mouseInput])
+        for _ in 0 ..< 100 {
+            if (await viewer.snapshot()).authorized { break }
+            await Task.yield()
+        }
+
+        let input = InputEventMessage(
+            kind: .pointerMove,
+            windowGeneration: 5,
+            x: 100,
+            y: 200
+        )
+        let operationEntered = DispatchSemaphore(value: 0)
+        let releaseOperation = DispatchSemaphore(value: 0)
+        let admissionTask = Task { () throws -> Bool in
+            try await host.withIncomingInputAdmission(for: input) {
+                operationEntered.signal()
+                releaseOperation.wait()
+                return true
+            }
+        }
+        XCTAssertEqual(
+            operationEntered.wait(timeout: .now() + 1),
+            .success,
+            "the admission operation must run synchronously on the session actor"
+        )
+
+        let revokeRequested = DispatchSemaphore(value: 0)
+        let revokeTask = Task { () -> Bool in
+            revokeRequested.signal()
+            do {
+                try await host.revokeAuthorization()
+                return true
+            } catch {
+                return false
+            }
+        }
+        XCTAssertEqual(
+            revokeRequested.wait(timeout: .now() + 1),
+            .success,
+            "the revoke request must be submitted while admission is held"
+        )
+        releaseOperation.signal()
+        let admissionSucceeded = try await admissionTask.value
+        XCTAssertTrue(admissionSucceeded)
+        let revokeSucceeded = await revokeTask.value
+        XCTAssertTrue(revokeSucceeded)
+
+        do {
+            _ = try await host.withIncomingInputAdmission(for: input) {
+                XCTFail("revoked authorization must not reach the injection operation")
+                return false
+            }
+            XCTFail("revoked authorization must reject incoming input")
+        } catch SessionError.unauthorizedMessage(.inputEvent) {
+            // Expected: the local authorization epoch is already invalid.
+        }
 
         await host.stop()
         await viewer.stop()

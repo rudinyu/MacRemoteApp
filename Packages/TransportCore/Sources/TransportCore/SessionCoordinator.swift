@@ -317,6 +317,13 @@ public actor SessionCoordinator {
         )
     }
 
+    /// Drops input records that were buffered before a local Host safety
+    /// transition. This does not affect unrelated control messages or the
+    /// session's wire sequence state.
+    public func discardPendingInputMessages() {
+        incomingMessageStorage.removePendingInputMessages()
+    }
+
     public func start() async throws {
         guard state == .connecting || state == .reconnecting else {
             throw SessionError.invalidState(state)
@@ -672,6 +679,20 @@ public actor SessionCoordinator {
     public func send(_ payload: MessagePayload, flags: EnvelopeFlags = []) async throws {
         try validateAuthorization(for: payload)
         _ = try await sendUnrestricted(payload, flags: flags)
+    }
+
+    /// Runs one Host-side input admission while the session actor remains
+    /// non-reentrant. The operation is synchronous by design: a local revoke,
+    /// reconnect, or stop cannot interleave between the authorization check
+    /// and the platform injection performed by the caller.
+    public func withIncomingInputAdmission<T: Sendable>(
+        for input: InputEventMessage,
+        operation: @Sendable () throws -> T
+    ) throws -> T {
+        let payload = MessagePayload.inputEvent(input)
+        try validateMessageDirection(for: payload.messageType, incoming: true)
+        try validateAuthorization(for: payload)
+        return try operation()
     }
 
     /// Issues an opaque admission for a Viewer input message.  The caller may

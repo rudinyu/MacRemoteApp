@@ -195,7 +195,8 @@ prompts, or events intended for background/unfocused applications.
 ### M5 binding decisions
 
 - Viewer pointer coordinates are normalized to unsigned 16-bit values against
-  the current content rectangle. Events outside that rectangle, or while the
+  the current content rectangle. The Viewer surface uses a top-left origin:
+  `y=0` is the top edge and `y=65535` is the bottom edge. Events outside that rectangle, or while the
   surface is not authenticated, authorized, and stream-ready, are rejected
   locally and never sent.
 - `InputCore` assigns a local monotonic event ordinal and carries the current
@@ -208,9 +209,39 @@ prompts, or events intended for background/unfocused applications.
   raw `NSEvent`, `CGEvent`, key logs, or clipboard data. `TransportCore` then
   applies session authentication, direction, capability, sequence, and window
   generation checks.
-- M5 verification may use a Host test double to inspect typed records. Actual
-  Host coordinate mapping and OS event injection require the M6 permission,
-  foreground, focus, and selected-window checks.
+- M5 verification may use a Host test double to inspect typed records. M6 now
+  performs Host coordinate mapping and OS event injection only after the
+  permission, foreground, focus, and selected-window checks below.
+
+### M6 binding decisions
+
+- `Apps/Host/HostInputMessageHandler` converts only the typed
+  `InputEventMessage` fields into an `InputCore.InputEventRecord`. The
+  already-authenticated ordered delivery gate is followed by a Host-local
+  per-session sequence and local monotonic arrival timestamp; remote payload
+  fields do not provide admission authority.
+- `InputCore.HostInputController` queries Host context for every event and
+  requires session authorization, matching window generation and process/
+  window identity, current window geometry, Accessibility/post-event
+  permission, eligible foreground focus, and the negotiated mouse/keyboard
+  capability. Commands retain the selected target identity so the OS adapter
+  can repeat the check immediately before posting.
+- Normalized coordinates map to the selected window's current global screen
+  bounds. Only typed CoreGraphics commands are accepted; arbitrary `CGEvent`
+  archives, background activation, locked-screen control, and secure-input
+  bypass remain unsupported.
+- Disconnect, authorization revocation, focus/permission loss, and selection
+  changes reset Host input sequence/rate state and attempt safe release of
+  admitted pressed state while the same target and permission remain valid.
+  A known not-foreground state is permitted only for this target-bound cleanup;
+  normal input still requires eligible focus. Host lifecycle code announces a
+  selection change before replacing the CaptureCore selection. If that order
+  is missed, the stale release is rejected and the Host closes the session
+  rather than admitting input for the replacement target. If permission is
+  unavailable, cleanup remains pending and status stays unavailable until a
+  safe snapshot allows a retry.
+  Unknown secure-input or console state is rejected because macOS has no
+  reliable public status query for those transitions.
 
 ## Clipboard contract
 

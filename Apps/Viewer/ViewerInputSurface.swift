@@ -5,6 +5,12 @@ import InputCore
 /// injects or archives platform events.
 @MainActor
 final class ViewerInputSurface: NSView {
+    // AppKit's default NSView coordinate system starts at the lower-left,
+    // while the Host's CGWindow/CGEvent screen coordinates start at the
+    // upper-left. Keep the Viewer surface in the same top-left convention as
+    // the normalized wire coordinates so Host mapping does not mirror Y.
+    override var isFlipped: Bool { true }
+
     private var trackingArea: NSTrackingArea?
     private var windowFocusObserver: NSObjectProtocol?
     private var windowBecomeKeyObserver: NSObjectProtocol?

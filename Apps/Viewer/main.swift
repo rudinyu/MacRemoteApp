@@ -1,3 +1,4 @@
+import Darwin
 import CodecCore
 import InputCore
 import RemoteProtocol
@@ -7,9 +8,20 @@ import TransportCore
 @MainActor
 @main
 struct ViewerApp {
-    static func main() {
+    static func main() async {
         if CommandLine.arguments.contains("--m5-input-surface") {
-            ViewerInputDemo().run()
+            let demo = ViewerInputDemo()
+            demo.run()
+            return
+        }
+
+        if CommandLine.arguments.contains("--m2-physical-viewer") {
+            do {
+                try await M2PhysicalViewerSmoke.run()
+            } catch {
+                fputs("M2 physical viewer smoke failed: \(error)\n", stderr)
+                exit(EXIT_FAILURE)
+            }
             return
         }
 

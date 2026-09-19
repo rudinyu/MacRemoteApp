@@ -178,6 +178,23 @@ internal final class MessageStreamStorage: @unchecked Sendable {
         }
     }
 
+    /// Removes queued input records after a local Host safety transition.
+    ///
+    /// Other control messages remain available to the app dispatcher. An
+    /// input record already handed to the sole consumer cannot be recalled;
+    /// the Host input loop therefore pairs this operation with its controller
+    /// reset before it admits another record.
+    func removePendingInputMessages() {
+        lock.withLock {
+            queue.removeAll { message in
+                if case .inputEvent = message {
+                    return true
+                }
+                return false
+            }
+        }
+    }
+
     func reset() {
         lock.withLock {
             queue.removeAll(keepingCapacity: false)

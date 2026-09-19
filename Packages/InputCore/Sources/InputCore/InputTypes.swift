@@ -314,6 +314,12 @@ public struct InputEventRecord: Equatable, Sendable {
                 throw InputCoreError.invalidEvent
             }
         }
+        guard estimatedEncodedPayloadBytes <= limits.maxEncodedPayloadBytes else {
+            throw InputCoreError.eventTooLarge(
+                actual: estimatedEncodedPayloadBytes,
+                maximum: limits.maxEncodedPayloadBytes
+            )
+        }
     }
 
     /// Exact size for the M1 schema's field framing, excluding the envelope.
