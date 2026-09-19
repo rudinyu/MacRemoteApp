@@ -4,21 +4,19 @@
 
 This is the V1 product specification. It defines the user-visible goal and
 acceptance boundaries; implementation details belong in the architecture and
-protocol documents. The repository currently contains the M0 foundation, the
-M1 wire contract, the M2 secure-session implementation, the M3 Host capture
-foundation, and the M4 H.264/Metal foundation. M2 code and loopback security
-gates are complete, and a repeatable physical Bonjour/TLS smoke harness is
-available; the actual Intel-to-Apple-Silicon LAN evidence remains
-environment-dependent. Product capability implementation remains limited to
-the owning milestone boundaries. M5 now contains the Viewer input surface,
-typed event normalization, and authenticated event-transport foundation; it
-does not inject events into the Host OS. M6 now contains the Host-side
-authorization, current-window mapping, typed CoreGraphics/Accessibility
-adapter, per-session input-stream lifecycle wiring, and deterministic safety
-tests; actual OS event posting remains a manual evidence gate. M7 now contains
-the bounded, opt-in text clipboard flow, session-state projection, and
-Host/Viewer string-pasteboard bridges; its physical two-Mac clipboard evidence
-remains pending.
+protocol documents. The repository contains the M0 foundation, M1 wire
+contract, M2 secure session, M3 capture, M4 codec/Metal, M5 Viewer input, M6
+Host input, M7 clipboard/UX, M8 resilience, M9 release audit, and M10
+production composition. M10 now wires the existing packages into launchable
+Host and Viewer runtimes for a pre-provisioned trusted peer: one eligible
+window is advertised and selected, captured, H.264 encoded, transported,
+decoded, rendered, and paired with the existing authenticated input and
+opt-in text clipboard paths. The actual Intel-to-Apple-Silicon run remains
+environment-dependent. Explicit pairing UI, a Host window-picker UI,
+physical OS event posting, and the two-Mac clipboard/performance evidence
+remain acceptance gates; the current pilot uses the Viewer picker to select
+one eligible advertised window while the Host remains authoritative for
+validation.
 
 ## Product goal
 

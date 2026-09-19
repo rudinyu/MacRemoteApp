@@ -20,8 +20,11 @@ swift package describe >/dev/null
 echo "Validating physical smoke and app bundle inputs"
 bash -n \
     scripts/create-m2-identities.sh \
+    scripts/create-device-dmgs.sh \
+    scripts/install-device-apps.sh \
     scripts/package-device-apps.sh \
-    scripts/notarize-device-apps.sh
+    scripts/notarize-device-apps.sh \
+    scripts/uninstall-device-apps.sh
 plutil -lint Resources/Host-Info.plist Resources/Viewer-Info.plist >/dev/null
 test -s Resources/MacRemoteAppIcon.svg
 for forbidden_identity_path in \
@@ -75,8 +78,12 @@ done
 bash -n \
     scripts/run-m8-benchmark.sh \
     scripts/audit-release.sh \
+    scripts/create-device-dmgs.sh \
+    scripts/install-device-apps.sh \
     scripts/run-m10-acceptance.sh \
-    scripts/notarize-device-apps.sh
+    scripts/notarize-device-apps.sh \
+    scripts/validate-notarized-release.sh \
+    scripts/uninstall-device-apps.sh
 
 echo "Building Host (arm64)"
 swift build \
@@ -159,7 +166,11 @@ if (( m8_malformed_input_exit == 0 )); then
 fi
 
 echo "Packaging and auditing M9 release candidates"
+validation_release_build_root="${build_root}/release-build"
+validation_release_root="${build_root}/release"
+MACREMOTEAPP_RELEASE_BUILD_ROOT="${validation_release_build_root}" \
+MACREMOTEAPP_RELEASE_ROOT="${validation_release_root}" \
 MACREMOTEAPP_SIGNING_IDENTITY=- bash scripts/package-device-apps.sh
-bash scripts/audit-release.sh
+bash scripts/audit-release.sh "${validation_release_root}"
 
 echo "Public validation passed"

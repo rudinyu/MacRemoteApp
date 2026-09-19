@@ -5,6 +5,21 @@ import SecurityCore
 import XCTest
 
 final class TransportCoreTests: XCTestCase {
+    func testStreamGenerationGateRejectsStaleFramesAndRevokedInput() {
+        var gate = StreamGenerationGate()
+        XCTAssertFalse(gate.accepts(1))
+
+        gate.advance(to: 7)
+        XCTAssertTrue(gate.accepts(7))
+        XCTAssertFalse(gate.accepts(6))
+
+        gate.advance(to: 6)
+        XCTAssertEqual(gate.generation, 7)
+
+        gate.revoke()
+        XCTAssertFalse(gate.accepts(7))
+    }
+
     func testM0FoundationMarker() {
         XCTAssertEqual(TransportCoreModule.name, "TransportCore")
     }

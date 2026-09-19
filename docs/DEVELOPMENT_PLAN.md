@@ -24,9 +24,12 @@ fail-closed when its state is unknown. M7's implementation/test gate is
 complete, including the two app-layer pasteboard bridges; its physical
 Intel-Host/Apple-Silicon-Viewer clipboard walkthrough remains an environment
 evidence item. M8's deterministic measurement/resilience gate and M9's
-release-audit gate are implemented. M10's deterministic final gate and
-acceptance checklist are implemented, while the physical two-machine
-acceptance remains unverified on this Apple Silicon workspace.
+release-audit gate are implemented. M10 now also has a launchable Host/Viewer
+production composition covering Bonjour/TLS, one-window discovery and Viewer
+selection, capture, H.264/Metal presentation, authenticated input, and opt-in
+text clipboard delivery. M10's deterministic final gate and acceptance
+checklist are implemented, while interactive pairing UI and the physical
+two-machine acceptance remain unverified on this Apple Silicon workspace.
 
 ## Delivery principles
 
@@ -473,10 +476,13 @@ No new product feature or scope expansion under the label of hardening.
 
 ### Implementation status
 
-The deterministic final gate, role commands, sanitized evidence boundary, and
-operator acceptance checklist are implemented in
-`docs/M10_ACCEPTANCE.md`. The actual Intel Host to Apple Silicon Viewer run
-cannot be claimed until it is executed on both physical Macs.
+The production Host/Viewer composition, deterministic final gate, role
+commands, sanitized evidence boundary, and operator acceptance checklist are
+implemented in `docs/M10_ACCEPTANCE.md`. The current production pilot uses
+pre-provisioned Keychain identities and an explicit Viewer window picker; the
+interactive pairing UI is still a recorded residual. The actual Intel Host to
+Apple Silicon Viewer run cannot be claimed until it is executed on both
+physical Macs.
 
 ### Scope
 

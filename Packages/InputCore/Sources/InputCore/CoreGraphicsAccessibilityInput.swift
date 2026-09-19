@@ -24,11 +24,60 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
     public init(
         sessionStateProvider: @escaping SessionStateProvider,
         selectionProvider: @escaping SelectionProvider,
-        secureInputStateProvider: @escaping SecureInputStateProvider = { .unknown }
+        secureInputStateProvider: @escaping SecureInputStateProvider = Self.detectSecureInputState
     ) {
         self.sessionStateProvider = sessionStateProvider
         self.selectionProvider = selectionProvider
         self.secureInputStateProvider = secureInputStateProvider
+    }
+
+    /// Best-effort local secure-input signal. macOS does not expose a single
+    /// public global secure-input flag, so the provider checks the focused
+    /// Accessibility element for the secure-text-field role and fails closed
+    /// when Accessibility cannot provide a trustworthy answer. This is a
+    /// local host fact only; it never uses Viewer input as evidence.
+    public static func detectSecureInputState() -> HostInputSecureInputState {
+        guard AXIsProcessTrusted() else { return .unknown }
+
+        let system = AXUIElementCreateSystemWide()
+        var focusedValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            system,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedValue
+        ) == .success,
+        let focusedValue,
+        CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
+            return .unknown
+        }
+        let focused = unsafeDowncast(focusedValue, to: AXUIElement.self)
+
+        var roleValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            focused,
+            kAXRoleAttribute as CFString,
+            &roleValue
+        ) == .success,
+        let role = roleValue as? String else {
+            return .unknown
+        }
+
+        if role == "AXSecureTextField" {
+            return .active
+        }
+
+        var subroleValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(
+            focused,
+            kAXSubroleAttribute as CFString,
+            &subroleValue
+        ) == .success,
+           let subrole = subroleValue as? String,
+           subrole == "AXSecureTextField" {
+            return .active
+        }
+
+        return .inactive
     }
 
     public func currentContext() -> HostInputContext {

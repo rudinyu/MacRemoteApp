@@ -5,8 +5,8 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd)"
 cd "${repo_root}"
 
-build_root="${repo_root}/.build/device-binaries"
-release_root="${build_root}/release"
+build_root="${MACREMOTEAPP_RELEASE_BUILD_ROOT:-${repo_root}/.build/device-binaries}"
+release_root="${MACREMOTEAPP_RELEASE_ROOT:-${build_root}/release}"
 rm -rf -- "${release_root}"
 mkdir -p -- "${release_root}"
 
@@ -125,6 +125,9 @@ ditto -c -k --keepParent \
 ditto -c -k --keepParent \
     "${release_root}/MacRemoteApp-Viewer.app" \
     "${release_root}/MacRemoteApp-Viewer.app.zip"
+
+MACREMOTEAPP_SIGNING_IDENTITY="${signing_identity}" \
+    bash "${script_dir}/create-device-dmgs.sh" "${release_root}"
 
 echo "Packaged signed artifacts in ${release_root}"
 echo "Host:   ${release_root}/MacRemoteApp-Host.app"

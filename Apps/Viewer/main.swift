@@ -1,5 +1,6 @@
 import Darwin
 import CodecCore
+import Foundation
 import InputCore
 import RemoteProtocol
 import SecurityCore
@@ -46,14 +47,12 @@ struct ViewerApp {
         }
 #endif
 
-        let modules = [
-            RemoteProtocolModule.name,
-            CodecCoreModule.name,
-            TransportCoreModule.name,
-            InputCoreModule.name,
-            SecurityCoreModule.name
-        ]
-
-        print("MacRemoteApp Viewer M5 foundation: \(modules.joined(separator: ", "))")
+        do {
+            let runtime = try ViewerRuntime(configuration: .load())
+            runtime.run()
+        } catch {
+            fputs("MacRemoteApp Viewer failed: \(error)\n", stderr)
+            exit(EXIT_FAILURE)
+        }
     }
 }

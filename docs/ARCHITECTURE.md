@@ -192,6 +192,15 @@ Additional rules:
   selected target. A permission/focus outage can therefore temporarily block
   reconnection; cancelling the cleanup lease could leave an OS key/button
   pressed indefinitely.
+- In M10, `Apps/Host/HostRuntime` composes the listener, `CaptureCore`,
+  `CodecCore`, `InputCore`, clipboard bridges, and `SessionCoordinator` for
+  one authenticated Viewer. `Apps/Viewer/ViewerRuntime` composes Bonjour
+  discovery, the authenticated session, H.264 decode, Metal presentation, the
+  Viewer input surface, and clipboard bridge. The current pilot uses a
+  pre-provisioned pinned peer certificate and a Viewer-owned one-window picker;
+  the Host remains authoritative by validating eligibility and generation
+  before authorization. Interactive pairing UI and physical cross-hardware
+  evidence remain M10 acceptance gates.
 - The physical M2 diagnostic orchestration remains in `Apps/Host` and
   `Apps/Viewer`; `TransportCore` only exposes the Bonjour/TLS/session APIs.
   `SecurityCore.PublicCertificateIdentity` derives a pinned peer identity from

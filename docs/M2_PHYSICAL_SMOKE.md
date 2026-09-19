@@ -30,7 +30,12 @@ intentionally debug-only, so the release binaries do not contain them.
 For the optional signed install artifacts, the script builds a universal Host
 (`x86_64` + `arm64`) and an Apple Silicon Viewer, creates the `.icns` from the
 checked-in SVG, embeds Local Network/Bonjour metadata, and packages both app
-bundles under `.build/device-binaries/release/`.
+bundles and role-specific signed DMGs under `.build/device-binaries/release/`.
+That package-only command is a local signing step; use
+`scripts/notarize-device-apps.sh` for the notarized artifacts used for
+distribution or TCC-stable installation. Deterministic CI and M10 validation
+use separate temporary release roots and do not overwrite that notarized
+directory.
 
 For stable macOS TCC identity, use a Developer ID Application certificate. Do
 not put the certificate name in the repository; pass it only in the shell:
@@ -47,8 +52,17 @@ can cause macOS privacy permission identity to reset when the app changes.
 
 Copy these artifacts to the Macs without copying repository metadata:
 
-- Intel Mac: `MacRemoteApp-Host.app` or its zip.
-- Apple Silicon Mac: `MacRemoteApp-Viewer.app` or its zip.
+- Intel Mac: `MacRemoteApp-Host.app`, its zip, or `MacRemoteApp-Host.dmg`.
+- Apple Silicon Mac: `MacRemoteApp-Viewer.app`, its zip, or
+  `MacRemoteApp-Viewer.dmg`.
+
+The DMG contains the role-specific `Install-MacRemoteApp-*.command` and
+`Uninstall-MacRemoteApp-*.command` files. From a release directory, the same
+workflow is available with `scripts/install-device-apps.sh`; it installs into
+`~/Applications` by default and verifies the app signature before copying.
+Use `scripts/uninstall-device-apps.sh --role host --yes` or the corresponding
+Viewer command to remove only the selected app bundle. These scripts do not
+remove Keychain trust records or macOS permission grants.
 
 The common icon is the source-of-truth vector at
 `Resources/MacRemoteAppIcon.svg`; the packaging script produces the Finder

@@ -60,6 +60,33 @@ for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
     mv -f -- "${notarized_zip}" "${app_zip}"
 done
 
-bash "${script_dir}/audit-release.sh" "${release_root}"
-echo "Developer ID notarization and staple validation passed"
+# Rebuild the disk images after the nested app tickets have been stapled, then
+# notarize and staple each distributable DMG as its own release artifact.
+MACREMOTEAPP_SIGNING_IDENTITY="${signing_identity}" \
+    bash "${script_dir}/create-device-dmgs.sh" "${release_root}"
+
+for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
+    dmg_path="${release_root}/${app_name}.dmg"
+    test -s "${dmg_path}"
+
+    signature_info="$(codesign --display --verbose=4 "${dmg_path}" 2>&1)"
+    if ! printf '%s\n' "${signature_info}" | rg -q 'Authority=Developer ID Application:'; then
+        echo "Notarization requires a Developer ID Application signature: ${dmg_path}" >&2
+        exit 1
+    fi
+
+    echo "Submitting ${app_name}.dmg with Keychain profile ${notary_profile}"
+    xcrun notarytool submit \
+        "${dmg_path}" \
+        --keychain-profile "${notary_profile}" \
+        --wait
+
+    echo "Stapling and validating ${app_name}.dmg"
+    xcrun stapler staple "${dmg_path}"
+    xcrun stapler validate "${dmg_path}"
+    spctl --assess --type install --verbose=4 "${dmg_path}"
+done
+
+bash "${script_dir}/validate-notarized-release.sh" "${release_root}"
+echo "Developer ID notarization and staple validation passed for apps and DMGs"
 echo "Release artifacts: ${release_root}"

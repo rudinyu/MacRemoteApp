@@ -16,7 +16,8 @@ struct HostApp {
         _ session: SessionCoordinator,
         contextProvider: any HostInputContextProvider,
         injectionAdapter: any HostInputInjectionAdapter,
-        onNonInputMessage: @escaping @Sendable (MessagePayload) async -> Void
+        onNonInputMessage: @escaping @Sendable (MessagePayload) async -> Void,
+        onSessionLifecycleReset: @escaping @Sendable () async -> Void = {}
     ) async -> HostInputSessionRuntime {
         let clipboardController = await MainActor.run {
             HostClipboardSessionController(session: session)
@@ -39,6 +40,7 @@ struct HostApp {
             onSessionLifecycleReset: {
                 let snapshot = await session.snapshot()
                 await clipboardController.resetForSessionLifecycleIfStale(snapshot)
+                await onSessionLifecycleReset()
             },
             setClipboardEnabled: { enabled in
                 try await clipboardController.setEnabled(enabled)
@@ -83,16 +85,13 @@ struct HostApp {
         }
 #endif
 
-        let modules = [
-            RemoteProtocolModule.name,
-            CaptureCoreModule.name,
-            CodecCoreModule.name,
-            TransportCoreModule.name,
-            InputCoreModule.name,
-            SecurityCoreModule.name
-        ]
-
-        print("MacRemoteApp Host M6 input foundation: \(modules.joined(separator: ", "))")
+        do {
+            let runtime = try HostRuntime(configuration: .load())
+            try await runtime.run()
+        } catch {
+            fputs("MacRemoteApp Host failed: \(error)\n", stderr)
+            exit(EXIT_FAILURE)
+        }
     }
 
 #if DEBUG

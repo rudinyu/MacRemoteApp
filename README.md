@@ -13,7 +13,8 @@ physical Host target remains Intel, while the Viewer target is Apple Silicon.
 The M2 secure LAN session implementation, PKCS#12/Keychain identity
 provisioning, and real loopback mutual-TLS/session smoke test are complete.
 The repository now includes a repeatable physical Intel Host to Apple Silicon
-Viewer Bonjour/TLS/capability smoke harness and signed app-bundle packaging;
+Viewer Bonjour/TLS/capability smoke harness, signed app/DMG packaging, and
+role-specific install/uninstall scripts;
 the actual two-machine run remains an environment evidence gate. M3 now
 contains the Host window catalog
 and ScreenCaptureKit capture foundation with deterministic fake-provider tests
@@ -31,9 +32,15 @@ includes the authenticated clock-sync/percentile model, deterministic
 performance harness, bounded-queue stress coverage, and reconnect/keyframe
 resilience evidence. M9 adds release-only debug gating, hardened-runtime
 artifact audit, negative-test documentation, and a residual-risk record. M10
-adds the deterministic final gate plus the two-machine acceptance checklist;
-the actual Intel-to-Apple-Silicon run remains an explicitly unverified
-environment item until it is executed on both Macs.
+adds the deterministic final gate, the production Host/Viewer composition for
+pre-provisioned trusted identities, and the two-machine acceptance checklist.
+The production path now wires window discovery/selection, ScreenCaptureKit,
+H.264 encode/decode, Metal presentation, authenticated mouse/keyboard input,
+and opt-in text clipboard synchronization. The Viewer presents the eligible
+Host windows in a picker so a system/helper window is not selected silently.
+The actual Intel-to-Apple-Silicon run, explicit pairing UI, and OS
+Accessibility/input evidence remain environment gates until they are executed
+on both Macs.
 
 The repository root is:
 
@@ -103,9 +110,46 @@ Package Manager commands from the repository root.
 
 Use [`docs/M2_PHYSICAL_SMOKE.md`](docs/M2_PHYSICAL_SMOKE.md) to build the
 universal Host/arm64 Viewer bundles, generate non-secret public certificate
-files, and run the two-machine Bonjour/TLS smoke. The packaging source icon is
+files, and run the two-machine Bonjour/TLS smoke. `scripts/package-device-apps.sh`
+also creates local signed role-specific DMGs under
+`.build/device-binaries/release/`; this package-only output is not a
+notarized distribution. `scripts/notarize-device-apps.sh` is the release path
+that signs, submits, staples, and validates the notarized apps and DMGs.
+`scripts/install-device-apps.sh` and `scripts/uninstall-device-apps.sh` manage
+the exact app bundles in `~/Applications`. The packaging source icon is
 [`Resources/MacRemoteAppIcon.svg`](Resources/MacRemoteAppIcon.svg); generated
 `.icns`, app bundles, and test identities stay outside version control.
+
+The repository validation and deterministic M10 gate write their temporary
+ad-hoc test packages under isolated `.build/ci-release/` or
+`.build/m10-acceptance/release/` directories; they do not overwrite the final
+`.build/device-binaries/release/` directory. To have validation consume an
+already notarized release directly, set
+`MACREMOTEAPP_CI_NOTARIZED_RELEASE_ROOT` to that release directory when
+running `.codex/ci.sh`. `scripts/validate-notarized-release.sh` is read-only
+with respect to the release payload and never submits credentials or uploads
+artifacts.
+
+## M10 production pilot
+
+The installed Host and Viewer binaries start their production runtime when
+launched without debug-only smoke arguments. They require a provisioned
+Keychain identity and the trusted peer's public certificate path:
+
+```bash
+export MACREMOTEAPP_PEER_CERT='/secure/operator-config/peer.cer'
+open ~/Applications/MacRemoteApp-Host.app
+open ~/Applications/MacRemoteApp-Viewer.app
+```
+
+Debug builds may load a PKCS#12 identity through the existing
+`MACREMOTEAPP_LOCAL_IDENTITY_P12` and `MACREMOTEAPP_P12_PASSWORD` test
+workflow; those variables are not compiled into release behavior. The current
+pilot uses the existing one-window selection protocol and a Viewer picker; the
+Host remains authoritative and validates the selected generation. Use
+[`docs/M10_ACCEPTANCE.md`](docs/M10_ACCEPTANCE.md) for the
+required permissions, trusted identities, and physical evidence; a successful
+local build is not a two-Mac acceptance result.
 
 ## V1 in one paragraph
 
@@ -158,8 +202,8 @@ appropriate document before implementation.
 | M6 | Host-side focus-aware input mapping and injection (implementation/test gate complete; OS evidence pending) |
 | M7 | Text clipboard synchronization and session UX (implementation/test gate complete; physical walkthrough pending) |
 | M8 | Performance/resilience implementation and deterministic evidence (physical report pending) |
-| M9 | Security hardening, release audit, and notarization helper (profile execution pending) |
-| M10 | Integration pilot tooling/checklist (physical Intel-to-Apple-Silicon acceptance pending) |
+| M9 | Security hardening, signed app/DMG release audit, install lifecycle, and notarization helper (current notarized artifacts verified; profile remains host-specific) |
+| M10 | Production Host/Viewer vertical slice and acceptance checklist (physical Intel-to-Apple-Silicon acceptance pending) |
 
 Each milestone is independently scoped in `docs/DEVELOPMENT_PLAN.md`. Do not
 skip a gate because a later feature appears easy to prototype.

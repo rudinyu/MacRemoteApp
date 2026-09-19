@@ -7,6 +7,8 @@ release_root="${1:-${repo_root}/.build/device-binaries/release}"
 
 cd "${repo_root}"
 test -d "${release_root}"
+audit_tmp_dir="$(mktemp -d "${TMPDIR:-/private/tmp}/macremoteapp-release-audit.XXXXXX")"
+trap 'rm -rf -- "${audit_tmp_dir}"' EXIT
 
 for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
     app_path="${release_root}/${app_name}.app"
@@ -22,7 +24,7 @@ for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
         exit 1
     fi
 
-    entitlements_path="${release_root}/${app_name}.entitlements.txt"
+    entitlements_path="${audit_tmp_dir}/${app_name}.entitlements.txt"
     codesign --display --entitlements :- "${app_path}" >"${entitlements_path}" 2>&1 || true
     if rg -n 'com\.apple\.security\.get-task-allow|allow-dyld-environment-variables' \
         "${entitlements_path}" >/dev/null; then
@@ -37,6 +39,12 @@ for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
     fi
 done
 
+for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
+    dmg_path="${release_root}/${app_name}.dmg"
+    test -s "${dmg_path}"
+    codesign --verify --verbose=2 "${dmg_path}"
+done
+
 if find "${release_root}" -type f \( -name '*.p12' -o -name '*.key' -o -name '*.pem' \) -print -quit | rg -q .; then
     echo "Release audit failed: private identity material is inside the release artifact" >&2
     exit 1
@@ -49,5 +57,4 @@ if git grep -q -I -E \
     exit 1
 fi
 
-rm -f -- "${release_root}"/*.entitlements.txt
-echo "M9 release audit passed: hardened runtime, no development entitlements, no debug commands, no identity material"
+echo "M9 release audit passed: hardened apps, signed DMGs, no development entitlements, no debug commands, no identity material"

@@ -6,9 +6,14 @@ M9 adds a repeatable release audit, hardened-runtime checks, development-command
 gating, negative-test coverage, and this residual-risk record. It adds no V1
 product feature. The repository also provides
 `scripts/notarize-device-apps.sh` for the operator-run Developer ID and
-notarization flow. The Keychain profile name is configurable through
-`MACREMOTEAPP_NOTARY_PROFILE` and defaults to `notarytool-profile`; profile
-credentials never enter the repository or validation logs.
+notarization flow. The packaging flow produces signed app bundles,
+role-specific DMGs, and role-specific install/uninstall command files. The
+Keychain profile name is configurable through `MACREMOTEAPP_NOTARY_PROFILE`
+and defaults to `notarytool-profile`; profile credentials never enter the
+repository or validation logs. Deterministic CI packages are isolated under
+`.build/ci-release/` and are never treated as distributable release output.
+When `MACREMOTEAPP_CI_NOTARIZED_RELEASE_ROOT` is supplied, CI directly
+validates that existing notarized release without rebuilding or replacing it.
 
 ## Threat-model review
 
@@ -31,10 +36,26 @@ credentials never enter the repository or validation logs.
 - Release app bundles are signed with the hardened runtime. Developer ID
   signing is selected through `MACREMOTEAPP_SIGNING_IDENTITY`; ad-hoc signing
   is allowed only for local validation and is not a distribution claim.
+- `scripts/create-device-dmgs.sh` creates one DMG per role, includes the
+  signed app and role-specific install/uninstall command files, and signs the
+  DMG with the same identity. The shell scripts are not standalone code
+  signing objects; their copies are covered by the signed DMG and are
+  syntax-checked before release.
+- `scripts/install-device-apps.sh` verifies the app signature before copying
+  an app atomically into `~/Applications` by default. It refuses to replace
+  an existing app non-interactively unless `--replace` is supplied.
+- `scripts/uninstall-device-apps.sh` removes only the exact selected app
+  bundle paths and requires confirmation for non-interactive removal; it does
+  not delete Keychain trust records or macOS permissions.
 - `scripts/notarize-device-apps.sh` requires a Developer ID identity, submits
-  both app archives with `xcrun notarytool --keychain-profile`, staples the
-  tickets, validates them, and refreshes the distributable archives. It does
-  not create, print, or store Keychain credentials.
+  both app archives and both DMGs with `xcrun notarytool --keychain-profile`,
+  staples the tickets, validates them, and refreshes the distributable
+  archives. It does not create, print, or store Keychain credentials.
+- `scripts/validate-notarized-release.sh` validates an existing release's
+  Developer ID signatures, stapled tickets, and Gatekeeper assessment without
+  submitting, signing, or replacing any artifact. Set
+  `MACREMOTEAPP_CI_NOTARIZED_RELEASE_ROOT` to use this direct validation path
+  from `.codex/ci.sh`.
 - `get-task-allow` and dynamic-loader development entitlements are rejected by
   the release audit.
 - Private identity files are generated outside the repository and are rejected
@@ -51,6 +72,7 @@ credentials never enter the repository or validation logs.
 | Physical Intel-to-Apple-Silicon acceptance not run in this workspace | P1 release gate | Operator; run `docs/M10_ACCEPTANCE.md` on both Macs | Open |
 | Developer ID notarization profile is host-specific | P2 release process | Release operator; run `scripts/notarize-device-apps.sh` and inspect logs | Open |
 | Real macOS Accessibility event posting needs a disposable foreground app | P1 acceptance gate | Operator; run M6 safe-app test with permission evidence | Open |
+| Production pilot still uses pre-provisioned peer certificates instead of an interactive pairing UI | P1 product acceptance | Add and validate the two-sided pairing/operator-consent UI before calling the V1 journey complete | Open |
 | V1 does not defend a compromised local administrator or approved rogue peer | Known non-goal | Documented in `docs/SECURITY.md` | Accepted non-goal |
 
 M9 is not considered a license to weaken any permission, trust, or focus gate

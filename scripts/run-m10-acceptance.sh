@@ -45,8 +45,12 @@ case "${role}" in
             echo "M8 benchmark accepted a malformed sample count" >&2
             exit 1
         fi
-        bash scripts/package-device-apps.sh
-        bash scripts/audit-release.sh
+        deterministic_release_build_root="${build_root}/release-build"
+        deterministic_release_root="${build_root}/release"
+        MACREMOTEAPP_RELEASE_BUILD_ROOT="${deterministic_release_build_root}" \
+        MACREMOTEAPP_RELEASE_ROOT="${deterministic_release_root}" \
+        MACREMOTEAPP_SIGNING_IDENTITY=- bash scripts/package-device-apps.sh
+        bash scripts/audit-release.sh "${deterministic_release_root}"
         swift test \
             --configuration debug \
             --scratch-path "${build_root}/root-tests"
