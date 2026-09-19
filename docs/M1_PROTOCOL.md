@@ -130,6 +130,7 @@ are rejected.
 | `0x000B` | InputEvent |
 | `0x000C` | ClipboardOffer |
 | `0x000D` | ClipboardText |
+| `0x0013` | ClipboardAcknowledgement |
 | `0x000E` | Ping |
 | `0x000F` | Pong |
 | `0x0010` | SessionState |
@@ -170,8 +171,9 @@ capability list above.
 | `VideoConfig` | 1 `generation` (u64), 2 `decoderConfiguration` (bytes) |
 | `VideoFrame` | 1 `generation` (u64), 2 `captureTimestamp` (u64), 3 `presentationTimestamp` (u64), 4 `width` (u32), 5 `height` (u32), 6 `keyframe` (bool), 7 `accessUnit` (bytes) |
 | `InputEvent` | 1 `kind` (u8), 2 `windowGeneration` (u64), 3 `x` (u16, optional), 4 `y` (u16, optional), 5 `button` (u8, optional), 6 `pressed` (bool, optional), 7 `deltaX` (i32, optional), 8 `deltaY` (i32, optional), 9 `keyCode` (u16, optional), 10 `modifiers` (u32, optional) |
-| `ClipboardOffer` | 1 `generation` (u64), 2 `origin` (u8), 3 `textByteCount` (u32), 4 `enabled` (bool) |
+| `ClipboardOffer` | 1 `generation` (u64), 2 `origin` (u8), 3 `textByteCount` (u32), 4 `enabled` (bool), 5 `hasText` (bool, optional; defaults to true) |
 | `ClipboardText` | 1 `generation` (u64), 2 `text` (bounded UTF-8 bytes) |
+| `ClipboardAcknowledgement` | 1 `generation` (u64), 2 `origin` (u8), 3 `accepted` (bool), 4 `reason` (u8) |
 | `Ping` / `Pong` | 1 `nonce` (u64) |
 | `SessionState` | 1 `state` (u8), 2 `permission` (u8), 3 `focusEligible` (bool), 4 `windowGeneration` (u64, optional) |
 | `Error` | 1 `code` (u16), 2 `retryable` (bool), 3 `detailCode` (utf8, optional) |
@@ -201,6 +203,7 @@ VideoFrame          010101000000080000000000000009020100000008000000000000006403
 InputEvent          01010100000001030201000000080000000000000009030000000002014004000000000200B4070000000004FFFFFFFE08000000000400000004
 ClipboardOffer      01010100000008000000000000000C020100000001020301000000040000000504010000000101
 ClipboardText       01010100000008000000000000000C02010000000568656C6C6F
+ClipboardAcknowledgement 01010100000008000000000000000C020100000001020301000000010104010000000101
 Ping                010101000000080102030405060708
 Pong                010101000000080102030405060708
 SessionState        010101000000010802010000000102030100000001010400000000080000000000000009

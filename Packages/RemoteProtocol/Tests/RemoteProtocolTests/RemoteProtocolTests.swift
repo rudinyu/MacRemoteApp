@@ -268,6 +268,14 @@ final class RemoteProtocolTests: XCTestCase {
                 ClipboardOfferMessage(generation: 12, origin: .viewer, textByteCount: 5, enabled: true)
             ),
             .clipboardText(ClipboardTextMessage(generation: 12, text: "hello")),
+            .clipboardAcknowledgement(
+                ClipboardAcknowledgementMessage(
+                    generation: 12,
+                    origin: .viewer,
+                    accepted: true,
+                    reason: .accepted
+                )
+            ),
             .ping(PingMessage(nonce: 0x0102_0304_0506_0708)),
             .pong(PongMessage(nonce: 0x0102_0304_0506_0708)),
             .sessionState(
@@ -296,6 +304,7 @@ final class RemoteProtocolTests: XCTestCase {
             .inputEvent: "01010100000001030201000000080000000000000009030000000002014004000000000200B4070000000004FFFFFFFE08000000000400000004",
             .clipboardOffer: "01010100000008000000000000000C020100000001020301000000040000000504010000000101",
             .clipboardText: "01010100000008000000000000000C02010000000568656C6C6F",
+            .clipboardAcknowledgement: "01010100000008000000000000000C020100000001020301000000010104010000000101",
             .ping: "010101000000080102030405060708",
             .pong: "010101000000080102030405060708",
             .sessionState: "010101000000010802010000000102030100000001010400000000080000000000000009",
@@ -438,6 +447,69 @@ final class RemoteProtocolTests: XCTestCase {
             _ = try ClipboardTextMessage(
                 generation: 1,
                 text: Data(repeating: 0x61, count: 65_516)
+            ).encoded()
+        }
+    }
+
+    func testClipboardStatusOfferUsesOptionalHasTextField() throws {
+        let offer = ClipboardOfferMessage(
+            generation: 4,
+            origin: .host,
+            textByteCount: 0,
+            enabled: true,
+            hasText: false
+        )
+        let encoded = try offer.encoded()
+        let decoded = try ClipboardOfferMessage.decode(encoded)
+        XCTAssertEqual(decoded, offer)
+        XCTAssertNotEqual(encoded, try ClipboardOfferMessage(
+            generation: 4,
+            origin: .host,
+            textByteCount: 0,
+            enabled: true
+        ).encoded())
+    }
+
+    func testLegacyDisabledClipboardOfferDefaultsToNoText() throws {
+        let inferredStatus = ClipboardOfferMessage(
+            generation: 5,
+            origin: .host,
+            textByteCount: 0,
+            enabled: false
+        )
+        XCTAssertFalse(inferredStatus.hasText)
+        XCTAssertEqual(
+            try inferredStatus.encoded(),
+            try ClipboardOfferMessage(
+                generation: 5,
+                origin: .host,
+                textByteCount: 0,
+                enabled: false,
+                hasText: false
+            ).encoded()
+        )
+
+        let legacyOffer = try ClipboardOfferMessage(
+            generation: 5,
+            origin: .host,
+            textByteCount: 0,
+            enabled: false,
+            hasText: false
+        ).encoded().dropLast(7)
+
+        let decoded = try ClipboardOfferMessage.decode(Data(legacyOffer))
+        XCTAssertFalse(decoded.enabled)
+        XCTAssertFalse(decoded.hasText)
+        XCTAssertEqual(decoded.textByteCount, 0)
+    }
+
+    func testClipboardAcknowledgementRejectsInconsistentReason() throws {
+        assertProtocolError(.invalidFieldValue(message: .clipboardAcknowledgement, fieldID: 4)) {
+            _ = try ClipboardAcknowledgementMessage(
+                generation: 1,
+                origin: .host,
+                accepted: true,
+                reason: .conflict
             ).encoded()
         }
     }

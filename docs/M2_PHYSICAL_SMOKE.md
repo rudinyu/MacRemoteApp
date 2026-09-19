@@ -21,9 +21,13 @@ The smoke flag uses those pre-provisioned identities as the deterministic M2
 trusted-peer test; it is not a replacement for the later user-facing pairing
 flow.
 
-## 1. Build signed app bundles
+## 1. Build the artifacts
 
-Run this on the development Mac. The script builds a universal Host
+Run this on the development Mac. The release package is useful for install,
+signature, and TCC-identity checks. The physical M2 smoke flags are
+intentionally debug-only, so the release binaries do not contain them.
+
+For the optional signed install artifacts, the script builds a universal Host
 (`x86_64` + `arm64`) and an Apple Silicon Viewer, creates the `.icns` from the
 checked-in SVG, embeds Local Network/Bonjour metadata, and packages both app
 bundles under `.build/device-binaries/release/`.
@@ -49,6 +53,24 @@ Copy these artifacts to the Macs without copying repository metadata:
 The common icon is the source-of-truth vector at
 `Resources/MacRemoteAppIcon.svg`; the packaging script produces the Finder
 `.icns` from it.
+
+For the actual M2 diagnostic, build and run the debug target on each Mac from
+the same checkout revision. The debug executable is the supported smoke
+artifact because the release gate removes diagnostic flags:
+
+```sh
+# Intel Host
+cd /Users/rudin_yu/codexworkspace/MacRemoteApp
+TMPDIR=/private/tmp swift run --configuration debug --scratch-path .build/m2-physical-host Host --m2-physical-host
+
+# Apple Silicon Viewer
+cd /Users/rudin_yu/codexworkspace/MacRemoteApp
+TMPDIR=/private/tmp swift run --configuration debug --scratch-path .build/m2-physical-viewer Viewer --m2-physical-viewer
+```
+
+The commands above are shown again in the role sections below. Do not invoke
+the release app with an M2 flag: a release binary is expected to reject that
+diagnostic path.
 
 ## 2. Generate test identities
 
@@ -84,8 +106,8 @@ export MACREMOTEAPP_P12_PASSWORD
 export MACREMOTEAPP_SERVICE_NAME='MacRemoteApp-Host'
 export MACREMOTEAPP_M2_TIMEOUT_SECONDS=60
 
-"$HOME/Applications/MacRemoteApp-Host.app/Contents/MacOS/MacRemoteApp-Host" \
-  --m2-physical-host
+TMPDIR=/private/tmp swift run --configuration debug \
+  --scratch-path .build/m2-physical-host Host --m2-physical-host
 ```
 
 The Host should print that it is listening on `_macremote._tcp` and wait for
@@ -106,8 +128,8 @@ export MACREMOTEAPP_P12_PASSWORD
 export MACREMOTEAPP_HOST_NAME='MacRemoteApp-Host'
 export MACREMOTEAPP_M2_TIMEOUT_SECONDS=60
 
-"$HOME/Applications/MacRemoteApp-Viewer.app/Contents/MacOS/MacRemoteApp-Viewer" \
-  --m2-physical-viewer
+TMPDIR=/private/tmp swift run --configuration debug \
+  --scratch-path .build/m2-physical-viewer Viewer --m2-physical-viewer
 ```
 
 The Viewer should report Bonjour discovery, a trusted peer fingerprint prefix,

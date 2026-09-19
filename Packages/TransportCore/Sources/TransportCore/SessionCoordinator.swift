@@ -104,6 +104,7 @@ public struct SessionSnapshot: Equatable, Sendable {
     public let authorizedCapabilities: Set<Capability>
     public let reconnectGeneration: UInt64
     public let authorizationGeneration: UInt64
+    public let effectiveProtocolLimits: ProtocolLimits
     public let lastHeartbeatAt: Date?
     public let negotiatedMaxVideoWidth: UInt32?
     public let negotiatedMaxVideoHeight: UInt32?
@@ -121,7 +122,8 @@ public struct SessionSnapshot: Equatable, Sendable {
         negotiatedMaxVideoWidth: UInt32? = nil,
         negotiatedMaxVideoHeight: UInt32? = nil,
         negotiatedMaxFrameRate: UInt16? = nil,
-        authorizationGeneration: UInt64 = 0
+        authorizationGeneration: UInt64 = 0,
+        effectiveProtocolLimits: ProtocolLimits = .default
     ) {
         self.state = state
         self.peerIdentity = peerIdentity
@@ -131,6 +133,7 @@ public struct SessionSnapshot: Equatable, Sendable {
         self.authorizedCapabilities = authorizedCapabilities
         self.reconnectGeneration = reconnectGeneration
         self.authorizationGeneration = authorizationGeneration
+        self.effectiveProtocolLimits = effectiveProtocolLimits
         self.lastHeartbeatAt = lastHeartbeatAt
         self.negotiatedMaxVideoWidth = negotiatedMaxVideoWidth
         self.negotiatedMaxVideoHeight = negotiatedMaxVideoHeight
@@ -164,7 +167,8 @@ public actor SessionCoordinator {
         .videoFrame,
         .inputEvent,
         .clipboardOffer,
-        .clipboardText
+        .clipboardText,
+        .clipboardAcknowledgement
     ]
 
     private static let windowBoundCapabilities: Set<Capability> = [
@@ -186,6 +190,7 @@ public actor SessionCoordinator {
         .videoFrame,
         .clipboardOffer,
         .clipboardText,
+        .clipboardAcknowledgement,
         .ping,
         .pong,
         .sessionState,
@@ -201,6 +206,7 @@ public actor SessionCoordinator {
         .inputEvent,
         .clipboardOffer,
         .clipboardText,
+        .clipboardAcknowledgement,
         .ping,
         .pong,
         .sessionState,
@@ -216,6 +222,7 @@ public actor SessionCoordinator {
         .inputEvent,
         .clipboardOffer,
         .clipboardText,
+        .clipboardAcknowledgement,
         .ping,
         .pong,
         .sessionState,
@@ -235,6 +242,7 @@ public actor SessionCoordinator {
         .videoFrame,
         .clipboardOffer,
         .clipboardText,
+        .clipboardAcknowledgement,
         .ping,
         .pong,
         .sessionState,
@@ -313,7 +321,8 @@ public actor SessionCoordinator {
             negotiatedMaxVideoWidth: negotiatedMaxVideoWidth,
             negotiatedMaxVideoHeight: negotiatedMaxVideoHeight,
             negotiatedMaxFrameRate: negotiatedMaxFrameRate,
-            authorizationGeneration: authorizationGeneration
+            authorizationGeneration: authorizationGeneration,
+            effectiveProtocolLimits: effectiveProtocolLimits()
         )
     }
 
@@ -676,9 +685,68 @@ public actor SessionCoordinator {
         outboundMutex.release()
     }
 
-    public func send(_ payload: MessagePayload, flags: EnvelopeFlags = []) async throws {
+    public func send(
+        _ payload: MessagePayload,
+        flags: EnvelopeFlags = [],
+        expectedAuthorizationGeneration: UInt64? = nil,
+        localAdmission: (@MainActor @Sendable () -> Bool)? = nil
+    ) async throws {
+        try validateMessageDirection(for: payload.messageType, incoming: false)
         try validateAuthorization(for: payload)
-        _ = try await sendUnrestricted(payload, flags: flags)
+        guard let localAdmission else {
+            _ = try await sendUnrestricted(
+                payload,
+                flags: flags,
+                expectedAuthorizationGeneration: expectedAuthorizationGeneration
+            )
+            return
+        }
+
+        let operationReceiveGeneration = receiveGeneration
+        let operationReconnectGeneration = reconnectGeneration
+        let operationAuthorizationGeneration = expectedAuthorizationGeneration ?? authorizationGeneration
+        await outboundMutex.acquire()
+        defer { outboundMutex.release() }
+        guard isCurrent(
+            receiveGeneration: operationReceiveGeneration,
+            reconnectGeneration: operationReconnectGeneration,
+            authorizationGeneration: operationAuthorizationGeneration
+        ) else {
+            if operationReceiveGeneration != receiveGeneration ||
+                operationReconnectGeneration != reconnectGeneration {
+                throw SessionError.reconnectRequired
+            }
+            throw SessionError.authorizationChanged
+        }
+        guard await localAdmission() else {
+            throw SessionError.authorizationChanged
+        }
+        try validateAuthorization(for: payload)
+        _ = try await sendUnrestrictedAfterAdmission(
+            payload,
+            flags: flags,
+            operationGeneration: operationReconnectGeneration,
+            operationReceiveGeneration: operationReceiveGeneration,
+            operationAuthorizationGeneration: operationAuthorizationGeneration
+        )
+    }
+
+    /// Runs the native pasteboard commit while the outbound authorization
+    /// mutex is held. Authorization, revoke, reconnect, and stop transitions
+    /// use the same mutex, so a MainActor pasteboard write cannot be preceded
+    /// by one authorization snapshot and followed by a different epoch.
+    public func withIncomingClipboardAdmission<T: Sendable>(
+        expectedAuthorizationGeneration: UInt64,
+        operation: @MainActor @Sendable () throws -> T
+    ) async throws -> T {
+        await outboundMutex.acquire()
+        defer { outboundMutex.release() }
+        guard authorized,
+              authorizedCapabilities.contains(.textClipboard),
+              authorizationGeneration == expectedAuthorizationGeneration else {
+            throw SessionError.authorizationChanged
+        }
+        return try await operation()
     }
 
     /// Runs one Host-side input admission while the session actor remains
@@ -752,9 +820,35 @@ public actor SessionCoordinator {
     }
 
     public func stop(reason: CloseReason = .normal) async {
-        guard state != .stopping else { return }
         await outboundMutex.acquire()
         defer { outboundMutex.release() }
+        guard state != .stopping else { return }
+        await stopWhileHoldingOutboundMutex(reason: reason)
+    }
+
+    /// Stops the session only if the caller still owns the same authenticated
+    /// transport epoch. The generation check is performed after acquiring the
+    /// outbound mutex so a stale clipboard/send failure cannot close a
+    /// replacement connection that was established while the failure was
+    /// unwinding.
+    @discardableResult
+    public func stopIfCurrent(
+        reason: CloseReason = .normal,
+        expectedAuthorizationGeneration: UInt64,
+        expectedReconnectGeneration: UInt64
+    ) async -> Bool {
+        await outboundMutex.acquire()
+        defer { outboundMutex.release() }
+        guard state != .stopping,
+              authorizationGeneration == expectedAuthorizationGeneration,
+              reconnectGeneration == expectedReconnectGeneration else {
+            return false
+        }
+        await stopWhileHoldingOutboundMutex(reason: reason)
+        return true
+    }
+
+    private func stopWhileHoldingOutboundMutex(reason: CloseReason) async {
         state = .stopping
         incomingMessageStorage.finish()
         authorizationGeneration &+= 1
@@ -1576,7 +1670,7 @@ public actor SessionCoordinator {
             case .pointerMove, .pointerButton, .scroll, .focusIntent:
                 return [.mouseInput]
             }
-        case .clipboardOffer, .clipboardText:
+        case .clipboardOffer, .clipboardText, .clipboardAcknowledgement:
             return [.textClipboard]
         default:
             return []

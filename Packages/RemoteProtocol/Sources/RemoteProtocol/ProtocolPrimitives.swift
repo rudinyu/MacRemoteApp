@@ -59,6 +59,7 @@ public enum MessageType: Equatable, Hashable, Sendable {
     case inputEvent
     case clipboardOffer
     case clipboardText
+    case clipboardAcknowledgement
     case ping
     case pong
     case sessionState
@@ -81,6 +82,7 @@ public enum MessageType: Equatable, Hashable, Sendable {
         case 0x000B: self = .inputEvent
         case 0x000C: self = .clipboardOffer
         case 0x000D: self = .clipboardText
+        case 0x0013: self = .clipboardAcknowledgement
         case 0x000E: self = .ping
         case 0x000F: self = .pong
         case 0x0010: self = .sessionState
@@ -105,6 +107,7 @@ public enum MessageType: Equatable, Hashable, Sendable {
         case .inputEvent: return 0x000B
         case .clipboardOffer: return 0x000C
         case .clipboardText: return 0x000D
+        case .clipboardAcknowledgement: return 0x0013
         case .ping: return 0x000E
         case .pong: return 0x000F
         case .sessionState: return 0x0010
@@ -161,6 +164,17 @@ public enum Capability: Equatable, Hashable, Sendable {
         case let .unknown(rawValue): return rawValue
         }
     }
+}
+
+/// The reason attached to a clipboard offer acknowledgement is deliberately
+/// a bounded enum. It never carries clipboard text or an untrusted diagnostic.
+public enum ClipboardAcknowledgementReason: UInt8, Equatable, Hashable, Sendable {
+    case accepted = 1
+    case disabled = 2
+    case tooLarge = 3
+    case conflict = 4
+    case stale = 5
+    case unsupported = 6
 }
 
 public enum CodecIdentifier: UInt16, Equatable, Hashable, Sendable {

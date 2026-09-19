@@ -200,8 +200,12 @@ M6 enforcement is split explicitly: `TransportCore` admits the authenticated
 - Track origin and generation to prevent echo loops.
 - Clear transient outgoing/incoming clipboard buffers when the session ends,
   subject to the minimum retention needed by the active UI state.
-- M7 must document the conflict policy when both sides change text close
-  together and must add tests for the policy.
+- M7 uses deterministic arrival-order conflict handling: a pending local offer
+  wins over a concurrent remote offer; a local edit after a remote offer has
+  been accepted cancels that incoming offer and creates a new local generation.
+  Replayed generations are rejected, and all transient state is cleared on
+  stop/reconnect. Unit tests cover this policy, size bounds, acknowledgements,
+  and echo suppression.
 
 ## Logging, diagnostics, and data retention
 
@@ -234,6 +238,13 @@ Security validation is staged rather than deferred entirely to release:
   review, and release configuration audit.
 - **M10**: Intel/Apple Silicon integration acceptance with a written residual
   risk list.
+
+M8-M10 release evidence is produced without retaining pixels, clipboard text,
+raw input values, private keys, or full sensitive window titles. The release
+audit rejects development commands and unsafe entitlements from packaged
+artifacts. Physical acceptance remains an explicit gate; synthetic benchmark
+results and loopback tests do not establish Intel/Apple Silicon
+interoperability.
 
 ## Security non-goals and residual risks
 

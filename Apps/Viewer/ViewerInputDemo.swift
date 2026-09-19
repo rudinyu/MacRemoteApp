@@ -1,3 +1,4 @@
+#if DEBUG
 import AppKit
 import InputCore
 
@@ -55,3 +56,4 @@ final class ViewerInputDemo: NSObject, NSWindowDelegate, NSApplicationDelegate {
         NSApplication.shared.terminate(nil)
     }
 }
+#endif

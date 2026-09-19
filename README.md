@@ -19,12 +19,21 @@ contains the Host window catalog
 and ScreenCaptureKit capture foundation with deterministic fake-provider tests
 and a successful M5 live frame smoke test. M4 now contains bounded H.264
 VideoToolbox encode/decode adapters, decoder-generation recovery rules, and a
-Viewer Metal presentation surface with deterministic layout/queue tests. The
-repository still contains no clipboard product capability implementation. M5
+Viewer Metal presentation surface with deterministic layout/queue tests. M5
 adds the Viewer-side typed input foundation and authenticated event transport.
-M6 now adds Host-side authorization-aware coordinate mapping and typed
+M6 adds Host-side authorization-aware coordinate mapping and typed
 CoreGraphics/Accessibility injection adapters with deterministic fake-adapter
-tests. Actual OS event posting remains an explicit local evidence step.
+tests. M7 now adds the opt-in text clipboard coordinator, bounded Offer/ACK/
+Text flow, echo/conflict handling, explicit session UX projection, and Host/
+Viewer AppKit string-pasteboard bridges. Physical OS event posting and the
+two-machine clipboard walkthrough remain environment evidence steps. M8 now
+includes the authenticated clock-sync/percentile model, deterministic
+performance harness, bounded-queue stress coverage, and reconnect/keyframe
+resilience evidence. M9 adds release-only debug gating, hardened-runtime
+artifact audit, negative-test documentation, and a residual-risk record. M10
+adds the deterministic final gate plus the two-machine acceptance checklist;
+the actual Intel-to-Apple-Silicon run remains an explicitly unverified
+environment item until it is executed on both Macs.
 
 The repository root is:
 
@@ -58,6 +67,10 @@ MacRemoteApp/
     ├── M4_CODEC.md
     ├── M5_INPUT.md
     ├── M6_INPUT_INJECTION.md
+    ├── M7_CLIPBOARD_UX.md
+    ├── M8_PERFORMANCE_RESILIENCE.md
+    ├── M9_SECURITY_RELEASE.md
+    ├── M10_ACCEPTANCE.md
     ├── PRODUCT_SPEC.md
     ├── PROTOCOL.md
     └── SECURITY.md
@@ -143,10 +156,10 @@ appropriate document before implementation.
 | M4 | H.264 encode/decode and Metal presentation (complete; hardware smoke is opt-in) |
 | M5 | Viewer mouse/keyboard capture and event transport (complete) |
 | M6 | Host-side focus-aware input mapping and injection (implementation/test gate complete; OS evidence pending) |
-| M7 | Text clipboard synchronization and session UX |
-| M8 | Latency, frame-rate, backpressure, reconnect, and resilience work |
-| M9 | Security hardening, permission/error review, and release readiness |
-| M10 | Intel-to-Apple-Silicon V1 integration pilot and acceptance |
+| M7 | Text clipboard synchronization and session UX (implementation/test gate complete; physical walkthrough pending) |
+| M8 | Performance/resilience implementation and deterministic evidence (physical report pending) |
+| M9 | Security hardening, release audit, and notarization helper (profile execution pending) |
+| M10 | Integration pilot tooling/checklist (physical Intel-to-Apple-Silicon acceptance pending) |
 
 Each milestone is independently scoped in `docs/DEVELOPMENT_PLAN.md`. Do not
 skip a gate because a later feature appears easy to prototype.

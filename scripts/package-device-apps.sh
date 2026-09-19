@@ -104,13 +104,18 @@ if [[ -z "${signing_identity}" ]]; then
     echo "For stable macOS TCC identity, set it to a Developer ID Application certificate." >&2
 fi
 
+timestamp_arguments=(--timestamp)
+if [[ "${signing_identity}" == "-" ]]; then
+    timestamp_arguments=(--timestamp=none)
+fi
+
 for app_dir in \
     "${release_root}/MacRemoteApp-Host.app" \
     "${release_root}/MacRemoteApp-Viewer.app"
 do
     codesign --force --deep --options runtime \
         --sign "${signing_identity}" \
-        --timestamp=none "${app_dir}"
+        "${timestamp_arguments[@]}" "${app_dir}"
     codesign --verify --deep --strict "${app_dir}"
 done
 

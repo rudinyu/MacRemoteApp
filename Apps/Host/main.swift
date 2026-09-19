@@ -18,17 +18,41 @@ struct HostApp {
         injectionAdapter: any HostInputInjectionAdapter,
         onNonInputMessage: @escaping @Sendable (MessagePayload) async -> Void
     ) async -> HostInputSessionRuntime {
+        let clipboardController = await MainActor.run {
+            HostClipboardSessionController(session: session)
+        }
         let runtime = HostInputSessionRuntime(
             session: session,
             contextProvider: contextProvider,
             injectionAdapter: injectionAdapter,
-            onNonInputMessage: onNonInputMessage
+            onNonInputMessage: { message in
+                try? await clipboardController.handle(message)
+                await onNonInputMessage(message)
+            },
+            onSessionLifecycleChange: { active in
+                if active {
+                    await clipboardController.startPolling()
+                } else {
+                    await clipboardController.stopPolling()
+                }
+            },
+            onSessionLifecycleReset: {
+                let snapshot = await session.snapshot()
+                await clipboardController.resetForSessionLifecycleIfStale(snapshot)
+            },
+            setClipboardEnabled: { enabled in
+                try await clipboardController.setEnabled(enabled)
+            },
+            clipboardStatus: {
+                await clipboardController.status
+            }
         )
         await runtime.start()
         return runtime
     }
 
     static func main() async {
+#if DEBUG
         if CommandLine.arguments.contains("--m3-list-windows") {
             await MainActor.run {
                 _ = NSApplication.shared
@@ -48,6 +72,17 @@ struct HostApp {
             return
         }
 
+        if CommandLine.arguments.contains("--m7-physical-host") {
+            do {
+                try await M2PhysicalHostSmoke.run(clipboardOptIn: true)
+            } catch {
+                fputs("M7 physical host clipboard smoke failed: \(error)\n", stderr)
+                exit(EXIT_FAILURE)
+            }
+            return
+        }
+#endif
+
         let modules = [
             RemoteProtocolModule.name,
             CaptureCoreModule.name,
@@ -60,6 +95,7 @@ struct HostApp {
         print("MacRemoteApp Host M6 input foundation: \(modules.joined(separator: ", "))")
     }
 
+#if DEBUG
     private static func listWindows() async {
         let provider = ScreenRecordingWindowProvider()
         let permission = await provider.permissionState()
@@ -82,4 +118,5 @@ struct HostApp {
             print("Window discovery failed: \(error)")
         }
     }
+#endif
 }

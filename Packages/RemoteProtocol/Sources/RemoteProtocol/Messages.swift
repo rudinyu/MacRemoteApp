@@ -735,29 +735,52 @@ public struct ClipboardOfferMessage: MessagePayloadValue {
     public let origin: DeviceRole
     public let textByteCount: UInt32
     public let enabled: Bool
+    /// `false` represents an enable/disable status update without a pending
+    /// clipboard text payload. The field is optional on the wire so existing
+    /// M1 offers remain canonical and decode as `true`.
+    public let hasText: Bool
 
-    public init(generation: UInt64, origin: DeviceRole, textByteCount: UInt32, enabled: Bool) {
+    public init(
+        generation: UInt64,
+        origin: DeviceRole,
+        textByteCount: UInt32,
+        enabled: Bool,
+        hasText: Bool? = nil
+    ) {
         self.generation = generation
         self.origin = origin
         self.textByteCount = textByteCount
         self.enabled = enabled
+        // Preserve the M1 initializer semantics for callers that do not know
+        // about the optional status-only field: an enabled offer carries text
+        // (including an empty string), while a disabled offer is status-only.
+        self.hasText = hasText ?? enabled
     }
 
     public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
         guard Int(textByteCount) <= limits.maxClipboardTextBytes else {
             throw ProtocolError.payloadTooLarge(actual: Int(textByteCount), maximum: limits.maxClipboardTextBytes)
         }
+        guard hasText || textByteCount == 0 else {
+            throw ProtocolError.invalidFieldValue(message: .clipboardOffer, fieldID: 5)
+        }
+        guard enabled || (!hasText && textByteCount == 0) else {
+            throw ProtocolError.invalidFieldValue(message: .clipboardOffer, fieldID: 4)
+        }
         var fields = try MessageFieldWriter(message: .clipboardOffer, limits: limits)
         try fields.append(fieldID: 1, mandatory: true, value: WireValue.uint64(generation))
         try fields.append(fieldID: 2, mandatory: true, value: WireValue.byte(origin.rawValue, message: .clipboardOffer, fieldID: 2))
         try fields.append(fieldID: 3, mandatory: true, value: WireValue.uint32(textByteCount))
         try fields.append(fieldID: 4, mandatory: true, value: WireValue.bool(enabled, message: .clipboardOffer, fieldID: 4))
+        if !hasText {
+            try fields.append(fieldID: 5, mandatory: false, value: WireValue.bool(false, message: .clipboardOffer, fieldID: 5))
+        }
         return fields.data
     }
 
     public static func decode(_ data: Data, using limits: ProtocolLimits = .default) throws -> ClipboardOfferMessage {
         let fields = try MessageFieldReader(data: data, message: .clipboardOffer, limits: limits)
-        try fields.ensureKnown(Set(1 ... 4))
+        try fields.ensureKnown(Set(1 ... 5))
         let rawOrigin = try WireValue.decodeByte(try fields.required(2), message: .clipboardOffer, fieldID: 2)
         guard let origin = DeviceRole(rawValue: rawOrigin) else {
             throw ProtocolError.invalidFieldValue(message: .clipboardOffer, fieldID: 2)
@@ -766,11 +789,25 @@ public struct ClipboardOfferMessage: MessagePayloadValue {
         guard Int(textByteCount) <= limits.maxClipboardTextBytes else {
             throw ProtocolError.payloadTooLarge(actual: Int(textByteCount), maximum: limits.maxClipboardTextBytes)
         }
+        let enabled = try WireValue.decodeBool(try fields.required(4), message: .clipboardOffer, fieldID: 4)
+        // M1 offers did not have field 5. A legacy disabled status offer has
+        // no text, so infer false only for that form while preserving the
+        // original enabled/text form as true.
+        let hasText = try fields.optional(5).map {
+            try WireValue.decodeBool($0, message: .clipboardOffer, fieldID: 5)
+        } ?? enabled
+        guard hasText || textByteCount == 0 else {
+            throw ProtocolError.invalidFieldValue(message: .clipboardOffer, fieldID: 5)
+        }
+        guard enabled || (!hasText && textByteCount == 0) else {
+            throw ProtocolError.invalidFieldValue(message: .clipboardOffer, fieldID: 4)
+        }
         return ClipboardOfferMessage(
             generation: try WireValue.decodeUInt64(try fields.required(1), message: .clipboardOffer, fieldID: 1),
             origin: origin,
             textByteCount: textByteCount,
-            enabled: try WireValue.decodeBool(try fields.required(4), message: .clipboardOffer, fieldID: 4)
+            enabled: enabled,
+            hasText: hasText
         )
     }
 }
@@ -822,6 +859,93 @@ public struct ClipboardTextMessage: MessagePayloadValue {
         return ClipboardTextMessage(
             generation: try WireValue.decodeUInt64(try fields.required(1), message: .clipboardText, fieldID: 1),
             text: text
+        )
+    }
+}
+
+public struct ClipboardAcknowledgementMessage: MessagePayloadValue {
+    public static let messageType: MessageType = .clipboardAcknowledgement
+
+    public let generation: UInt64
+    public let origin: DeviceRole
+    public let accepted: Bool
+    public let reason: ClipboardAcknowledgementReason
+
+    public init(
+        generation: UInt64,
+        origin: DeviceRole,
+        accepted: Bool,
+        reason: ClipboardAcknowledgementReason
+    ) {
+        self.generation = generation
+        self.origin = origin
+        self.accepted = accepted
+        self.reason = reason
+    }
+
+    public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
+        guard (accepted && reason == .accepted) || (!accepted && reason != .accepted) else {
+            throw ProtocolError.invalidFieldValue(message: .clipboardAcknowledgement, fieldID: 4)
+        }
+        var fields = try MessageFieldWriter(message: .clipboardAcknowledgement, limits: limits)
+        try fields.append(fieldID: 1, mandatory: true, value: WireValue.uint64(generation))
+        try fields.append(
+            fieldID: 2,
+            mandatory: true,
+            value: WireValue.byte(origin.rawValue, message: .clipboardAcknowledgement, fieldID: 2)
+        )
+        try fields.append(
+            fieldID: 3,
+            mandatory: true,
+            value: WireValue.bool(accepted, message: .clipboardAcknowledgement, fieldID: 3)
+        )
+        try fields.append(
+            fieldID: 4,
+            mandatory: true,
+            value: WireValue.byte(reason.rawValue, message: .clipboardAcknowledgement, fieldID: 4)
+        )
+        return fields.data
+    }
+
+    public static func decode(
+        _ data: Data,
+        using limits: ProtocolLimits = .default
+    ) throws -> ClipboardAcknowledgementMessage {
+        let fields = try MessageFieldReader(data: data, message: .clipboardAcknowledgement, limits: limits)
+        try fields.ensureKnown(Set(1 ... 4))
+        let rawOrigin = try WireValue.decodeByte(
+            try fields.required(2),
+            message: .clipboardAcknowledgement,
+            fieldID: 2
+        )
+        guard let origin = DeviceRole(rawValue: rawOrigin) else {
+            throw ProtocolError.invalidFieldValue(message: .clipboardAcknowledgement, fieldID: 2)
+        }
+        let rawReason = try WireValue.decodeByte(
+            try fields.required(4),
+            message: .clipboardAcknowledgement,
+            fieldID: 4
+        )
+        guard let reason = ClipboardAcknowledgementReason(rawValue: rawReason) else {
+            throw ProtocolError.invalidFieldValue(message: .clipboardAcknowledgement, fieldID: 4)
+        }
+        let accepted = try WireValue.decodeBool(
+            try fields.required(3),
+            message: .clipboardAcknowledgement,
+            fieldID: 3
+        )
+        guard (accepted && reason == .accepted) || (!accepted && reason != .accepted) else {
+            throw ProtocolError.invalidFieldValue(message: .clipboardAcknowledgement, fieldID: 4)
+        }
+        return ClipboardAcknowledgementMessage(
+            generation: try WireValue.decodeUInt64(
+                try fields.required(1),
+                message: .clipboardAcknowledgement,
+                fieldID: 1
+            ),
+            origin: origin,
+            accepted: accepted,
+            reason: reason
         )
     }
 }
@@ -1030,6 +1154,7 @@ public enum MessagePayload: Equatable, Sendable {
     case inputEvent(InputEventMessage)
     case clipboardOffer(ClipboardOfferMessage)
     case clipboardText(ClipboardTextMessage)
+    case clipboardAcknowledgement(ClipboardAcknowledgementMessage)
     case ping(PingMessage)
     case pong(PongMessage)
     case sessionState(SessionStateMessage)
@@ -1051,6 +1176,7 @@ public enum MessagePayload: Equatable, Sendable {
         case .inputEvent: return .inputEvent
         case .clipboardOffer: return .clipboardOffer
         case .clipboardText: return .clipboardText
+        case .clipboardAcknowledgement: return .clipboardAcknowledgement
         case .ping: return .ping
         case .pong: return .pong
         case .sessionState: return .sessionState
@@ -1074,6 +1200,7 @@ public enum MessagePayload: Equatable, Sendable {
         case let .inputEvent(value): return try value.encoded(using: limits)
         case let .clipboardOffer(value): return try value.encoded(using: limits)
         case let .clipboardText(value): return try value.encoded(using: limits)
+        case let .clipboardAcknowledgement(value): return try value.encoded(using: limits)
         case let .ping(value): return try value.encoded(using: limits)
         case let .pong(value): return try value.encoded(using: limits)
         case let .sessionState(value): return try value.encoded(using: limits)
@@ -1101,6 +1228,8 @@ public enum MessagePayload: Equatable, Sendable {
         case .inputEvent: return .inputEvent(try InputEventMessage.decode(data, using: limits))
         case .clipboardOffer: return .clipboardOffer(try ClipboardOfferMessage.decode(data, using: limits))
         case .clipboardText: return .clipboardText(try ClipboardTextMessage.decode(data, using: limits))
+        case .clipboardAcknowledgement:
+            return .clipboardAcknowledgement(try ClipboardAcknowledgementMessage.decode(data, using: limits))
         case .ping: return .ping(try PingMessage.decode(data, using: limits))
         case .pong: return .pong(try PongMessage.decode(data, using: limits))
         case .sessionState: return .sessionState(try SessionStateMessage.decode(data, using: limits))

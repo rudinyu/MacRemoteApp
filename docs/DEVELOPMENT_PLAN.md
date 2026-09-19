@@ -20,8 +20,13 @@ check. M5's Viewer input transport gate and M6's Host authorization/mapping
 implementation gate are complete with deterministic tests. M6 real OS event
 posting remains an environment evidence item requiring a disposable foreground
 test application and Accessibility permission; the secure-input provider is
-fail-closed when its state is unknown. M7 and later milestones remain blocked
-by their documented dependencies and exit criteria.
+fail-closed when its state is unknown. M7's implementation/test gate is
+complete, including the two app-layer pasteboard bridges; its physical
+Intel-Host/Apple-Silicon-Viewer clipboard walkthrough remains an environment
+evidence item. M8's deterministic measurement/resilience gate and M9's
+release-audit gate are implemented. M10's deterministic final gate and
+acceptance checklist are implemented, while the physical two-machine
+acceptance remains unverified on this Apple Silicon workspace.
 
 ## Delivery principles
 
@@ -381,6 +386,13 @@ unbounded clipboard history.
 
 ## M8 — Performance and resilience
 
+### Implementation status
+
+The reusable clock-sync/percentile model, deterministic 1,000-valid-sample
+benchmark harness, bounded video-queue stress path, and resilience tests are
+implemented. See `docs/M8_PERFORMANCE_RESILIENCE.md`. The harness report is
+synthetic evidence and does not claim physical Intel/Apple Silicon latency.
+
 ### Scope
 
 - Build the documented benchmark harness and measure capture-to-display and
@@ -419,6 +431,13 @@ optimization.
 
 ## M9 — Security hardening and release readiness
 
+### Implementation status
+
+The release audit, release-only debug gating, negative-test coverage, and
+residual-risk record are implemented. See `docs/M9_SECURITY_RELEASE.md`.
+The Developer ID/notarization helper is implemented, while actual submission
+remains a host-specific operation using the operator's Keychain profile.
+
 ### Scope
 
 - Complete threat-model review against `docs/SECURITY.md`.
@@ -451,6 +470,13 @@ No new product feature or scope expansion under the label of hardening.
 - Run the full deterministic validation suite and record environment gaps.
 
 ## M10 — V1 integration pilot and acceptance
+
+### Implementation status
+
+The deterministic final gate, role commands, sanitized evidence boundary, and
+operator acceptance checklist are implemented in
+`docs/M10_ACCEPTANCE.md`. The actual Intel Host to Apple Silicon Viewer run
+cannot be claimed until it is executed on both physical Macs.
 
 ### Scope
 

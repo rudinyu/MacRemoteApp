@@ -9,7 +9,8 @@ let package = Package(
     ],
     products: [
         .executable(name: "Host", targets: ["Host"]),
-        .executable(name: "Viewer", targets: ["Viewer"])
+        .executable(name: "Viewer", targets: ["Viewer"]),
+        .executable(name: "M8Benchmark", targets: ["M8Benchmark"])
     ],
     dependencies: [
         .package(path: "Packages/RemoteProtocol"),
@@ -31,7 +32,10 @@ let package = Package(
                 .product(name: "SecurityCore", package: "SecurityCore")
             ],
             path: "Apps/Host",
-            swiftSettings: [.swiftLanguageMode(.v6)]
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .define("DEBUG", .when(configuration: .debug))
+            ]
         ),
         .executableTarget(
             name: "Viewer",
@@ -43,7 +47,10 @@ let package = Package(
                 .product(name: "SecurityCore", package: "SecurityCore")
             ],
             path: "Apps/Viewer",
-            swiftSettings: [.swiftLanguageMode(.v6)]
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .define("DEBUG", .when(configuration: .debug))
+            ]
         ),
         .testTarget(
             name: "MacRemoteAppSmokeTests",
@@ -56,6 +63,15 @@ let package = Package(
                 .product(name: "SecurityCore", package: "SecurityCore")
             ],
             path: "Tests/MacRemoteAppSmokeTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .executableTarget(
+            name: "M8Benchmark",
+            dependencies: [
+                .product(name: "CodecCore", package: "CodecCore"),
+                .product(name: "TransportCore", package: "TransportCore")
+            ],
+            path: "Tools/M8Benchmark",
             swiftSettings: [.swiftLanguageMode(.v6)]
         )
     ]

@@ -105,6 +105,7 @@ The exact binary field widths and serialization format are fixed by M1 in
 | `InputEvent` | Viewer → Host | Validated mouse, keyboard, modifier, and scroll event model |
 | `ClipboardOffer` | Both | Text clipboard generation/metadata and opt-in state |
 | `ClipboardText` | Both | Bounded UTF-8 text payload for an accepted offer |
+| `ClipboardAcknowledgement` | Both | Accept/reject result for one clipboard offer |
 | `Ping` / `Pong` | Both | Liveness and timing measurement |
 | `SessionState` | Both | Explicit state, permission, focus, and capability transitions |
 | `Error` | Both | Structured failure code, retryability, and safe user-facing detail |
@@ -246,16 +247,24 @@ prompts, or events intended for background/unfocused applications.
 ## Clipboard contract
 
 - Only text is supported in V1.
-- Synchronization is opt-in and represented in session state.
+- Synchronization is disabled by default. Both endpoints opt in per session;
+  an optional `hasText = false` offer communicates enable/disable state without
+  creating an ambiguous empty-text transfer.
 - `ClipboardOffer` carries a generation identifier, origin, text metadata, and
-  bounded size; `ClipboardText` carries canonical UTF-8 content.
-- The receiver acknowledges or rejects an offer before applying it.
+  bounded size; `ClipboardText` carries canonical UTF-8 content. A status-only
+  offer has `textByteCount = 0` and `hasText = false`.
+- `ClipboardAcknowledgement` identifies the offer by origin/generation and is
+  sent before the receiver applies any `ClipboardText`.
 - Each side tracks origin/generation so received text is not immediately echoed
   back indefinitely.
-- The M1 default is 65,515 UTF-8 bytes. `ClipboardText` travels on the control
+- The M1/M7 default is 65,515 UTF-8 bytes. `ClipboardText` travels on the control
   channel and its 21-byte canonical schema/field overhead keeps the complete
-  payload within the shared 64 KiB control-envelope limit. M7 may choose a
-  different bound only with an explicit compatible framing decision.
+  payload within the shared 64 KiB control-envelope limit. Both limits are
+  negotiated as the minimum of the local and peer values.
+- Conflict policy is deterministic arrival order: a pending local offer wins
+  over a concurrent remote offer; a local edit after a remote offer was
+  accepted cancels that incoming offer and creates a new local generation;
+  replayed generations are rejected.
 - Images, files, file promises, rich text, and arbitrary pasteboard types are
   rejected as unsupported.
 - Clipboard contents must never appear in normal logs or error strings.

@@ -1,9 +1,36 @@
+#if DEBUG
 import Foundation
 import RemoteProtocol
 import SecurityCore
 import TransportCore
 
 enum M2PhysicalViewerSmoke {
+    private enum ClipboardOperatorEvent: Sendable {
+        case input(String?)
+        case status(ClipboardSyncStatus)
+        case session(SessionSnapshot)
+        case normalClose
+    }
+
+    private enum ClipboardWalkthroughCompletion: Equatable, Sendable {
+        case operatorRequested
+        case peerNormalClose
+    }
+
+    private actor ClipboardNormalCloseObserver {
+        private var observed = false
+
+        func record(_ reason: CloseReason) {
+            if reason == .normal {
+                observed = true
+            }
+        }
+
+        func wasObserved() -> Bool {
+            observed
+        }
+    }
+
     private struct Configuration {
         let identityURL: URL
         let peerCertificateURL: URL
@@ -43,8 +70,11 @@ enum M2PhysicalViewerSmoke {
         }
     }
 
-    static func run() async throws {
+    static func run(clipboardOptIn: Bool = false) async throws {
         let configuration = try Configuration.load()
+        let capabilities: Set<Capability> = clipboardOptIn
+            ? [.pingPong, .textClipboard]
+            : [.pingPong]
         let identityProvider = KeychainIdentityProvider()
         let localIdentity = try await identityProvider.importPKCS12(
             at: configuration.identityURL,
@@ -69,7 +99,7 @@ enum M2PhysicalViewerSmoke {
         )
         // Bonjour metadata is untrusted; keep discovery diagnostics fixed and
         // printable instead of echoing a remote service name to the terminal.
-        print("M2 physical viewer discovered a trusted Host via Bonjour")
+        print("M\(clipboardOptIn ? 7 : 2) physical viewer discovered a trusted Host via Bonjour")
 
         let transport = try NetworkFramedTransport(
             endpoint: service.endpoint,
@@ -78,19 +108,18 @@ enum M2PhysicalViewerSmoke {
         let session = SessionCoordinator(
             configuration: SessionConfiguration(
                 role: .viewer,
-                implementationIdentifier: "MacRemoteApp-M2-PhysicalViewer",
-                capabilities: [.pingPong],
+                implementationIdentifier: clipboardOptIn
+                    ? "MacRemoteApp-M7-PhysicalViewer"
+                    : "MacRemoteApp-M2-PhysicalViewer",
+                capabilities: capabilities,
                 mandatoryCapabilities: [.pingPong]
             ),
             transport: transport
         )
-        let failureProbe = Task<String?, Never> {
-            var iterator = session.incomingMessages.makeAsyncIterator()
-            do {
-                while try await iterator.next() != nil {}
-                return nil
-            } catch {
-                return String(describing: error)
+        let normalCloseObserver = ClipboardNormalCloseObserver()
+        let messageLoop = await ViewerApp.startSession(session) { message in
+            if case let .close(close) = message {
+                await normalCloseObserver.record(close.reason)
             }
         }
 
@@ -99,30 +128,188 @@ enum M2PhysicalViewerSmoke {
             _ = try await waitForSession(
                 session,
                 authorized: false,
-                timeoutSeconds: configuration.timeoutSeconds,
-                failureProbe: failureProbe
+                timeoutSeconds: configuration.timeoutSeconds
             )
             let snapshot = try await waitForSession(
                 session,
                 authorized: true,
-                timeoutSeconds: configuration.timeoutSeconds,
-                failureProbe: failureProbe
+                timeoutSeconds: configuration.timeoutSeconds
             )
-            guard snapshot.authorizedCapabilities == Set<Capability>([.pingPong]) else {
-                throw SmokeError("Host authorization did not contain only pingPong")
+            guard snapshot.authorizedCapabilities == capabilities else {
+                throw SmokeError("Host authorization did not contain the requested capabilities")
+            }
+            if clipboardOptIn {
+                print(
+                    "M7 physical viewer clipboard opt-in enabled by explicit " +
+                        "--m7-physical-viewer command"
+                )
+                try await messageLoop.setClipboardEnabled(true)
+                let clipboardStatus = try await waitForClipboard(
+                    messageLoop,
+                    timeoutSeconds: configuration.timeoutSeconds
+                )
+                let ux = SessionUXProjection.make(
+                    session: snapshot,
+                    permission: .unknown,
+                    streamReady: false,
+                    inputReady: false,
+                    clipboard: clipboardStatus
+                )
+                guard ux.clipboardEnabled else {
+                    throw SmokeError(
+                        "authorized clipboard opt-in did not reach the ready state"
+                    )
+                }
+                print(
+                    "M7 physical viewer UI state: authorized, " +
+                        "clipboard=enabled"
+                )
+                let completion = try await waitForClipboardOperatorStop(
+                    messageLoop,
+                    session: session,
+                    normalCloseObserver: normalCloseObserver
+                )
+                let sessionIsLive = isLiveClipboardSession(await session.snapshot())
+                let normalCloseObserved = await normalCloseObserver.wasObserved()
+                guard completion == .peerNormalClose ||
+                    sessionIsLive ||
+                    normalCloseObserved else {
+                    throw SmokeError("session ended during the M7 clipboard walkthrough")
+                }
             }
             print(
-                "M2 physical viewer authorized by Host \(shortIdentity(snapshot.peerIdentity)) " +
-                    "capabilities=pingPong"
+                "M\(clipboardOptIn ? 7 : 2) physical viewer authorized by Host " +
+                    "\(shortIdentity(snapshot.peerIdentity)) " +
+                    "capabilities=\(clipboardOptIn ? "pingPong,textClipboard" : "pingPong")"
             )
-            print("M2 physical smoke PASS (Viewer received Host authorization)")
+            print("M\(clipboardOptIn ? 7 : 2) physical smoke PASS (Viewer received Host authorization)")
             await session.stop()
-            failureProbe.cancel()
+            await messageLoop.stop()
         } catch {
-            failureProbe.cancel()
+            await messageLoop.stop()
             await transport.close()
             throw error
         }
+    }
+
+    private static func waitForClipboard(
+        _ messageLoop: ViewerSessionMessageLoop,
+        timeoutSeconds: UInt64
+    ) async throws -> ClipboardSyncStatus {
+        let attempts = max(1, timeoutSeconds * 10)
+        for _ in 0..<attempts {
+            let status = await messageLoop.clipboardStatus
+            if status.isEnabledForSession {
+                return status
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        throw SmokeError("timed out waiting for both clipboard opt-ins")
+    }
+
+    private static func waitForClipboardOperatorStop(
+        _ messageLoop: ViewerSessionMessageLoop,
+        session: SessionCoordinator,
+        normalCloseObserver: ClipboardNormalCloseObserver
+    ) async throws -> ClipboardWalkthroughCompletion {
+        print(
+            "M7 physical viewer clipboard ready; copy text now. " +
+                "Type disable to opt out, or press Return to stop."
+        )
+        let (events, continuation) = AsyncStream<ClipboardOperatorEvent>.makeStream()
+        let initialStatus = await messageLoop.clipboardStatus
+        let initialSession = await session.snapshot()
+        guard isLiveClipboardSession(initialSession) else {
+            continuation.finish()
+            print(
+                "M7 physical viewer UI state: session=disconnected, " +
+                    "clipboard=disabled; walkthrough failed"
+            )
+            throw SmokeError("session ended before the M7 clipboard walkthrough started")
+        }
+        let inputTask = Task.detached(priority: nil) {
+            while !Task.isCancelled {
+                let command = readLine()
+                continuation.yield(.input(command))
+                guard command != nil else { return }
+            }
+        }
+        let statusTask = Task { [messageLoop, session, initialStatus, initialSession] in
+            var previous = initialStatus
+            var previousSessionIsLive = isLiveClipboardSession(initialSession)
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                } catch {
+                    return
+                }
+                let current = await messageLoop.clipboardStatus
+                if current != previous {
+                    previous = current
+                    continuation.yield(.status(current))
+                }
+                let currentSession = await session.snapshot()
+                let currentSessionIsLive = isLiveClipboardSession(currentSession)
+                if !currentSessionIsLive || currentSessionIsLive != previousSessionIsLive {
+                    if !currentSessionIsLive {
+                        if await normalCloseObserver.wasObserved() {
+                            continuation.yield(.normalClose)
+                            return
+                        }
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                        if await normalCloseObserver.wasObserved() {
+                            continuation.yield(.normalClose)
+                            return
+                        }
+                    }
+                    previousSessionIsLive = currentSessionIsLive
+                    continuation.yield(.session(currentSession))
+                }
+            }
+        }
+        defer {
+            inputTask.cancel()
+            statusTask.cancel()
+            continuation.finish()
+        }
+
+        for await event in events {
+            switch event {
+            case let .status(status):
+                print(
+                    "M7 physical viewer UI state: authorized, " +
+                        "clipboard=\(status.isEnabledForSession ? "enabled" : "disabled")"
+                )
+            case let .session(snapshot):
+                guard isLiveClipboardSession(snapshot) else {
+                    print(
+                        "M7 physical viewer UI state: session=disconnected, " +
+                            "clipboard=disabled; walkthrough failed"
+                    )
+                    throw SmokeError("session ended during the M7 clipboard walkthrough")
+                }
+            case .normalClose:
+                return .peerNormalClose
+            case let .input(command):
+                guard let command else { return .operatorRequested }
+                let normalized = command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                guard normalized == "disable" || normalized == "off" else {
+                    return .operatorRequested
+                }
+                try await messageLoop.setClipboardEnabled(false)
+                print("M7 physical viewer UI state: authorized, clipboard=disabled")
+                print("M7 physical viewer clipboard remains connected; press Return to stop.")
+            }
+        }
+        return .operatorRequested
+    }
+
+    private static func isLiveClipboardSession(_ snapshot: SessionSnapshot) -> Bool {
+        snapshot.authorized &&
+            snapshot.authorizedCapabilities.contains(.textClipboard) &&
+            snapshot.state != .reconnecting &&
+            snapshot.state != .stopping &&
+            snapshot.state != .failed
     }
 
     private static func discoverHost(
@@ -158,15 +345,13 @@ enum M2PhysicalViewerSmoke {
     private static func waitForSession(
         _ session: SessionCoordinator,
         authorized: Bool,
-        timeoutSeconds: UInt64,
-        failureProbe: Task<String?, Never>
+        timeoutSeconds: UInt64
     ) async throws -> SessionSnapshot {
         let attempts = max(1, timeoutSeconds * 10)
         for _ in 0..<attempts {
             let snapshot = await session.snapshot()
             if snapshot.state == .failed {
-                let detail = await failureProbe.value ?? "unknown session error"
-                throw SmokeError("session entered the failed state: \(detail)")
+                throw SmokeError("session entered the failed state")
             }
             if authorized {
                 if snapshot.authorized { return snapshot }
@@ -184,3 +369,4 @@ enum M2PhysicalViewerSmoke {
         return String(identity.identifier.prefix(12))
     }
 }
+#endif

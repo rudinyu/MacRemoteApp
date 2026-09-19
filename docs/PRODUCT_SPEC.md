@@ -15,7 +15,10 @@ typed event normalization, and authenticated event-transport foundation; it
 does not inject events into the Host OS. M6 now contains the Host-side
 authorization, current-window mapping, typed CoreGraphics/Accessibility
 adapter, per-session input-stream lifecycle wiring, and deterministic safety
-tests; actual OS event posting remains a manual evidence gate.
+tests; actual OS event posting remains a manual evidence gate. M7 now contains
+the bounded, opt-in text clipboard flow, session-state projection, and
+Host/Viewer string-pasteboard bridges; its physical two-Mac clipboard evidence
+remains pending.
 
 ## Product goal
 
@@ -183,6 +186,12 @@ handoff, not when a frame merely enters a render queue. If clock alignment is
 not within the stated uncertainty bound, report a separate authenticated
 round-trip measurement instead of claiming a one-way latency result.
 
+The repository's deterministic M8 harness validates the measurement math,
+queue bounds, and report schema only. It is not physical performance evidence.
+M10 must attach a sanitized report from the Intel Host and Apple Silicon
+Viewer run before the one-way latency and 1080p/60 acceptance items are
+marked verified.
+
 ## Permissions and consent
 
 - Screen Recording permission is required for Host window capture.
@@ -240,4 +249,6 @@ documented compatibility matrix:
 - Exact H.264 profile, bitrate/rate-control defaults, and decoder fallback —
   M4.
 - User-facing pairing UX and trust-record revocation UI — M2/M9.
-- Clipboard size limit, conflict policy, and text encoding edge cases — M7.
+- Clipboard size limit, conflict policy, and text encoding edge cases — resolved
+  in M7: 65,515 UTF-8 bytes, Offer/ACK/Text ordering, and deterministic
+  arrival-order conflict handling.

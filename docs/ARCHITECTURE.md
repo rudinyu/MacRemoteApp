@@ -134,6 +134,14 @@ Additional rules:
   `InputCore.HostInputController` performs the final check immediately before
   every Host-side injection; a TransportCore authorization decision alone
   never authorizes an OS event.
+- M7 keeps clipboard policy split at the same boundary: `RemoteProtocol` owns
+  the bounded Offer/Text/Acknowledgement wire schemas; `TransportCore` owns the
+  pure `ClipboardSyncCoordinator` transient state machine and the redacted
+  `SessionUXProjection`; `Apps/Host` and `Apps/Viewer` are the only layers that
+  read/write `NSPasteboard` and render the opt-in/session status. Clipboard
+  AppKit bridges must still call `SessionCoordinator.send`, so
+  `TransportCore` remains the authoritative authentication, authorization, and
+  capability enforcement point.
 - In M3, `CaptureCore` is the source of truth for the Host window catalog,
   Screen Recording permission state, selected-window generation, and raw
   timestamped pixel-buffer lifecycle. `Apps/Host` may map those values to
@@ -341,6 +349,18 @@ binding. M4 must record H.264 profile and rate-control defaults. M7 must record
 clipboard conflict and size policy. M8 must record benchmark evidence before
 any performance-driven transport change. These are decisions, not permission
 to add speculative features.
+
+## M8 decisions
+
+- The baseline remains one authenticated Network.framework TCP stream with
+  separate bounded control/media queues. No alternate transport is enabled
+  without physical evidence that the baseline misses the target.
+- The benchmark exchanges at least 20 authenticated four-timestamp probes,
+  selects the minimum-RTT offset, reports residual uncertainty and drift, and
+  refuses to label one-way latency verified when uncertainty exceeds 5 ms.
+- Video queue capacity remains three; only unsent non-keyframes may be
+  superseded. Control/input ordering and authorization gates are never traded
+  for a latency optimization.
 
 ## M2 decisions
 

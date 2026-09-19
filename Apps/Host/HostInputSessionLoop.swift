@@ -74,6 +74,7 @@ final class HostInputSessionLoop: @unchecked Sendable {
     private let session: SessionCoordinator
     private let handler: HostInputMessageHandler
     private let onNonInputMessage: @Sendable (MessagePayload) async -> Void
+    private let onSessionLifecycleReset: @Sendable () async -> Void
     private let now: @Sendable () -> UInt64
     private let admissionGate = HostInputAdmissionGate()
     private let cleanupLeaseLock = NSLock()
@@ -84,12 +85,14 @@ final class HostInputSessionLoop: @unchecked Sendable {
         handler: HostInputMessageHandler,
         cleanupLease: HostInputSessionCleanupLease,
         onNonInputMessage: @escaping @Sendable (MessagePayload) async -> Void,
+        onSessionLifecycleReset: @escaping @Sendable () async -> Void = {},
         now: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
     ) {
         self.session = session
         self.handler = handler
         self.cleanupLease = cleanupLease
         self.onNonInputMessage = onNonInputMessage
+        self.onSessionLifecycleReset = onSessionLifecycleReset
         self.now = now
     }
 
@@ -110,6 +113,7 @@ final class HostInputSessionLoop: @unchecked Sendable {
                     current.reconnectGeneration != previous.reconnectGeneration ||
                     current.authorized != previous.authorized ||
                     current.authorizedWindowGeneration != previous.authorizedWindowGeneration {
+                    await onSessionLifecycleReset()
                     await session.discardPendingInputMessages()
                     handler.reset()
                 }
@@ -191,6 +195,19 @@ final class HostInputSessionLoop: @unchecked Sendable {
 
     func reset() {
         handler.reset()
+    }
+
+    /// Prevents new input admissions while the lifecycle owner awaits a
+    /// potentially suspended callback. Existing input is drained first so a
+    /// stop/replacement cannot race an in-flight platform injection.
+    func beginInputStop() async {
+        await admissionGate.beginSelectionChange()
+    }
+
+    /// Releases the stop fence after the lifecycle callback and input loop have
+    /// both finished unwinding.
+    func endInputStop() async {
+        await admissionGate.endSelectionChange()
     }
 
     /// Must be called immediately before the Host changes CaptureCore's

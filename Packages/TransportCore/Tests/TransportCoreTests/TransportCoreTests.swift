@@ -308,6 +308,14 @@ final class TransportCoreTests: XCTestCase {
         let reconnectedPeerSnapshot = await peer.snapshot()
         XCTAssertEqual(reconnectedSessionSnapshot.state, .capabilitiesNegotiated)
         XCTAssertEqual(reconnectedPeerSnapshot.state, .capabilitiesNegotiated)
+        let staleStopResult = await session.stopIfCurrent(
+            reason: .shutdown,
+            expectedAuthorizationGeneration: failedSnapshot.authorizationGeneration,
+            expectedReconnectGeneration: failedSnapshot.reconnectGeneration
+        )
+        XCTAssertFalse(staleStopResult, "a stale failure must not stop the replacement session")
+        let afterStaleStopSnapshot = await session.snapshot()
+        XCTAssertEqual(afterStaleStopSnapshot.state, .capabilitiesNegotiated)
         let messageTask = Task { () throws -> MessagePayload? in
             var iterator = session.incomingMessages.makeAsyncIterator()
             return try await iterator.next()
@@ -538,6 +546,73 @@ final class TransportCoreTests: XCTestCase {
         await host.stop()
         let stoppedHostSnapshot = await host.snapshot()
         XCTAssertFalse(stoppedHostSnapshot.authorized)
+    }
+
+    func testClipboardAcknowledgementUsesAuthenticatedCapabilityGate() async throws {
+        let hostIdentity = try PeerIdentity(publicKeyRepresentation: Data("m7-gate-host".utf8))
+        let viewerIdentity = try PeerIdentity(publicKeyRepresentation: Data("m7-gate-viewer".utf8))
+        let pair = InMemoryTransport.makePair(
+            firstAuthentication: .trusted(viewerIdentity),
+            secondAuthentication: .trusted(hostIdentity)
+        )
+        try await pair.first.start()
+        try await pair.second.start()
+
+        let capabilities: Set<Capability> = [.pingPong, .textClipboard]
+        let host = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .host,
+                implementationIdentifier: "m7-gate-host",
+                capabilities: capabilities,
+                mandatoryCapabilities: [.pingPong]
+            ),
+            transport: pair.first
+        )
+        let viewer = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .viewer,
+                implementationIdentifier: "m7-gate-viewer",
+                capabilities: capabilities,
+                mandatoryCapabilities: [.pingPong]
+            ),
+            transport: pair.second
+        )
+        async let hostStart: Void = host.start()
+        async let viewerStart: Void = viewer.start()
+        try await hostStart
+        try await viewerStart
+
+        for _ in 0 ..< 100 {
+            if (await host.snapshot()).state == .capabilitiesNegotiated,
+               (await viewer.snapshot()).state == .capabilitiesNegotiated {
+                break
+            }
+            await Task.yield()
+        }
+        let acknowledgement = ClipboardAcknowledgementMessage(
+            generation: 1,
+            origin: .viewer,
+            accepted: true,
+            reason: .accepted
+        )
+        do {
+            try await viewer.send(.clipboardAcknowledgement(acknowledgement))
+            XCTFail("clipboard acknowledgement must not bypass authorization")
+        } catch SessionError.unauthorizedMessage(.clipboardAcknowledgement) {
+            // Expected.
+        }
+
+        try await host.authorize(capabilities: [.textClipboard])
+        for _ in 0 ..< 100 {
+            if (await viewer.snapshot()).authorized { break }
+            await Task.yield()
+        }
+        let authorizedViewer = await viewer.snapshot()
+        XCTAssertTrue(authorizedViewer.authorized)
+        try await viewer.send(.clipboardAcknowledgement(acknowledgement))
+
+        await host.stop()
+        await viewer.stop()
     }
 
     func testAuthorizedViewerInputReachesHostDoubleInWireOrder() async throws {
@@ -1804,6 +1879,559 @@ final class TransportCoreTests: XCTestCase {
         )
         XCTAssertEqual(bootstrapOptions.authentication(for: trustedIdentity), .pairingRequired(trustedIdentity))
         XCTAssertEqual(bootstrapOptions.authentication(for: changedIdentity), .rejected)
+    }
+
+    func testClipboardSyncIsDisabledByDefaultAndRequiresOptIn() {
+        var viewer = ClipboardSyncCoordinator(localRole: .viewer)
+        XCTAssertFalse(viewer.status.localEnabled)
+        XCTAssertFalse(viewer.status.isEnabledForSession)
+        XCTAssertEqual(viewer.localTextChanged("secret"), .disabled)
+        XCTAssertNil(viewer.status.pendingOutgoing)
+    }
+
+    func testClipboardSyncAcknowledgesTextAndSuppressesEcho() {
+        var host = ClipboardSyncCoordinator(localRole: .host)
+        var viewer = ClipboardSyncCoordinator(localRole: .viewer)
+
+        let hostEnable = try! XCTUnwrap(host.setEnabled(true))
+        let viewerEnable = try! XCTUnwrap(viewer.setEnabled(true))
+        guard case let .acknowledgement(hostEnableAck) = viewer.receiveOffer(hostEnable),
+              case let .acknowledgement(viewerEnableAck) = host.receiveOffer(viewerEnable) else {
+            XCTFail("enablement offers must be acknowledged")
+            return
+        }
+        XCTAssertTrue(hostEnableAck.accepted)
+        XCTAssertTrue(viewerEnableAck.accepted)
+        XCTAssertEqual(host.receiveAcknowledgement(hostEnableAck), .statusUpdated)
+        XCTAssertEqual(viewer.receiveAcknowledgement(viewerEnableAck), .statusUpdated)
+        XCTAssertTrue(host.status.isEnabledForSession)
+        XCTAssertTrue(viewer.status.isEnabledForSession)
+
+        guard case let .offer(viewerOffer) = viewer.localTextChanged("你好") else {
+            XCTFail("an opted-in local text change must create an offer")
+            return
+        }
+        guard case let .acknowledgement(offerAck) = host.receiveOffer(viewerOffer) else {
+            XCTFail("text offers must be acknowledged")
+            return
+        }
+        XCTAssertTrue(offerAck.accepted)
+        guard case let .sendText(textMessage) = viewer.receiveAcknowledgement(offerAck) else {
+            XCTFail("an accepted offer must release its text message")
+            return
+        }
+        guard case let .apply(text, transfer) = host.receiveText(textMessage) else {
+            XCTFail("matching text must be applied")
+            return
+        }
+        XCTAssertEqual(text, "你好")
+        XCTAssertEqual(transfer.origin, .viewer)
+        XCTAssertEqual(transfer.generation, viewerOffer.generation)
+        var echoProbe = host
+        XCTAssertEqual(echoProbe.localTextChanged("你好"), .suppressedEcho)
+        host.consumeEchoSuppression()
+        guard case .offer = host.localTextChanged("你好") else {
+            XCTFail("a later user copy of the same text must not be suppressed")
+            return
+        }
+        XCTAssertNil(host.status.pendingIncoming)
+    }
+
+    func testClipboardSyncQueuesNewestChangeUntilTheCurrentOfferCompletes() {
+        var host = ClipboardSyncCoordinator(localRole: .host)
+        var viewer = ClipboardSyncCoordinator(localRole: .viewer)
+
+        let hostEnable = try! XCTUnwrap(host.setEnabled(true))
+        let viewerEnable = try! XCTUnwrap(viewer.setEnabled(true))
+        guard case let .acknowledgement(hostEnableAck) = viewer.receiveOffer(hostEnable),
+              case let .acknowledgement(viewerEnableAck) = host.receiveOffer(viewerEnable) else {
+            XCTFail("enablement offers must be acknowledged")
+            return
+        }
+        _ = host.receiveAcknowledgement(hostEnableAck)
+        _ = viewer.receiveAcknowledgement(viewerEnableAck)
+
+        guard case let .offer(firstOffer) = viewer.localTextChanged("one") else {
+            XCTFail("the first text change must create an offer")
+            return
+        }
+        XCTAssertEqual(viewer.localTextChanged("two"), .queued)
+
+        guard case let .acknowledgement(firstAck) = host.receiveOffer(firstOffer),
+              case let .sendTextAndOffer(firstText, secondOffer) = viewer.receiveAcknowledgement(firstAck) else {
+            XCTFail("the first acknowledgement must release the first text and queue the next offer")
+            return
+        }
+        XCTAssertEqual(String(data: firstText.text, encoding: .utf8), "one")
+        XCTAssertEqual(secondOffer.textByteCount, 3)
+
+        guard case .apply = host.receiveText(firstText),
+              case let .acknowledgement(secondAck) = host.receiveOffer(secondOffer),
+              case let .sendText(secondText) = viewer.receiveAcknowledgement(secondAck) else {
+            XCTFail("the queued offer must complete after the first text is delivered")
+            return
+        }
+        XCTAssertEqual(String(data: secondText.text, encoding: .utf8), "two")
+    }
+
+    func testClipboardSyncRecoversQueuedOfferAfterObsoleteClipboardEpoch() {
+        var host = ClipboardSyncCoordinator(localRole: .host)
+        var viewer = ClipboardSyncCoordinator(localRole: .viewer)
+
+        guard let hostEnable = host.setEnabled(true),
+              let viewerEnable = viewer.setEnabled(true),
+              case let .acknowledgement(hostEnableAck) = viewer.receiveOffer(hostEnable),
+              case let .acknowledgement(viewerEnableAck) = host.receiveOffer(viewerEnable) else {
+            XCTFail("both clipboard opt-ins must be acknowledged")
+            return
+        }
+        _ = host.receiveAcknowledgement(hostEnableAck)
+        _ = viewer.receiveAcknowledgement(viewerEnableAck)
+
+        guard case let .offer(firstOffer) = viewer.localTextChanged("one"),
+              case .queued = viewer.localTextChanged("two"),
+              case let .acknowledgement(firstAck) = host.receiveOffer(firstOffer),
+              case let .sendTextAndOffer(firstText, secondOffer) = viewer.receiveAcknowledgement(firstAck) else {
+            XCTFail("the first offer must release its text and install a queued offer")
+            return
+        }
+        XCTAssertEqual(String(data: firstText.text, encoding: .utf8), "one")
+        XCTAssertEqual(viewer.localTextChanged("three"), .queued)
+
+        let staleTransferID = ClipboardTransferID(
+            generation: firstOffer.generation,
+            origin: firstOffer.origin
+        )
+        XCTAssertNil(viewer.recoverPendingOutgoingOffer(matching: staleTransferID))
+        XCTAssertEqual(viewer.status.pendingOutgoing?.generation, secondOffer.generation)
+        XCTAssertEqual(viewer.retryPendingOutgoingOffer(after: staleTransferID), secondOffer)
+
+        guard let pendingTransfer = viewer.status.pendingOutgoing,
+              let recoveredOffer = viewer.recoverPendingOutgoingOffer(matching: pendingTransfer) else {
+            XCTFail("a queued edit must be promoted after the old offer is fenced")
+            return
+        }
+        XCTAssertEqual(recoveredOffer.textByteCount, 5)
+        guard case let .acknowledgement(recoveredAck) = host.receiveOffer(recoveredOffer),
+              case let .sendText(recoveredText) = viewer.receiveAcknowledgement(recoveredAck) else {
+            XCTFail("the recovered offer must complete normally")
+            return
+        }
+        XCTAssertEqual(String(data: recoveredText.text, encoding: .utf8), "three")
+    }
+
+    func testClipboardSyncUsesDeterministicConflictPolicyAndSizeLimit() {
+        let limits = ProtocolLimits(maxClipboardTextBytes: 4)
+        var host = ClipboardSyncCoordinator(localRole: .host, limits: limits)
+        var viewer = ClipboardSyncCoordinator(localRole: .viewer, limits: limits)
+        _ = host.setEnabled(true)
+        _ = viewer.setEnabled(true)
+        let hostEnableAck = host.receiveOffer(
+            ClipboardOfferMessage(
+                generation: 1,
+                origin: .viewer,
+                textByteCount: 0,
+                enabled: true,
+                hasText: false
+            )
+        )
+        let viewerEnableAck = viewer.receiveOffer(
+            ClipboardOfferMessage(
+                generation: 1,
+                origin: .host,
+                textByteCount: 0,
+                enabled: true,
+                hasText: false
+            )
+        )
+        if case let .acknowledgement(ack) = hostEnableAck {
+            _ = viewer.receiveAcknowledgement(ack)
+        }
+        if case let .acknowledgement(ack) = viewerEnableAck {
+            _ = host.receiveAcknowledgement(ack)
+        }
+
+        guard case let .offer(viewerOffer) = viewer.localTextChanged("one") else {
+            XCTFail("viewer offer missing")
+            return
+        }
+        guard case let .offer(hostOffer) = host.localTextChanged("two") else {
+            XCTFail("host offer missing")
+            return
+        }
+        guard case let .acknowledgement(conflictAck) = host.receiveOffer(viewerOffer) else {
+            XCTFail("conflicting offer must be acknowledged")
+            return
+        }
+        XCTAssertFalse(conflictAck.accepted)
+        XCTAssertEqual(conflictAck.reason, .conflict)
+        XCTAssertEqual(viewer.receiveAcknowledgement(conflictAck), .rejected(.conflict))
+        XCTAssertEqual(hostOffer.origin, .host)
+        XCTAssertEqual(host.localTextChanged("12345"), .tooLarge)
+    }
+
+    func testClipboardSyncUsesFieldLimitForLocalAdmission() {
+        let limits = ProtocolLimits(maxClipboardTextBytes: 64, maxFieldLength: 32)
+        var viewer = ClipboardSyncCoordinator(localRole: .viewer, limits: limits)
+        _ = viewer.setEnabled(true)
+
+        let remoteEnable = ClipboardOfferMessage(
+            generation: 1,
+            origin: .host,
+            textByteCount: 0,
+            enabled: true,
+            hasText: false
+        )
+        guard case .acknowledgement = viewer.receiveOffer(remoteEnable) else {
+            XCTFail("the remote opt-in must be acknowledged")
+            return
+        }
+
+        XCTAssertEqual(
+            viewer.localTextChanged(String(repeating: "x", count: 33)),
+            .tooLarge
+        )
+        XCTAssertNil(viewer.status.pendingOutgoing)
+    }
+
+    func testClipboardSyncCancelsIncomingTextForOversizedAndNonTextLocalChanges() {
+        let limits = ProtocolLimits(maxClipboardTextBytes: 4)
+        var viewer = ClipboardSyncCoordinator(localRole: .viewer, limits: limits)
+        _ = viewer.setEnabled(true)
+
+        let firstOffer = ClipboardOfferMessage(
+            generation: 1,
+            origin: .host,
+            textByteCount: 4,
+            enabled: true
+        )
+        guard case let .acknowledgement(firstAcknowledgement) = viewer.receiveOffer(firstOffer) else {
+            XCTFail("the first incoming offer must be acknowledged")
+            return
+        }
+        XCTAssertTrue(firstAcknowledgement.accepted)
+        XCTAssertNotNil(viewer.status.pendingIncoming)
+
+        XCTAssertEqual(viewer.localTextChanged("12345"), .tooLarge)
+        XCTAssertNil(viewer.status.pendingIncoming)
+        XCTAssertEqual(
+            viewer.receiveText(ClipboardTextMessage(generation: 1, text: Data("test".utf8))),
+            .ignored
+        )
+
+        let secondOffer = ClipboardOfferMessage(
+            generation: 2,
+            origin: .host,
+            textByteCount: 4,
+            enabled: true
+        )
+        guard case .acknowledgement = viewer.receiveOffer(secondOffer) else {
+            XCTFail("the second incoming offer must be acknowledged")
+            return
+        }
+        XCTAssertNotNil(viewer.status.pendingIncoming)
+
+        viewer.localPasteboardChangedWithoutText()
+        XCTAssertNil(viewer.status.pendingIncoming)
+        XCTAssertEqual(
+            viewer.receiveText(ClipboardTextMessage(generation: 2, text: Data("next".utf8))),
+            .ignored
+        )
+    }
+
+    func testClipboardSyncSendsCancellationAfterAcceptedOfferIsLocallyDiscarded() {
+        var host = ClipboardSyncCoordinator(localRole: .host)
+        var viewer = ClipboardSyncCoordinator(localRole: .viewer)
+
+        guard let hostEnable = host.setEnabled(true),
+              let viewerEnable = viewer.setEnabled(true),
+              case let .acknowledgement(hostEnableAck) = viewer.receiveOffer(hostEnable),
+              case let .acknowledgement(viewerEnableAck) = host.receiveOffer(viewerEnable) else {
+            XCTFail("both clipboard opt-ins must be acknowledged")
+            return
+        }
+        XCTAssertEqual(host.receiveAcknowledgement(hostEnableAck), .statusUpdated)
+        XCTAssertEqual(viewer.receiveAcknowledgement(viewerEnableAck), .statusUpdated)
+
+        guard case let .offer(staleOffer) = viewer.localTextChanged("stale") else {
+            XCTFail("the first local change must create an offer")
+            return
+        }
+        guard case let .acknowledgement(staleAck) = host.receiveOffer(staleOffer) else {
+            XCTFail("the peer must acknowledge the first offer")
+            return
+        }
+        XCTAssertNotNil(host.status.pendingIncoming)
+
+        // The sender has not processed the ACK yet. Its native pasteboard is
+        // changed to a non-text value, so the accepted peer offer must be
+        // explicitly superseded instead of leaving the peer blocked forever.
+        viewer.localPasteboardChangedWithoutText()
+        guard let cancellation = viewer.takePendingCancellation() else {
+            XCTFail("discarding an outgoing text must create a cancellation offer")
+            return
+        }
+        XCTAssertFalse(cancellation.hasText)
+        XCTAssertEqual(viewer.receiveAcknowledgement(staleAck), .ignored)
+
+        guard case let .acknowledgement(cancellationAck) = host.receiveOffer(cancellation) else {
+            XCTFail("the peer must acknowledge the cancellation offer")
+            return
+        }
+        XCTAssertTrue(cancellationAck.accepted)
+        XCTAssertNil(host.status.pendingIncoming)
+        XCTAssertEqual(viewer.receiveAcknowledgement(cancellationAck), .statusUpdated)
+
+        XCTAssertEqual(
+            host.receiveText(
+                ClipboardTextMessage(
+                    generation: staleOffer.generation,
+                    text: Data("stale".utf8)
+                )
+            ),
+            .ignored
+        )
+        guard case let .offer(freshOffer) = viewer.localTextChanged("fresh") else {
+            XCTFail("a post-cancellation local change must create a fresh offer")
+            return
+        }
+        guard case let .acknowledgement(freshAck) = host.receiveOffer(freshOffer) else {
+            XCTFail("the fresh offer must not be rejected as a conflict")
+            return
+        }
+        XCTAssertTrue(freshAck.accepted)
+    }
+
+    func testClipboardSyncResetClearsTransientStateAndDisablesSync() {
+        var viewer = ClipboardSyncCoordinator(localRole: .viewer)
+        _ = viewer.setEnabled(true)
+        _ = viewer.receiveOffer(
+            ClipboardOfferMessage(
+                generation: 1,
+                origin: .host,
+                textByteCount: 3,
+                enabled: true
+            )
+        )
+        XCTAssertNotNil(viewer.status.pendingIncoming)
+
+        viewer.reset()
+
+        XCTAssertEqual(
+            viewer.status,
+            ClipboardSyncStatus(
+                localEnabled: false,
+                remoteEnabled: false,
+                pendingOutgoing: nil,
+                pendingIncoming: nil
+            )
+        )
+        XCTAssertEqual(viewer.localTextChanged("after disconnect"), .disabled)
+    }
+
+    func testClipboardSyncRejectsStaleStatusOffers() {
+        var viewer = ClipboardSyncCoordinator(localRole: .viewer)
+        _ = viewer.setEnabled(true)
+
+        let newest = viewer.receiveOffer(
+            ClipboardOfferMessage(
+                generation: 2,
+                origin: .host,
+                textByteCount: 0,
+                enabled: true,
+                hasText: false
+            )
+        )
+        guard case let .acknowledgement(newestAcknowledgement) = newest else {
+            XCTFail("new status offer must be acknowledged")
+            return
+        }
+        XCTAssertTrue(newestAcknowledgement.accepted)
+        XCTAssertTrue(viewer.status.remoteEnabled)
+
+        let stale = viewer.receiveOffer(
+            ClipboardOfferMessage(
+                generation: 1,
+                origin: .host,
+                textByteCount: 0,
+                enabled: false,
+                hasText: false
+            )
+        )
+        guard case let .acknowledgement(staleAcknowledgement) = stale else {
+            XCTFail("stale status offer must be acknowledged")
+            return
+        }
+        XCTAssertFalse(staleAcknowledgement.accepted)
+        XCTAssertEqual(staleAcknowledgement.reason, .stale)
+        XCTAssertTrue(viewer.status.remoteEnabled)
+    }
+
+    func testClipboardSyncClearsRemoteEnablementAfterDisableAcknowledgement() {
+        var host = ClipboardSyncCoordinator(localRole: .host)
+        var viewer = ClipboardSyncCoordinator(localRole: .viewer)
+        _ = viewer.setEnabled(true)
+
+        guard let enableOffer = host.setEnabled(true),
+              case let .acknowledgement(enableAcknowledgement) = viewer.receiveOffer(enableOffer) else {
+            XCTFail("enable offer must be acknowledged")
+            return
+        }
+        XCTAssertEqual(host.receiveAcknowledgement(enableAcknowledgement), .statusUpdated)
+        XCTAssertTrue(host.status.isEnabledForSession)
+
+        guard case .offer = viewer.localTextChanged("stale") else {
+            XCTFail("the first local change must create an offer")
+            return
+        }
+        XCTAssertEqual(viewer.localTextChanged("newer"), .queued)
+
+        guard let disableOffer = host.setEnabled(false),
+              case let .acknowledgement(disableAcknowledgement) = viewer.receiveOffer(disableOffer) else {
+            XCTFail("disable offer must be acknowledged")
+            return
+        }
+        XCTAssertEqual(host.receiveAcknowledgement(disableAcknowledgement), .statusUpdated)
+        XCTAssertFalse(host.status.remoteEnabled)
+        XCTAssertFalse(host.status.isEnabledForSession)
+
+        guard let reenableOffer = host.setEnabled(true),
+              case let .acknowledgement(reenableAcknowledgement) = viewer.receiveOffer(reenableOffer) else {
+            XCTFail("re-enable offer must be acknowledged")
+            return
+        }
+        XCTAssertEqual(host.receiveAcknowledgement(reenableAcknowledgement), .statusUpdated)
+        guard case let .offer(freshOffer) = viewer.localTextChanged("fresh") else {
+            XCTFail("a fresh post-disable change must create an offer")
+            return
+        }
+        guard case let .acknowledgement(freshAcknowledgement) = host.receiveOffer(freshOffer) else {
+            XCTFail("the fresh offer must be acknowledged")
+            return
+        }
+        guard case let .sendText(freshText) = viewer.receiveAcknowledgement(freshAcknowledgement) else {
+            XCTFail("a disabled peer must not release stale queued text")
+            return
+        }
+        XCTAssertEqual(String(data: freshText.text, encoding: .utf8), "fresh")
+    }
+
+    func testClipboardSyncDoesNotLetDelayedDisableAcknowledgementOverwriteNewerPeerOptIn() {
+        var host = ClipboardSyncCoordinator(localRole: .host)
+        _ = host.setEnabled(true)
+        guard case .acknowledgement = host.receiveOffer(
+            ClipboardOfferMessage(
+                generation: 1,
+                origin: .viewer,
+                textByteCount: 0,
+                enabled: true,
+                hasText: false
+            )
+        ),
+              let hostDisable = host.setEnabled(false) else {
+            XCTFail("the host must have a pending disable status")
+            return
+        }
+        guard case .acknowledgement = host.receiveOffer(
+            ClipboardOfferMessage(
+                generation: 2,
+                origin: .viewer,
+                textByteCount: 0,
+                enabled: true,
+                hasText: false
+            )
+        ) else {
+            XCTFail("the newer peer opt-in must be acknowledged")
+            return
+        }
+
+        XCTAssertEqual(
+            host.receiveAcknowledgement(
+                ClipboardAcknowledgementMessage(
+                    generation: hostDisable.generation,
+                    origin: .host,
+                    accepted: true,
+                    reason: .accepted
+                )
+            ),
+            .statusUpdated
+        )
+        XCTAssertTrue(host.status.remoteEnabled)
+    }
+
+    func testSessionUXProjectionSeparatesReadyAndDegradedIndicators() throws {
+        let identity = try PeerIdentity(publicKeyRepresentation: Data("m7-ux".utf8))
+        let session = SessionSnapshot(
+            state: .windowSelectionAuthorized,
+            peerIdentity: identity,
+            negotiatedCapabilities: [.textClipboard, .mouseInput],
+            authorized: true,
+            authorizedWindowGeneration: 9,
+            authorizedCapabilities: [.textClipboard, .mouseInput],
+            reconnectGeneration: 1,
+            lastHeartbeatAt: nil
+        )
+        let clipboard = ClipboardSyncStatus(
+            localEnabled: true,
+            remoteEnabled: true,
+            pendingOutgoing: nil,
+            pendingIncoming: nil
+        )
+
+        let ready = SessionUXProjection.make(
+            session: session,
+            permission: .granted,
+            streamReady: true,
+            inputReady: true,
+            clipboard: clipboard
+        )
+        XCTAssertEqual(ready.primary, .streaming)
+        XCTAssertTrue(ready.indicators.contains(.authenticated))
+        XCTAssertTrue(ready.indicators.contains(.paired))
+        XCTAssertTrue(ready.indicators.contains(.authorized))
+        XCTAssertTrue(ready.indicators.contains(.streaming))
+        XCTAssertTrue(ready.indicators.contains(.inputReady))
+        XCTAssertTrue(ready.indicators.contains(.clipboardEnabled))
+
+        let degraded = SessionUXProjection.make(
+            session: session,
+            permission: .revoked,
+            streamReady: true,
+            inputReady: true,
+            clipboard: clipboard
+        )
+        XCTAssertTrue(degraded.indicators.contains(.degraded))
+        XCTAssertFalse(degraded.indicators.contains(.inputReady))
+        XCTAssertFalse(degraded.indicators.contains(.clipboardEnabled))
+    }
+
+    func testSessionUXProjectionDoesNotAuthenticatePairingRequiredState() {
+        let session = SessionSnapshot(
+            state: .pairingRequired,
+            peerIdentity: nil,
+            negotiatedCapabilities: [],
+            authorized: false,
+            authorizedWindowGeneration: nil,
+            authorizedCapabilities: [],
+            reconnectGeneration: 0,
+            lastHeartbeatAt: nil
+        )
+        let snapshot = SessionUXProjection.make(
+            session: session,
+            permission: .unknown,
+            streamReady: false,
+            inputReady: false,
+            clipboard: ClipboardSyncStatus(
+                localEnabled: false,
+                remoteEnabled: false,
+                pendingOutgoing: nil,
+                pendingIncoming: nil
+            )
+        )
+
+        XCTAssertEqual(snapshot.primary, .pairingRequired)
+        XCTAssertFalse(snapshot.indicators.contains(.authenticated))
+        XCTAssertFalse(snapshot.indicators.contains(.paired))
     }
 
     private func makeVideoEnvelope(sequence: UInt64, keyframe: Bool) throws -> Envelope {

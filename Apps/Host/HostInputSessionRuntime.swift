@@ -81,19 +81,32 @@ actor HostInputSessionLeaseRegistry {
 /// the session.
 final actor HostInputSessionRuntime {
     private let loop: HostInputSessionLoop
+    private let onSessionLifecycleChange: @Sendable (Bool) async -> Void
+    private let onSessionLifecycleReset: @Sendable () async -> Void
+    private let setClipboardEnabledHandler: @Sendable (Bool) async throws -> Void
+    private let clipboardStatusProvider: @Sendable () async -> ClipboardSyncStatus?
     private var cleanupLease: HostInputSessionCleanupLease
     private var task: Task<Void, Never>?
     private var cleanupTask: Task<Void, Never>?
     private var cleanupGeneration: UInt64 = 0
     private var lifecycleGeneration: UInt64 = 0
     private var isStarting = false
+    private var sessionLifecycleActive = false
 
     init(
         session: SessionCoordinator,
         contextProvider: any HostInputContextProvider,
         injectionAdapter: any HostInputInjectionAdapter,
-        onNonInputMessage: @escaping @Sendable (MessagePayload) async -> Void
+        onNonInputMessage: @escaping @Sendable (MessagePayload) async -> Void,
+        onSessionLifecycleChange: @escaping @Sendable (Bool) async -> Void = { _ in },
+        onSessionLifecycleReset: @escaping @Sendable () async -> Void = {},
+        setClipboardEnabled: @escaping @Sendable (Bool) async throws -> Void = { _ in },
+        clipboardStatus: @escaping @Sendable () async -> ClipboardSyncStatus? = { nil }
     ) {
+        self.onSessionLifecycleChange = onSessionLifecycleChange
+        self.onSessionLifecycleReset = onSessionLifecycleReset
+        self.setClipboardEnabledHandler = setClipboardEnabled
+        self.clipboardStatusProvider = clipboardStatus
         let controller = HostInputController(
             contextProvider: contextProvider,
             injectionAdapter: injectionAdapter
@@ -105,7 +118,8 @@ final actor HostInputSessionRuntime {
             session: session,
             handler: handler,
             cleanupLease: cleanupLease,
-            onNonInputMessage: onNonInputMessage
+            onNonInputMessage: onNonInputMessage,
+            onSessionLifecycleReset: onSessionLifecycleReset
         )
     }
 
@@ -138,6 +152,12 @@ final actor HostInputSessionRuntime {
             return
         }
 
+        await updateSessionLifecycle(active: true)
+        guard isStarting, generation == lifecycleGeneration else {
+            isStarting = false
+            await HostInputSessionLeaseRegistry.shared.deactivate(self)
+            return
+        }
         let loop = self.loop
         isStarting = false
         task = Task { [weak self, loop] in
@@ -153,24 +173,43 @@ final actor HostInputSessionRuntime {
         }
     }
 
-    private func inputLoopDidFinish() {
+    private func inputLoopDidFinish() async {
         // A SessionCoordinator can reopen its incoming stream after
         // reconnect. Clear the completed task before the next lifecycle owner
         // calls start(), otherwise the task-nil guard would strand the new
         // stream without an input consumer.
         task = nil
+        await updateSessionLifecycle(active: false)
         beginCleanupReconciliation()
+    }
+
+    private func updateSessionLifecycle(active: Bool) async {
+        guard sessionLifecycleActive != active else { return }
+        sessionLifecycleActive = active
+        await onSessionLifecycleChange(active)
     }
 
     func stop() async {
         lifecycleGeneration &+= 1
         isStarting = false
+        // Fence new input admissions before awaiting the lifecycle callback.
+        // The callback runs on the MainActor and may be suspended while it
+        // stops clipboard polling; input must not resume during that window.
+        await loop.beginInputStop()
         if let task {
             task.cancel()
+            // Mark the input task cancelled before stopping clipboard work so
+            // a handler waiting on clipboard admission cannot commit after
+            // stop begins. Join only after the lifecycle callback has closed
+            // the clipboard commit fence.
+            await updateSessionLifecycle(active: false)
             await task.value
             self.task = nil
+        } else {
+            await updateSessionLifecycle(active: false)
         }
         loop.reset()
+        await loop.endInputStop()
         beginCleanupReconciliation()
         await waitForCleanupReconciliation()
         await HostInputSessionLeaseRegistry.shared.deactivate(self)
@@ -182,12 +221,17 @@ final actor HostInputSessionRuntime {
     func shutdownForReplacement() async {
         lifecycleGeneration &+= 1
         isStarting = false
+        await loop.beginInputStop()
         if let task {
             task.cancel()
+            await updateSessionLifecycle(active: false)
             await task.value
             self.task = nil
+        } else {
+            await updateSessionLifecycle(active: false)
         }
         loop.reset()
+        await loop.endInputStop()
         beginCleanupReconciliation()
         await waitForCleanupReconciliation()
     }
@@ -211,6 +255,14 @@ final actor HostInputSessionRuntime {
 
     func status() -> HostInputStatus {
         loop.status()
+    }
+
+    func setClipboardEnabled(_ enabled: Bool) async throws {
+        try await setClipboardEnabledHandler(enabled)
+    }
+
+    func clipboardStatus() async -> ClipboardSyncStatus? {
+        await clipboardStatusProvider()
     }
 
     private func beginCleanupReconciliation() {
