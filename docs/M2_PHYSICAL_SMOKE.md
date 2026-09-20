@@ -30,14 +30,19 @@ intentionally debug-only, so the release binaries do not contain them.
 For the optional signed install artifacts, the script builds a universal Host
 (`x86_64` + `arm64`) and an Apple Silicon Viewer, creates the `.icns` from the
 checked-in SVG, embeds Local Network/Bonjour metadata, and packages both app
-bundles and role-specific signed DMGs under `.build/device-binaries/release/`.
+bundles and role-specific signed DMGs under `build/testing/`. Each testing
+package run replaces that directory, so it retains only the latest testing
+artifacts.
 That package-only command is a local signing step; use
 `scripts/release-notarized.sh` for the final CI-gated notarized artifacts used
 for distribution or TCC-stable installation. It writes the final artifacts to
-the repository-adjacent `../MacRemoteApp-Release/` directory and clears the
-repository `.build` cache after success. Deterministic CI and M10 validation
-use temporary build roots and do not overwrite that external notarized
-directory.
+the repository-local `build/release/` directory, outside `.build`, and clears
+the repository `.build` cache after success. Local artifacts use
+`build/testing/`, `build/beta/`, `build/rc/`, and `build/release/`; the whole
+`build/` tree is excluded through the checkout-local `.git/info/exclude`
+(configured automatically by the packaging script) and must not be staged or
+pushed. Deterministic CI and M10 validation use temporary build roots and do
+not overwrite that notarized directory.
 
 For stable macOS TCC identity, use a Developer ID Application certificate. Do
 not put the certificate name in the repository; pass it only in the shell:
@@ -61,8 +66,8 @@ can cause macOS privacy permission identity to reset when the app changes.
 
 Copy these artifacts to the Macs without copying repository metadata:
 
-After `scripts/release-notarized.sh`, use the files in the external
-`../MacRemoteApp-Release/` directory:
+After `scripts/release-notarized.sh`, use the files in the repository-local
+`build/release/` directory:
 
 - Intel Mac: `MacRemoteApp-Host.app`, its zip, or `MacRemoteApp-Host.dmg`.
 - Apple Silicon Mac: `MacRemoteApp-Viewer.app`, its zip, or
@@ -73,8 +78,30 @@ The DMG contains the role-specific `Install-MacRemoteApp-*.command` and
 workflow is available with `scripts/install-device-apps.sh`; it installs into
 `~/Applications` by default and verifies the app signature before copying.
 Use `scripts/uninstall-device-apps.sh --role host --yes` or the corresponding
-Viewer command to remove only the selected app bundle. These scripts do not
-remove Keychain trust records or macOS permission grants.
+Viewer command to remove only the selected app bundle. To clean all disposable
+ad-hoc testing residue after the smoke, run this from the repository checkout:
+
+```sh
+./scripts/uninstall-device-apps.sh \
+  --clean-testing \
+  --identities "$HOME/MacRemoteApp-identities" \
+  --yes
+```
+
+Use `--dry-run` first to inspect the exact cleanup plan without changing the
+system.
+
+That command removes `build/testing/`, `.build`, the installed Host/Viewer
+bundles, the Host Screen Recording/Accessibility grants, MacRemoteApp trust
+and device-identity Keychain items, plus only the imported M2 identities whose
+fingerprints match the explicitly named generated identity material present on
+that Mac. Because the physical workflow keeps the local `.p12` and only the
+opposite `.cer`, export `MACREMOTEAPP_P12_PASSWORD` for this cleanup command
+so the local identity can be fingerprinted without printing the password. If
+the password or certificate check fails, the generated identity directory is
+preserved for a safe retry. It preserves `build/beta/`, `build/rc/`, and
+`build/release/`. Without `--identities`, imported M2 Keychain identities are
+preserved.
 
 The common icon is the source-of-truth vector at
 `Resources/MacRemoteAppIcon.svg`; the packaging script produces the Finder

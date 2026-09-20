@@ -9,7 +9,7 @@ if (( $# > 1 )); then
     exit 2
 fi
 
-release_root="${1:-${repo_root}/.build/device-binaries/release}"
+release_root="${1:-${repo_root}/build/testing}"
 signing_identity="${MACREMOTEAPP_SIGNING_IDENTITY:-}"
 if [[ -z "${signing_identity}" ]]; then
     signing_identity="-"

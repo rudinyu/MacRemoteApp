@@ -5,8 +5,67 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd)"
 cd "${repo_root}"
 
+# Keep repository-local artifacts out of Git without publishing a .gitignore.
+# This updates only this checkout's .git/info/exclude on the first packaging
+# run, which is also safe for fresh clones.
+bash "${script_dir}/ensure-local-build-exclude.sh" "${repo_root}"
+
 build_root="${MACREMOTEAPP_RELEASE_BUILD_ROOT:-${repo_root}/.build/device-binaries}"
-release_root="${MACREMOTEAPP_RELEASE_ROOT:-${build_root}/release}"
+# `build/testing` is the local, replace-on-invocation channel; removing it
+# first guarantees that only the latest testing artifacts remain. CI and the
+# notarized channels pass an explicit release root and remain isolated.
+release_root="${MACREMOTEAPP_RELEASE_ROOT:-${repo_root}/build/testing}"
+artifact_root="${repo_root}/build"
+if [[ -L "${artifact_root}" || ( -e "${artifact_root}" && ! -d "${artifact_root}" ) ]]; then
+    echo "Refusing to use a non-directory or symlink artifact root: ${artifact_root}" >&2
+    exit 2
+fi
+mkdir -p -- "${artifact_root}"
+if [[ "${release_root}" != /* ]]; then
+    release_root="${repo_root}/${release_root}"
+fi
+if [[ -L "${release_root}" ]]; then
+    echo "MACREMOTEAPP_RELEASE_ROOT must not be a symlink: ${release_root}" >&2
+    exit 2
+fi
+if [[ -e "${release_root}" ]]; then
+    if [[ ! -d "${release_root}" ]]; then
+        echo "MACREMOTEAPP_RELEASE_ROOT must be a directory: ${release_root}" >&2
+        exit 2
+    fi
+    release_root="$(cd -- "${release_root}" && pwd -P)"
+else
+    release_name="$(basename -- "${release_root}")"
+    if [[ "${release_name}" == "." || "${release_name}" == ".." || -z "${release_name}" ]]; then
+        echo "MACREMOTEAPP_RELEASE_ROOT must name a dedicated directory: ${release_root}" >&2
+        exit 2
+    fi
+    release_root="$(cd -- "$(dirname -- "${release_root}")" && pwd -P)/${release_name}"
+fi
+if [[ "${release_root}" =~ ^/+$ ]]; then
+    echo "MACREMOTEAPP_RELEASE_ROOT must be a dedicated directory, not the filesystem root" >&2
+    exit 2
+fi
+case "${release_root}" in
+    "${repo_root}/build/testing")
+        ;;
+    "${repo_root}/build/beta"|"${repo_root}/build/rc"|"${repo_root}/build/release")
+        ;;
+    "${repo_root}/build/MacRemoteApp-"*.staging.*)
+        ;;
+    "${repo_root}/.build/"*)
+        ;;
+    "${repo_root}"|"${repo_root}"/*)
+        echo "MACREMOTEAPP_RELEASE_ROOT must be a build channel or an isolated .build descendant: ${release_root}" >&2
+        exit 2
+        ;;
+esac
+case "${repo_root}" in
+    "${release_root}"/*)
+        echo "MACREMOTEAPP_RELEASE_ROOT must not contain the repository: ${release_root}" >&2
+        exit 2
+        ;;
+esac
 rm -rf -- "${release_root}"
 mkdir -p -- "${release_root}"
 

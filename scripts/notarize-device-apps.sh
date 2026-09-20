@@ -3,7 +3,14 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
-default_release_root="$(cd -- "${repo_root}/.." && pwd -P)/MacRemoteApp-Release"
+artifact_root="${repo_root}/build"
+bash "${script_dir}/ensure-local-build-exclude.sh" "${repo_root}"
+if [[ -L "${artifact_root}" || ( -e "${artifact_root}" && ! -d "${artifact_root}" ) ]]; then
+    echo "Refusing to use a non-directory or symlink artifact root: ${artifact_root}" >&2
+    exit 2
+fi
+mkdir -p -- "${artifact_root}"
+default_release_root="${repo_root}/build/release"
 release_root="${MACREMOTEAPP_RELEASE_ROOT:-${default_release_root}}"
 release_build_root="${MACREMOTEAPP_RELEASE_BUILD_ROOT:-${repo_root}/.build/notarized-release-build}"
 signing_identity="${MACREMOTEAPP_SIGNING_IDENTITY:-}"
@@ -39,8 +46,12 @@ case "${release_root}" in
         echo "MACREMOTEAPP_RELEASE_ROOT must be a dedicated directory, not /" >&2
         exit 2
         ;;
+    "${repo_root}/build/beta"|"${repo_root}/build/rc"|"${repo_root}/build/release")
+        ;;
+    "${repo_root}/build/MacRemoteApp-"*.staging.*)
+        ;;
     "${repo_root}"|"${repo_root}"/*)
-        echo "MACREMOTEAPP_RELEASE_ROOT must be outside the repository: ${release_root}" >&2
+        echo "MACREMOTEAPP_RELEASE_ROOT must be a dedicated build channel directory or an external directory: ${release_root}" >&2
         exit 2
         ;;
 esac

@@ -36,8 +36,11 @@ build/test output must not be used as a substitute.
    otherwise `scripts/validate.sh`). Only after deterministic CI passes does it
    build, submit, staple, and validate notarized `MacRemoteApp-Host.dmg` and
    `MacRemoteApp-Viewer.dmg`, together with the stapled app bundles. The
-   default output is the repository-adjacent
-   `../MacRemoteApp-Release/` directory, outside the repository and `.build`.
+   default output is the repository-local `build/release/` directory, outside
+   `.build`. Local artifacts are organized under `build/testing/`,
+   `build/beta/`, `build/rc/`, and `build/release/`; the whole `build/` tree
+   is excluded through `.git/info/exclude` and must never be staged or pushed.
+   Use `bash scripts/release-notarized.sh beta` or `rc` for those channels.
    The flow stages a new release and replaces the previous directory only
    after notarization validation succeeds, so a failed run does not discard the
    last known-good release.
@@ -50,7 +53,7 @@ build/test output must not be used as a substitute.
 
    ```bash
    bash scripts/validate-notarized-release.sh \
-     "$(cd .. && pwd)/MacRemoteApp-Release"
+     "$PWD/build/release"
    ```
 
    `scripts/notarize-device-apps.sh` is the lower-level operation and requires

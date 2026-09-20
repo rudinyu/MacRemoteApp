@@ -3,7 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd)"
-release_root="${1:-${repo_root}/.build/device-binaries/release}"
+release_root="${1:-${repo_root}/build/testing}"
 
 cd "${repo_root}"
 test -d "${release_root}"

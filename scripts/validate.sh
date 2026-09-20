@@ -26,8 +26,45 @@ bash -n \
     scripts/notarize-device-apps.sh \
     scripts/release-notarized.sh \
     scripts/uninstall-device-apps.sh
+test -x scripts/ensure-local-build-exclude.sh
+bash -n scripts/ensure-local-build-exclude.sh
+test -s scripts/clear-testing-keychain.swift
+swiftc -parse scripts/clear-testing-keychain.swift
 plutil -lint Resources/Host-Info.plist Resources/Viewer-Info.plist >/dev/null
 test -s Resources/MacRemoteAppIcon.svg
+for forbidden_package_root in \
+    "${repo_root}" \
+    "${repo_root}/build" \
+    "${repo_root}/build/other-channel" \
+    "${repo_root}/build/MacRemoteApp-release.invalid" \
+    /
+do
+    if MACREMOTEAPP_RELEASE_ROOT="${forbidden_package_root}" \
+        bash scripts/package-device-apps.sh >/dev/null 2>&1; then
+        echo "Validation failed: package script accepted unsafe output root ${forbidden_package_root}" >&2
+        exit 1
+    fi
+done
+if bash scripts/uninstall-device-apps.sh \
+    --clean-testing \
+    --identities "${repo_root}" \
+    --yes >/dev/null 2>&1; then
+    echo "Validation failed: uninstall cleanup accepted an identity path inside the repository" >&2
+    exit 1
+fi
+for forbidden_identity_path in \
+    "${HOME}" \
+    "${repo_root}/.." \
+    "${repo_root}/workspace"
+do
+    if bash scripts/uninstall-device-apps.sh \
+        --clean-testing \
+        --identities "${forbidden_identity_path}" \
+        --yes >/dev/null 2>&1; then
+        echo "Validation failed: uninstall cleanup accepted an identity ancestor path ${forbidden_identity_path}" >&2
+        exit 1
+    fi
+done
 for forbidden_identity_path in \
     "${repo_root}" \
     "${repo_root}/Tests"

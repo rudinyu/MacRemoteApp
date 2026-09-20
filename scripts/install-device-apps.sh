@@ -3,8 +3,8 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd)"
-package_release_root="${repo_root}/.build/device-binaries/release"
-notarized_release_root="$(cd -- "${repo_root}/.." && pwd -P)/MacRemoteApp-Release"
+package_release_root="${repo_root}/build/testing"
+notarized_release_root="${repo_root}/build/release"
 
 usage() {
     cat <<'EOF'
@@ -91,18 +91,31 @@ case "${role}" in
         ;;
 esac
 
+has_selected_apps() {
+    local root="$1"
+    local app_name
+    for app_name in "${app_names[@]}"; do
+        [[ -d "${root}/${app_name}.app" && ! -L "${root}/${app_name}.app" ]] || return 1
+    done
+}
+
 if [[ -z "${source_root}" ]]; then
-    if [[ -d "${script_dir}/MacRemoteApp-Host.app" ||
-          -d "${script_dir}/MacRemoteApp-Viewer.app" ]]; then
+    if has_selected_apps "${script_dir}"; then
         source_root="${script_dir}"
-    elif [[ -d "${package_release_root}" ]]; then
-        # Preserve the package-then-install workflow. The package output is
-        # preferred when present so an older external release is not selected
-        # accidentally; the notarized directory is the fallback after a
-        # successful release flow has cleared .build.
+    elif has_selected_apps "${notarized_release_root}"; then
+        # Prefer the notarized channel whenever it has the requested role. An
+        # empty or stale testing directory must not shadow a completed release.
+        source_root="${notarized_release_root}"
+    elif has_selected_apps "${package_release_root}"; then
         source_root="${package_release_root}"
     else
-        source_root="${notarized_release_root}"
+        # Keep the error below useful when neither channel has a complete
+        # bundle; it will name the normal package output location.
+        if [[ -d "${package_release_root}" ]]; then
+            source_root="${package_release_root}"
+        else
+            source_root="${notarized_release_root}"
+        fi
     fi
 fi
 

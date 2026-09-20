@@ -114,19 +114,33 @@ Use [`docs/M2_PHYSICAL_SMOKE.md`](docs/M2_PHYSICAL_SMOKE.md) to build the
 universal Host/arm64 Viewer bundles, generate non-secret public certificate
 files, and run the two-machine Bonjour/TLS smoke. `scripts/package-device-apps.sh`
 also creates local signed role-specific DMGs under
-`.build/device-binaries/release/`; this package-only output is not a
+`build/testing/`; this package-only output is not a
 notarized distribution. `scripts/release-notarized.sh` is the required final
 test path: it runs the repository validation (`.codex/ci.sh` when available,
 otherwise `scripts/validate.sh`), signs, submits, staples, and validates the
-notarized apps and DMGs. Its default output is the repository-adjacent
-`../MacRemoteApp-Release/` directory, outside the repository and `.build`.
-The flow stages a new release beside that directory and promotes it only
-after notarization validation succeeds, preserving the previous release if a
-run fails.
+notarized apps and DMGs. Its default output is the repository-local
+`build/release/` directory, outside `.build`. Local artifacts are organized as
+`build/testing/`, `build/beta/`, `build/rc/`, and `build/release/`; the
+`build/` tree is excluded through the checkout-local `.git/info/exclude`
+(configured automatically by the packaging script) and must never be staged or
+pushed to GitHub. The flow stages a new release beside the selected channel
+and promotes it only after notarization validation succeeds, preserving the
+previous channel output if a run fails. Pass `beta` or `rc` to
+`scripts/release-notarized.sh` to target those channels.
 The lower-level `scripts/notarize-device-apps.sh` remains available for the
 notarization step itself and accepts only an absent or empty output directory.
 `scripts/install-device-apps.sh` and `scripts/uninstall-device-apps.sh` manage
-the exact app bundles in `~/Applications`. The packaging source icon is
+the exact app bundles in `~/Applications`. To remove ad-hoc testing residue,
+run `scripts/uninstall-device-apps.sh --clean-testing --yes`; add
+`--identities "$HOME/MacRemoteApp-identities"` when that disposable M2
+identity directory and its matching imported Keychain identities should also
+be removed. On a physical-test Mac that keeps only its local `.p12` and the
+opposite device's `.cer`, export `MACREMOTEAPP_P12_PASSWORD` for the cleanup
+run so the local certificate fingerprint can be checked without printing the
+password. If that verification cannot be completed, the identity directory is
+preserved for a safe retry. Without `--identities`, imported M2 Keychain
+identities are preserved. This preserves `build/beta/`,
+`build/rc/`, and `build/release/`. The packaging source icon is
 [`Resources/MacRemoteAppIcon.svg`](Resources/MacRemoteAppIcon.svg); generated
 `.icns`, app bundles, and test identities stay outside version control.
 

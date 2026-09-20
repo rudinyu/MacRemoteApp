@@ -14,11 +14,14 @@ repository or validation logs. Deterministic CI packages are isolated under
 `.build/` while the run is active and are removed after a successful CI run;
 they are never treated as distributable release output. The complete local
 release gate is `scripts/release-notarized.sh`: it runs the repository
-validation first, writes final notarized artifacts to the repository-adjacent
-`../MacRemoteApp-Release/`
-directory by default, then removes the recreated `.build` cache after success.
-It stages and validates the new release before replacing an existing release
-directory.
+validation first, writes final notarized artifacts to the repository-local
+`build/release/` directory by default, then removes the recreated `.build`
+cache after success. Local artifacts are organized under
+`build/testing/`, `build/beta/`, `build/rc/`, and `build/release/`; the whole
+`build/` tree is excluded through the checkout-local `.git/info/exclude`
+(configured automatically by the packaging script) and is never a GitHub
+artifact. It stages and validates the new release before replacing an
+existing channel directory.
 When `MACREMOTEAPP_CI_NOTARIZED_RELEASE_ROOT` is supplied, CI directly
 validates that existing external notarized release without rebuilding or
 replacing it.
@@ -53,8 +56,16 @@ replacing it.
   an app atomically into `~/Applications` by default. It refuses to replace
   an existing app non-interactively unless `--replace` is supplied.
 - `scripts/uninstall-device-apps.sh` removes only the exact selected app
-  bundle paths and requires confirmation for non-interactive removal; it does
-  not delete Keychain trust records or macOS permissions.
+  bundle paths and requires confirmation for non-interactive removal. Its
+  explicit `--clean-testing --yes` mode also removes `build/testing/`, `.build`,
+  the Host TCC grants, MacRemoteApp trust/device-identity Keychain items, and
+  only the imported M2 identities whose fingerprints match generated identity
+  material present in an explicitly named M2 identity directory; beta, RC, and
+  release artifacts are preserved. On a device that retains only its local
+  `.p12` and the opposite `.cer`, `MACREMOTEAPP_P12_PASSWORD` is required to
+  fingerprint the local certificate without printing the password. If the
+  check fails, the identity directory is retained for retry. Without
+  `--identities`, imported M2 Keychain identities remain.
 - `scripts/notarize-device-apps.sh` requires a Developer ID identity, submits
   both app archives and both DMGs with `xcrun notarytool --keychain-profile`,
   staples the tickets, validates them, and refreshes the distributable
