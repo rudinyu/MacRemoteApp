@@ -7,6 +7,11 @@ import RemoteProtocol
 import SecurityCore
 import TransportCore
 
+private enum HostPairingPromptOutcome: Sendable {
+    case consent(Bool)
+    case sessionEnded
+}
+
 /// The production Host composition for the V1 vertical slice.
 ///
 /// The shared packages remain responsible for capture, encoding, transport,
@@ -16,17 +21,15 @@ import TransportCore
 actor HostRuntime {
     struct Configuration: Sendable {
         let serviceName: String
-        let peerCertificateURL: URL
+        let peerCertificateURL: URL?
         let identityLabel: String
 
         static func load(environment: [String: String] = ProcessInfo.processInfo.environment) throws -> Configuration {
-            guard let peerCertificatePath = environment["MACREMOTEAPP_PEER_CERT"],
-                  !peerCertificatePath.isEmpty else {
-                throw HostRuntimeError.configuration("set MACREMOTEAPP_PEER_CERT to the trusted Viewer's public certificate")
-            }
+            let peerCertificateURL = environment["MACREMOTEAPP_PEER_CERT"]
+                .flatMap { path in path.isEmpty ? nil : URL(fileURLWithPath: path) }
             return Configuration(
                 serviceName: environment["MACREMOTEAPP_SERVICE_NAME"] ?? "MacRemoteApp-Host",
-                peerCertificateURL: URL(fileURLWithPath: peerCertificatePath),
+                peerCertificateURL: peerCertificateURL,
                 identityLabel: environment["MACREMOTEAPP_LOCAL_IDENTITY_LABEL"] ?? KeychainIdentityProvider.defaultLabel
             )
         }
@@ -47,6 +50,7 @@ actor HostRuntime {
     private let stateStore = HostInputStateStore()
 
     private var listener: NetworkBonjourListener?
+    private var localIdentity: ProvisionedIdentity?
     private var activeSession: SessionCoordinator?
     private var inputRuntime: HostInputSessionRuntime?
     private var sessionMonitor: Task<Void, Never>?
@@ -73,9 +77,18 @@ actor HostRuntime {
         }
 
         let localIdentity = try await loadLocalIdentity()
-        let peerIdentity = try PublicCertificateIdentity.load(from: configuration.peerCertificateURL)
+        self.localIdentity = localIdentity
+        let authenticationMode: TLSAuthenticationMode
+        if let peerCertificateURL = configuration.peerCertificateURL {
+            let peerIdentity = try PublicCertificateIdentity.load(from: peerCertificateURL)
+            authenticationMode = .trusted(
+                TrustedPeer(identity: peerIdentity, displayName: "MacRemoteApp Viewer")
+            )
+        } else {
+            authenticationMode = .pairingBootstrap(expectedPeer: nil)
+        }
         let tlsOptions = TLSOptions(
-            mode: .trusted(TrustedPeer(identity: peerIdentity, displayName: "MacRemoteApp Viewer")),
+            mode: authenticationMode,
             localIdentity: localIdentity.secIdentity
         )
         let listener = try NetworkBonjourListener(
@@ -90,10 +103,15 @@ actor HostRuntime {
         }
         self.listener = listener
         listener.start()
-        print("MacRemoteApp Host listening for one trusted Viewer")
+        print("MacRemoteApp Host listening for one paired Viewer")
 
-        while !Task.isCancelled {
-            try await Task.sleep(nanoseconds: 1_000_000_000)
+        do {
+            while !Task.isCancelled {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        } catch is CancellationError {
+            // Run the same teardown path as an orderly stop so input cleanup
+            // and capture shutdown are completed before the process exits.
         }
         await stop()
     }
@@ -129,10 +147,15 @@ actor HostRuntime {
     }
 
     private func accept(_ transport: NetworkFramedTransport) async {
-        guard activeSession == nil else {
+        guard activeSession == nil, let localIdentity else {
             await transport.close()
             return
         }
+
+        let pairingCoordinator = PairingCoordinator(
+            localIdentity: localIdentity.peerIdentity,
+            trustStore: KeychainTrustStore()
+        )
 
         let session = SessionCoordinator(
             configuration: SessionConfiguration(
@@ -144,7 +167,8 @@ actor HostRuntime {
                 maxVideoHeight: 1080,
                 maxFrameRate: 60
             ),
-            transport: transport
+            transport: transport,
+            pairingCoordinator: pairingCoordinator
         )
         activeSession = session
         stateStore.update(session: await session.snapshot())
@@ -170,6 +194,7 @@ actor HostRuntime {
 
         do {
             try await session.start()
+            try await waitForPairing(session, pairingCoordinator: pairingCoordinator)
             try await waitForCapabilities(session)
             let windows = try await captureSession.discoverWindows()
             advertisedWindowGeneration = max(1, (await captureSession.snapshot().generation) &+ 1)
@@ -186,6 +211,72 @@ actor HostRuntime {
         } catch {
             await teardown(session: session)
         }
+    }
+
+    private func waitForPairing(
+        _ session: SessionCoordinator,
+        pairingCoordinator: PairingCoordinator
+    ) async throws {
+        var promptedChallengeID: UInt64?
+        while !Task.isCancelled {
+            let snapshot = await session.snapshot()
+            switch snapshot.state {
+            case .trusted, .capabilitiesNegotiated, .windowSelectionAuthorized,
+                 .streaming:
+                return
+            case .pairingRequired:
+                if let challenge = await pairingCoordinator.pendingChallenge(),
+                   promptedChallengeID != challenge.challengeID {
+                    let consent = await pairingCoordinator.consentState()
+                    guard consent?.localConsent != true else {
+                        try await Task.sleep(nanoseconds: 100_000_000)
+                        continue
+                    }
+                    promptedChallengeID = challenge.challengeID
+                    let outcome = await withTaskGroup(of: HostPairingPromptOutcome.self) { group in
+                        group.addTask {
+                            let accepted = await HostPairingPrompt.requestConsent(
+                                confirmationCode: challenge.confirmationCode,
+                                expiresAt: challenge.expiresAt
+                            )
+                            return .consent(accepted)
+                        }
+                        group.addTask {
+                            while !Task.isCancelled {
+                                let state = await session.snapshot().state
+                                if state == .failed || state == .stopping {
+                                    return .sessionEnded
+                                }
+                                do {
+                                    try await Task.sleep(nanoseconds: 100_000_000)
+                                } catch {
+                                    return .sessionEnded
+                                }
+                            }
+                            return .sessionEnded
+                        }
+                        let outcome = await group.next() ?? .sessionEnded
+                        group.cancelAll()
+                        return outcome
+                    }
+                    guard !Task.isCancelled else { throw CancellationError() }
+                    guard case let .consent(accepted) = outcome else {
+                        throw HostRuntimeError.sessionEnded
+                    }
+                    try await session.confirmPairing(
+                        confirmationCode: challenge.confirmationCode,
+                        accepted: accepted,
+                        displayName: "MacRemoteApp Viewer"
+                    )
+                }
+            case .failed, .stopping:
+                throw HostRuntimeError.sessionEnded
+            case .discovered, .authenticated, .connecting, .reconnecting:
+                break
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        throw HostRuntimeError.pairingTimedOut
     }
 
     private func waitForCapabilities(_ session: SessionCoordinator) async throws {
@@ -234,7 +325,7 @@ actor HostRuntime {
         case let .windowSelection(selection):
             guard selection.windowGeneration == advertisedWindowGeneration,
                   selectedWindow == nil else {
-                await teardown(session: session)
+                scheduleTeardown(session: session)
                 return
             }
             do {
@@ -242,17 +333,26 @@ actor HostRuntime {
                 guard let window = windows.first(where: {
                     $0.identifier == selection.windowIdentifier && $0.eligible
                 }) else {
-                    await teardown(session: session)
+                    scheduleTeardown(session: session)
                     return
                 }
                 try await activateSelection(window, generation: selection.windowGeneration, session: session)
             } catch {
-                await teardown(session: session)
+                scheduleTeardown(session: session)
             }
         case .close:
-            await teardown(session: session)
+            scheduleTeardown(session: session)
         default:
             break
+        }
+    }
+
+    /// `handle` is called by HostInputSessionLoop's single message consumer.
+    /// Defer teardown until that callback returns; otherwise `stop()` would
+    /// try to join the very task that is currently awaiting this callback.
+    private func scheduleTeardown(session: SessionCoordinator) {
+        Task { [weak self] in
+            await self?.teardown(session: session)
         }
     }
 
@@ -466,6 +566,7 @@ enum HostRuntimeError: Error, CustomStringConvertible, Sendable {
     case permission(String)
     case sessionEnded
     case sessionTimedOut
+    case pairingTimedOut
     case staleWindowGeneration
 
     var description: String {
@@ -473,6 +574,7 @@ enum HostRuntimeError: Error, CustomStringConvertible, Sendable {
         case let .configuration(message), let .permission(message): return message
         case .sessionEnded: return "Host session ended before the Viewer was ready"
         case .sessionTimedOut: return "Host session capability negotiation timed out"
+        case .pairingTimedOut: return "Host pairing confirmation timed out"
         case .staleWindowGeneration: return "selected window generation changed during capture setup"
         }
     }

@@ -12,6 +12,9 @@ Viewer, one selected Host window, LAN transport, low-latency video, input, and
 text clipboard. It does not design an Internet relay, WebRTC, audio pipeline,
 file transfer, or multi-window control path.
 
+Post-V1 capability proposals and their security/ownership gates are recorded
+in `docs/POST_V1_ROADMAP.md`; they are not architecture commitments for M10.
+
 ## Logical topology
 
 ```mermaid
@@ -196,18 +199,21 @@ Additional rules:
   `CodecCore`, `InputCore`, clipboard bridges, and `SessionCoordinator` for
   one authenticated Viewer. `Apps/Viewer/ViewerRuntime` composes Bonjour
   discovery, the authenticated session, H.264 decode, Metal presentation, the
-  Viewer input surface, and clipboard bridge. The current pilot uses a
-  pre-provisioned pinned peer certificate and a Viewer-owned one-window picker;
-  the Host remains authoritative by validating eligibility and generation
-  before authorization. Interactive pairing UI and physical cross-hardware
-  evidence remain M10 acceptance gates.
+  Viewer input surface, pairing prompts, and clipboard bridge. The normal
+  pilot uses TLS bootstrap plus a `SecurityCore.PairingCoordinator` backed by
+  the Keychain trust store; the Host owns the consent alert and the Viewer
+  owns the one-time code-entry prompt. `MACREMOTEAPP_PEER_CERT` remains an
+  optional pinned-peer migration/diagnostic input, not a new-installation
+  requirement. The Host remains authoritative by validating eligibility and
+  generation before authorization. Physical cross-hardware evidence remains
+  the open M10 acceptance gate.
 - The physical M2 diagnostic orchestration remains in `Apps/Host` and
   `Apps/Viewer`; `TransportCore` only exposes the Bonjour/TLS/session APIs.
-  `SecurityCore.PublicCertificateIdentity` derives a pinned peer identity from
-  a public DER certificate, while each app imports its own private PKCS#12
-  identity. This keeps certificate provisioning and private-key handling out
-  of the transport package and prevents the cross-machine test from copying
-  private keys between devices.
+  `SecurityCore` derives the presented peer identity from the TLS public key
+  and persists only the trusted peer record. Each app loads its own private
+  `SecIdentity` from Keychain (or the debug-only PKCS#12 provisioning path).
+  No peer private key is exchanged; the optional public-certificate path is
+  retained only for pinned migration and diagnostics.
 - Cross-cutting diagnostics use a narrow structured logging interface. They do
   not pass raw clipboard text, secrets, or full captured frames.
 
@@ -215,10 +221,11 @@ Additional rules:
 
 ### Host UI and lifecycle
 
-The Host owns the permission education flow, local window chooser, pairing
-confirmation, session status, selected-window state, and stop/disconnect
-actions. It is the only component allowed to decide which local window becomes
-the selected window, subject to the product and security rules.
+The Host owns the permission education flow, pairing confirmation, session
+status, selected-window state, and stop/disconnect actions. The current M10
+Viewer presents the eligible window picker, but the Host remains the only
+component allowed to accept a selection and decide which local window becomes
+selected, subject to the product and security rules.
 
 ### Capture path
 
@@ -386,6 +393,10 @@ to add speculative features.
   explicit two-sided local-consent pairing. Trust does not imply window
   authorization; the Host must separately authorize the session after
   capability negotiation.
+- A matching local trust record auto-consents to the bootstrap challenge and
+  suppresses that endpoint's prompt, but the Host still sends the challenge and
+  both consent messages must complete. This keeps one-sided Keychain state from
+  deadlocking or silently bypassing consent on the endpoint that needs repair.
 
 ## M3 decisions
 

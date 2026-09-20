@@ -32,15 +32,16 @@ includes the authenticated clock-sync/percentile model, deterministic
 performance harness, bounded-queue stress coverage, and reconnect/keyframe
 resilience evidence. M9 adds release-only debug gating, hardened-runtime
 artifact audit, negative-test documentation, and a residual-risk record. M10
-adds the deterministic final gate, the production Host/Viewer composition for
-pre-provisioned trusted identities, and the two-machine acceptance checklist.
+adds the deterministic final gate, the production Host/Viewer composition with
+interactive pairing and Keychain trust reuse, and the two-machine acceptance
+checklist.
 The production path now wires window discovery/selection, ScreenCaptureKit,
 H.264 encode/decode, Metal presentation, authenticated mouse/keyboard input,
 and opt-in text clipboard synchronization. The Viewer presents the eligible
 Host windows in a picker so a system/helper window is not selected silently.
-The actual Intel-to-Apple-Silicon run, explicit pairing UI, and OS
-Accessibility/input evidence remain environment gates until they are executed
-on both Macs.
+The interactive pairing UI is implemented with Keychain trust reuse. The
+actual Intel-to-Apple-Silicon run and OS Accessibility/input evidence remain
+environment gates until they are executed on both Macs.
 
 The repository root is:
 
@@ -78,6 +79,7 @@ MacRemoteApp/
     ├── M8_PERFORMANCE_RESILIENCE.md
     ├── M9_SECURITY_RELEASE.md
     ├── M10_ACCEPTANCE.md
+    ├── POST_V1_ROADMAP.md
     ├── PRODUCT_SPEC.md
     ├── PROTOCOL.md
     └── SECURITY.md
@@ -134,13 +136,19 @@ artifacts.
 
 The installed Host and Viewer binaries start their production runtime when
 launched without debug-only smoke arguments. They require a provisioned
-Keychain identity and the trusted peer's public certificate path:
+Keychain identity. On the first connection, omit `MACREMOTEAPP_PEER_CERT` to
+use the interactive Host/Viewer pairing flow:
 
 ```bash
-export MACREMOTEAPP_PEER_CERT='/secure/operator-config/peer.cer'
 open ~/Applications/MacRemoteApp-Host.app
 open ~/Applications/MacRemoteApp-Viewer.app
 ```
+
+The Host displays a one-time code and asks for local approval; the Viewer
+displays the same code and asks the operator to enter it. Both endpoints store
+the resulting peer identity in the Keychain only after local and remote
+consent complete. `MACREMOTEAPP_PEER_CERT` remains an optional pinned-peer
+migration/diagnostic mode; it is not required for new installations.
 
 Debug builds may load a PKCS#12 identity through the existing
 `MACREMOTEAPP_LOCAL_IDENTITY_P12` and `MACREMOTEAPP_P12_PASSWORD` test
@@ -148,8 +156,10 @@ workflow; those variables are not compiled into release behavior. The current
 pilot uses the existing one-window selection protocol and a Viewer picker; the
 Host remains authoritative and validates the selected generation. Use
 [`docs/M10_ACCEPTANCE.md`](docs/M10_ACCEPTANCE.md) for the
-required permissions, trusted identities, and physical evidence; a successful
-local build is not a two-Mac acceptance result.
+required permissions, local identity provisioning, pairing flow, and physical
+evidence; a successful local build is not a two-Mac acceptance result. Future
+capabilities are recorded in
+[`docs/POST_V1_ROADMAP.md`](docs/POST_V1_ROADMAP.md).
 
 ## V1 in one paragraph
 
@@ -203,7 +213,7 @@ appropriate document before implementation.
 | M7 | Text clipboard synchronization and session UX (implementation/test gate complete; physical walkthrough pending) |
 | M8 | Performance/resilience implementation and deterministic evidence (physical report pending) |
 | M9 | Security hardening, signed app/DMG release audit, install lifecycle, and notarization helper (current notarized artifacts verified; profile remains host-specific) |
-| M10 | Production Host/Viewer vertical slice and acceptance checklist (physical Intel-to-Apple-Silicon acceptance pending) |
+| M10 | Production Host/Viewer vertical slice, interactive pairing, and acceptance checklist (physical Intel-to-Apple-Silicon acceptance pending) |
 
 Each milestone is independently scoped in `docs/DEVELOPMENT_PLAN.md`. Do not
 skip a gate because a later feature appears easy to prototype.

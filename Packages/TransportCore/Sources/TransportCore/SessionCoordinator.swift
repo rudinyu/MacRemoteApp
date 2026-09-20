@@ -67,6 +67,7 @@ public struct SessionConfiguration: Sendable {
     public let heartbeatIntervalNanoseconds: UInt64
     public let heartbeatTimeoutNanoseconds: UInt64
     public let handshakeTimeoutNanoseconds: UInt64
+    public let pairingTimeoutNanoseconds: UInt64
 
     public init(
         role: DeviceRole,
@@ -79,7 +80,8 @@ public struct SessionConfiguration: Sendable {
         maxFrameRate: UInt16? = nil,
         heartbeatIntervalNanoseconds: UInt64 = 5_000_000_000,
         heartbeatTimeoutNanoseconds: UInt64 = 15_000_000_000,
-        handshakeTimeoutNanoseconds: UInt64 = 30_000_000_000
+        handshakeTimeoutNanoseconds: UInt64 = 30_000_000_000,
+        pairingTimeoutNanoseconds: UInt64 = 300_000_000_000
     ) {
         self.role = role
         self.implementationIdentifier = implementationIdentifier
@@ -92,6 +94,7 @@ public struct SessionConfiguration: Sendable {
         self.heartbeatIntervalNanoseconds = heartbeatIntervalNanoseconds
         self.heartbeatTimeoutNanoseconds = heartbeatTimeoutNanoseconds
         self.handshakeTimeoutNanoseconds = handshakeTimeoutNanoseconds
+        self.pairingTimeoutNanoseconds = pairingTimeoutNanoseconds
     }
 }
 
@@ -267,6 +270,7 @@ public actor SessionCoordinator {
     private var authorizedCapabilities: Set<Capability> = []
     private var helloSent = false
     private var capabilitiesSent = false
+    private var capabilitiesSendInFlight = false
     private var incomingSequence: [Channel: UInt64] = [:]
     private var outgoingSequence: [Channel: UInt64] = [:]
     private var pendingPing: (nonce: UInt64, sentAt: Date)?
@@ -281,6 +285,9 @@ public actor SessionCoordinator {
     private var receiveTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
     private var handshakeTask: Task<Void, Never>?
+    private var pairingDeadlineTask: Task<Void, Never>?
+    private var pairingDeadlineGeneration: UInt64 = 0
+    private var lastFailure: SessionError?
 
     public nonisolated let incomingMessages: MessageStream
     private let incomingMessageStorage: MessageStreamStorage
@@ -305,6 +312,7 @@ public actor SessionCoordinator {
         receiveTask?.cancel()
         heartbeatTask?.cancel()
         handshakeTask?.cancel()
+        pairingDeadlineTask?.cancel()
         incomingMessageStorage.finish()
     }
 
@@ -326,6 +334,13 @@ public actor SessionCoordinator {
         )
     }
 
+    /// Returns the terminal failure that caused this session to enter the
+    /// failed state. Runtime composition layers use this to distinguish an
+    /// explicit pairing denial from a transient transport failure.
+    public func failureReason() -> SessionError? {
+        lastFailure
+    }
+
     /// Drops input records that were buffered before a local Host safety
     /// transition. This does not affect unrelated control messages or the
     /// session's wire sequence state.
@@ -341,6 +356,7 @@ public actor SessionCoordinator {
         let startReconnectGeneration = reconnectGeneration
         let startReceiveGeneration = receiveGeneration
         let startAuthorizationGeneration = authorizationGeneration
+        lastFailure = nil
 
         do {
             try await transport.start()
@@ -364,18 +380,47 @@ public actor SessionCoordinator {
                 peerIdentity = identity
                 state = .trusted
             case .pairingRequired(let identity):
-                guard pairingCoordinator != nil else {
+                guard let pairingCoordinator else {
                     throw SessionError.pairingFailed
                 }
                 peerIdentity = identity
-                state = .pairingRequired
-                if configuration.role == .host {
-                    try await sendPairingChallenge(
-                        to: identity,
-                        receiveGeneration: startReceiveGeneration,
-                        reconnectGeneration: startReconnectGeneration,
-                        authorizationGeneration: startAuthorizationGeneration
-                    )
+                switch try await pairingCoordinator.trustDecision(for: identity) {
+                case .trusted:
+                    // TLS bootstrap deliberately authenticates the presented
+                    // certificate without making it trusted. Keep the
+                    // challenge in the wire flow even when this side already
+                    // trusts the peer: the other endpoint may have lost its
+                    // record and still needs a chance to show consent UI.
+                    // Local trust auto-consents below, so two matching records
+                    // complete silently after both sides exchange the proof.
+                    state = .pairingRequired
+                    if configuration.role == .host {
+                        let challenge = try await sendPairingChallenge(
+                            to: identity,
+                            receiveGeneration: startReceiveGeneration,
+                            reconnectGeneration: startReconnectGeneration,
+                            authorizationGeneration: startAuthorizationGeneration
+                        )
+                        try await confirmPairing(
+                            confirmationCode: challenge.confirmationCode,
+                            accepted: true,
+                            displayName: configuration.role == .host
+                                ? "MacRemoteApp Viewer"
+                                : "MacRemoteApp Host"
+                        )
+                    }
+                case .pairingRequired:
+                    state = .pairingRequired
+                    if configuration.role == .host {
+                        _ = try await sendPairingChallenge(
+                            to: identity,
+                            receiveGeneration: startReceiveGeneration,
+                            reconnectGeneration: startReconnectGeneration,
+                            authorizationGeneration: startAuthorizationGeneration
+                        )
+                    }
+                case .identityMismatch:
+                    throw SessionError.pairingFailed
                 }
             case .pending:
                 throw SessionError.transportFailure("TLS authentication is still pending")
@@ -858,6 +903,7 @@ public actor SessionCoordinator {
         heartbeatGeneration &+= 1
         heartbeatTask?.cancel()
         handshakeTask?.cancel()
+        cancelPairingDeadline()
         receiveTask?.cancel()
         heartbeatTask = nil
         receiveTask = nil
@@ -885,6 +931,7 @@ public actor SessionCoordinator {
         state = .reconnecting
         heartbeatTask?.cancel()
         handshakeTask?.cancel()
+        cancelPairingDeadline()
         receiveTask?.cancel()
         heartbeatTask = nil
         receiveTask = nil
@@ -903,6 +950,7 @@ public actor SessionCoordinator {
         negotiatedMaxFrameRate = nil
         helloSent = false
         capabilitiesSent = false
+        capabilitiesSendInFlight = false
         incomingSequence.removeAll()
         outgoingSequence.removeAll()
         pendingPing = nil
@@ -916,8 +964,8 @@ public actor SessionCoordinator {
         receiveGeneration expectedReceiveGeneration: UInt64,
         reconnectGeneration expectedReconnectGeneration: UInt64,
         authorizationGeneration expectedAuthorizationGeneration: UInt64
-    ) async throws {
-        guard let pairingCoordinator else { return }
+    ) async throws -> PairingChallenge {
+        guard let pairingCoordinator else { throw SessionError.pairingFailed }
         guard isCurrent(
             receiveGeneration: expectedReceiveGeneration,
             reconnectGeneration: expectedReconnectGeneration,
@@ -928,7 +976,8 @@ public actor SessionCoordinator {
         let challengeID = UInt64.random(in: 1 ... UInt64.max)
         let challenge = try await pairingCoordinator.beginSessionPairing(
             with: identity,
-            challengeID: challengeID
+            challengeID: challengeID,
+            timeout: pairingTimeoutSeconds()
         )
         guard isCurrent(
             receiveGeneration: expectedReceiveGeneration,
@@ -947,6 +996,7 @@ public actor SessionCoordinator {
             expectedReconnectGeneration: expectedReconnectGeneration,
             expectedAuthorizationGeneration: expectedAuthorizationGeneration
         )
+        startPairingDeadline(expiresAt: challenge.expiresAt)
         guard isCurrent(
             receiveGeneration: expectedReceiveGeneration,
             reconnectGeneration: expectedReconnectGeneration,
@@ -954,6 +1004,7 @@ public actor SessionCoordinator {
         ) else {
             throw SessionError.reconnectRequired
         }
+        return challenge
     }
 
     private func sendHelloIfNeeded(
@@ -996,7 +1047,7 @@ public actor SessionCoordinator {
         reconnectGeneration expectedReconnectGeneration: UInt64,
         authorizationGeneration expectedAuthorizationGeneration: UInt64
     ) async throws {
-        guard !capabilitiesSent else { return }
+        guard !capabilitiesSent, !capabilitiesSendInFlight else { return }
         guard state == .trusted || state == .capabilitiesNegotiated || state == .windowSelectionAuthorized else {
             return
         }
@@ -1014,12 +1065,19 @@ public actor SessionCoordinator {
             maxFrameRate: configuration.maxFrameRate,
             mandatoryCapabilities: configuration.mandatoryCapabilities
         )
-        _ = try await sendUnrestricted(
-            .capabilities(capabilities),
-            expectedReceiveGeneration: expectedReceiveGeneration,
-            expectedReconnectGeneration: expectedReconnectGeneration,
-            expectedAuthorizationGeneration: expectedAuthorizationGeneration
-        )
+        capabilitiesSendInFlight = true
+        do {
+            _ = try await sendUnrestricted(
+                .capabilities(capabilities),
+                expectedReceiveGeneration: expectedReceiveGeneration,
+                expectedReconnectGeneration: expectedReconnectGeneration,
+                expectedAuthorizationGeneration: expectedAuthorizationGeneration
+            )
+        } catch {
+            capabilitiesSendInFlight = false
+            throw error
+        }
+        capabilitiesSendInFlight = false
         guard isCurrent(
             receiveGeneration: expectedReceiveGeneration,
             reconnectGeneration: expectedReconnectGeneration,
@@ -1249,16 +1307,27 @@ public actor SessionCoordinator {
                 reconnectGeneration: sessionGeneration,
                 authorizationGeneration: operationAuthorizationGeneration
             ) else { return }
-            _ = try await pairingCoordinator.adoptRemoteSessionChallenge(
+            let adoptedChallenge = try await pairingCoordinator.adoptRemoteSessionChallenge(
                 challengeID: challenge.challengeID,
                 from: peerIdentity,
-                confirmationCode: challenge.confirmationCode
+                confirmationCode: challenge.confirmationCode,
+                timeout: pairingTimeoutSeconds()
             )
+            startPairingDeadline(expiresAt: adoptedChallenge.expiresAt)
             guard isCurrent(
                 receiveGeneration: generation,
                 reconnectGeneration: sessionGeneration,
                 authorizationGeneration: operationAuthorizationGeneration
             ) else { return }
+            if try await pairingCoordinator.trustDecision(for: peerIdentity) == .trusted {
+                try await confirmPairing(
+                    confirmationCode: adoptedChallenge.confirmationCode,
+                    accepted: true,
+                    displayName: configuration.role == .host
+                        ? "MacRemoteApp Viewer"
+                        : "MacRemoteApp Host"
+                )
+            }
         case let .pairingConfirmation(confirmation):
             try await handlePairingConfirmation(
                 confirmation,
@@ -1379,6 +1448,7 @@ public actor SessionCoordinator {
         handshakeGeneration &+= 1
         heartbeatTask?.cancel()
         handshakeTask?.cancel()
+        cancelPairingDeadline()
         receiveTask?.cancel()
         heartbeatTask = nil
         handshakeTask = nil
@@ -1618,6 +1688,7 @@ public actor SessionCoordinator {
         }
         switch pairingState {
         case .paired:
+            cancelPairingDeadline()
             state = .trusted
         case .awaitingConfirmation:
             state = .pairingRequired
@@ -1843,10 +1914,63 @@ public actor SessionCoordinator {
         }
     }
 
+    private func pairingTimeoutSeconds() -> TimeInterval {
+        Double(configuration.pairingTimeoutNanoseconds) / 1_000_000_000
+    }
+
+    private func startPairingDeadline(expiresAt: Date) {
+        pairingDeadlineTask?.cancel()
+        pairingDeadlineGeneration &+= 1
+        let generation = pairingDeadlineGeneration
+        let nanoseconds = UInt64(
+            max(
+                0,
+                min(
+                    expiresAt.timeIntervalSinceNow * 1_000_000_000,
+                    Double(UInt64.max)
+                )
+            )
+        )
+        pairingDeadlineTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+            } catch {
+                return
+            }
+            await self?.pairingDeadlineReached(generation: generation)
+        }
+    }
+
+    private func pairingDeadlineReached(generation: UInt64) async {
+        guard generation == pairingDeadlineGeneration,
+              state == .pairingRequired else { return }
+        pairingDeadlineTask = nil
+        let sessionReceiveGeneration = receiveGeneration
+        let sessionReconnectGeneration = reconnectGeneration
+        let sessionAuthorizationGeneration = authorizationGeneration
+        await fail(
+            .pairingFailed,
+            expectedReceiveGeneration: sessionReceiveGeneration,
+            expectedReconnectGeneration: sessionReconnectGeneration,
+            expectedAuthorizationGeneration: sessionAuthorizationGeneration
+        )
+    }
+
+    private func cancelPairingDeadline() {
+        pairingDeadlineGeneration &+= 1
+        pairingDeadlineTask?.cancel()
+        pairingDeadlineTask = nil
+    }
+
     private func handshakeDeadlineReached(generation: UInt64) async {
         guard generation == handshakeGeneration else { return }
         guard state != .capabilitiesNegotiated,
               state != .windowSelectionAuthorized,
+              // Once a challenge is active, the pairing-specific deadline
+              // owns teardown so a synchronous consent prompt cannot outlive
+              // the bounded challenge. Before the challenge arrives, the
+              // generic handshake deadline still protects the session.
+              state != .pairingRequired || pairingDeadlineTask == nil,
               state != .stopping,
               state != .failed else {
             return
@@ -1972,6 +2096,7 @@ public actor SessionCoordinator {
         }
         authorizationGeneration &+= 1
         clearAuthorization()
+        lastFailure = error
         state = .failed
         incomingMessageStorage.finish(throwing: error)
         receiveGeneration &+= 1
@@ -1979,6 +2104,7 @@ public actor SessionCoordinator {
         handshakeGeneration &+= 1
         heartbeatTask?.cancel()
         handshakeTask?.cancel()
+        cancelPairingDeadline()
         receiveTask?.cancel()
         heartbeatTask = nil
         handshakeTask = nil

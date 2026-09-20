@@ -13,9 +13,15 @@ selected generation, captures and encodes it, and forwards authorized
 input/clipboard messages. A Viewer discovers the Host, presents an explicit
 picker for the eligible advertised windows, decodes and presents H.264 frames
 through Metal, and forwards mouse/keyboard events from the same aspect-fit
-surface. This is a real launchable path, but it still requires pre-provisioned
-trusted certificates and the physical evidence below; deterministic build/test
-output must not be used as a substitute.
+surface. The production path now uses TLS bootstrap plus Keychain-backed
+two-sided pairing: a first connection shows a Host consent prompt and a Viewer
+code-entry prompt, while a later connection silently exchanges the same
+challenge when both trust records match and reuses them without prompting. If
+only one endpoint has a record, the other endpoint still receives the consent
+flow and the completed exchange repairs both records. A local device identity
+must still be provisioned in the Keychain. The physical evidence below remains
+required; deterministic
+build/test output must not be used as a substitute.
 
 ## Prerequisites
 
@@ -49,23 +55,31 @@ output must not be used as a substitute.
    `scripts/install-device-apps.sh` or the
    `Install-MacRemoteApp-*.command` file in its DMG. On the Apple Silicon
    Viewer, grant Local Network access.
-3. Generate fresh M2 identities outside the repository and pair both local
-   operators. Never copy a private key or PKCS#12 file into the repository.
+3. Generate fresh M2 identities outside the repository and provision each
+   endpoint's own identity in its local Keychain. Never copy a private key or
+   PKCS#12 file into the repository or to the other Mac.
 
 For the production runtime, provision the local identity in the Keychain under
-the `MacRemoteApp` label (or set `MACREMOTEAPP_LOCAL_IDENTITY_LABEL`) and give
-each endpoint the other endpoint's public certificate through
-`MACREMOTEAPP_PEER_CERT`. Debug physical smoke may use the existing explicit
-PKCS#12 environment workflow. The current runtime has no pairing-code UI, so
-the trusted-certificate setup is an operator prerequisite, not evidence that
-the interactive pairing journey is complete.
+the `MacRemoteApp` label (or set `MACREMOTEAPP_LOCAL_IDENTITY_LABEL`). When
+launching the installed production bundles below, do not set
+`MACREMOTEAPP_PEER_CERT` for the normal AirPlay-like first-pairing flow: the
+Host and Viewer establish the presented TLS identities, show the same one-time
+code, require local consent on both endpoints, and then save the peer records
+in the Keychain. `MACREMOTEAPP_PEER_CERT` remains an optional pinned-peer
+migration/diagnostic path.
+
+The debug role commands below intentionally exercise the existing M2/M7
+physical smoke harness, which uses explicit PKCS#12 identities and pinned
+public certificates. For those commands only, set `MACREMOTEAPP_PEER_CERT` as
+documented in `docs/M2_PHYSICAL_SMOKE.md`; that legacy test setup is separate
+from the production bundle's first-pairing flow.
 
 ## Acceptance sequence
 
 | Step | Acceptance evidence | State |
 | --- | --- | --- |
 | Fresh install | Host/Viewer app bundles launch and signatures verify | ☐ |
-| Pairing | Both operators consent; trusted identity is shown | ☐ |
+| Pairing | Host displays a code, Viewer enters the matching code, both operators consent, and trust records are stored | ☐ |
 | Window selection | Exactly one eligible foreground window is selected | ☐ |
 | Capture/display | Viewer renders the selected window with aspect preservation | ☐ |
 | Performance | 30-second report has clock probes, valid samples, p50/p95, fps and resource data | ☐ |
@@ -93,7 +107,8 @@ bash scripts/run-m10-acceptance.sh viewer
 
 The production binaries use their runtime by default when launched from the
 installed app bundle. For a direct terminal launch during setup, use the
-bundle executable paths and the same non-secret peer-certificate environment:
+bundle executable paths. No peer-certificate environment variable is needed
+for the normal first-pairing flow:
 
 ```bash
 "$HOME/Applications/MacRemoteApp-Host.app/Contents/MacOS/MacRemoteApp-Host"

@@ -70,22 +70,35 @@ the authenticated pairing flow.
 1. Discovery provides only an endpoint and non-sensitive display metadata.
 2. The Viewer connects and authenticates the transport enough to establish the
    peer identity exchange.
-3. The Host and Viewer display a short, human-comparable confirmation value
-   derived from the pairing transcript.
+3. The Host displays a short, human-comparable confirmation value derived from
+   the pairing transcript. The Viewer verifies the value locally and displays
+   the same value with a one-time code-entry field.
 4. The local operator on each endpoint explicitly consents after checking that
    the values match. A remote `PairingConfirmation` is evidence of remote
    consent, not local consent.
-5. Both sides store the peer identity and trust metadata in the Keychain only
+5. The active challenge has a bounded expiry (five minutes in the production
+   configuration). `TransportCore` owns a deadline task tied to that expiry,
+   so an unanswered consent prompt cannot keep a Host connection occupied
+   indefinitely; before a challenge is received, the generic handshake
+   deadline still applies.
+6. Both sides store the peer identity and trust metadata in the Keychain only
    after the same challenge, peer identity, matching code, and both local and
    remote consent states are complete. Reject, expiry, disconnect, or a
    mismatched identity must clear pending state without creating one-sided
    permanent trust.
-6. The session remains separately authorized for the selected window and
+7. The session remains separately authorized for the selected window and
    enabled capabilities.
 
 The confirmation value is not a password and must not be used as a long-term
-secret. The exact TLS certificate/public-key pinning and transcript-binding
-mechanism is an M2 decision, subject to M9 review.
+secret. The normal M10 path accepts the presented TLS identity only for the
+protected bootstrap, then asks `SecurityCore` for the Keychain trust decision.
+An exact matching trust record silently completes the bootstrap challenge
+exchange and skips the prompt on later connections; an unknown identity
+requires the two-sided UI flow, and an identity mismatch is rejected. A
+one-sided trust record never suppresses the other endpoint's challenge or
+consent UI; that connection can repair the missing record only after the same
+two-sided proof completes. An optional public-certificate pin remains a
+migration/diagnostic mode, not a replacement for user consent.
 
 ### Subsequent sessions
 
@@ -245,6 +258,11 @@ audit rejects development commands and unsafe entitlements from packaged
 artifacts. Physical acceptance remains an explicit gate; synthetic benchmark
 results and loopback tests do not establish Intel/Apple Silicon
 interoperability.
+
+The M10 runtime still requires each endpoint's own private identity to be
+provisioned in its local Keychain. It does not require copying the other
+endpoint's public certificate for normal pairing, and it never copies a
+private key between devices.
 
 ## Security non-goals and residual risks
 

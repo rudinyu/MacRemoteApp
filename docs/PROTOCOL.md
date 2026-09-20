@@ -50,8 +50,8 @@ control.
 Bonjour discovery
   -> transport connect
   -> TLS and peer identity validation
-  -> Hello / capability negotiation
   -> PairingRequired OR trusted-peer confirmation
+  -> Hello / capability negotiation
   -> session authorization
   -> WindowList
   -> WindowSelection
@@ -118,7 +118,9 @@ canonical encoding, and golden test vectors in `docs/M1_PROTOCOL.md`.
 
 1. The Viewer connects to a discovered Host endpoint.
 2. The transport authenticates the peer and validates the trust record or
-   enters the explicit pairing flow.
+   enters the explicit pairing flow. In bootstrap mode, a matching local trust
+   record auto-consents to the challenge but does not remove the two-sided
+   `PairingConfirmation` exchange.
 3. Both sides send `Hello` with role, protocol version, implementation version,
    and bounded limits.
 4. Both sides send `Capabilities` and compute an intersection. Unsupported

@@ -7,6 +7,12 @@ import RemoteProtocol
 import SecurityCore
 import TransportCore
 
+private enum ViewerPairingPromptOutcome: Sendable {
+    case confirmation(String)
+    case declined
+    case sessionEnded
+}
+
 /// Minimal production Viewer composition. The UI is intentionally small, but
 /// the data path is real: Bonjour -> authenticated SessionCoordinator -> H264
 /// decoder -> Metal, with the same content rectangle used for input mapping.
@@ -14,20 +20,24 @@ import TransportCore
 final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     struct Configuration: Sendable {
         let hostName: String?
-        let peerCertificateURL: URL
+        let peerCertificateURL: URL?
         let identityLabel: String
 
         static func load(environment: [String: String] = ProcessInfo.processInfo.environment) throws -> Configuration {
-            guard let peerCertificatePath = environment["MACREMOTEAPP_PEER_CERT"],
-                  !peerCertificatePath.isEmpty else {
-                throw ViewerRuntimeError.configuration("set MACREMOTEAPP_PEER_CERT to the trusted Host's public certificate")
-            }
+            let peerCertificateURL = environment["MACREMOTEAPP_PEER_CERT"]
+                .flatMap { path in path.isEmpty ? nil : URL(fileURLWithPath: path) }
             return Configuration(
                 hostName: environment["MACREMOTEAPP_HOST_NAME"],
-                peerCertificateURL: URL(fileURLWithPath: peerCertificatePath),
+                peerCertificateURL: peerCertificateURL,
                 identityLabel: environment["MACREMOTEAPP_LOCAL_IDENTITY_LABEL"] ?? KeychainIdentityProvider.defaultLabel
             )
         }
+    }
+
+    private enum ConnectResult {
+        case connected
+        case retryableFailure
+        case pairingDenied
     }
 
     private static let capabilities: Set<Capability> = [
@@ -43,6 +53,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let discovery = NetworkBonjourDiscovery()
     private let decoder = H264Decoder()
     private var discoveryTask: Task<Void, Never>?
+    private var sessionMonitorTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
+    private var lastDiscoveredService: DiscoveredService?
     private var inputSendTail: Task<Void, Never>?
     private var session: SessionCoordinator?
     private var messageLoop: ViewerSessionMessageLoop?
@@ -54,6 +67,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var streamGenerationGate = StreamGenerationGate()
     private var streamDimensions: CGSize = .zero
     private var didSendSelectionForGeneration: UInt64?
+    private var isShuttingDown = false
 
     init(configuration: Configuration) {
         self.configuration = configuration
@@ -76,14 +90,23 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             var iterator = updates.makeAsyncIterator()
             while !Task.isCancelled, let services = await iterator.next() {
                 guard let self,
+                      !self.isShuttingDown,
                       let service = services.first(where: { service in
                           guard let hostName = self.configuration.hostName else { return true }
                           return service.name == hostName
                       }) else {
                     continue
                 }
-                await self.connect(to: service)
-                return
+                self.lastDiscoveredService = service
+                guard !self.isShuttingDown,
+                      self.session == nil,
+                      self.reconnectTask == nil else { continue }
+                switch await self.connect(to: service) {
+                case .connected, .pairingDenied:
+                    break
+                case .retryableFailure:
+                    self.scheduleReconnect()
+                }
             }
         }
     }
@@ -111,6 +134,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         content.onWindowSelection = { [weak self] windowIdentifier, generation in
             self?.selectWindow(windowIdentifier, generation: generation)
         }
+        content.onPairingRetry = { [weak self] in
+            self?.retryPairing()
+        }
         content.onInputRejected = { [weak self] error in
             self?.setStatus(error.description)
         }
@@ -135,18 +161,31 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         content.updateStream(size: .zero, readiness: .awaitingAuthentication)
     }
 
-    private func connect(to service: DiscoveredService) async {
-        guard session == nil else { return }
+    private func connect(to service: DiscoveredService) async -> ConnectResult {
+        guard session == nil, !isShuttingDown else { return .retryableFailure }
+        contentView?.setPairingRetryVisible(false)
         do {
             let localIdentity = try await loadLocalIdentity()
-            let peerIdentity = try PublicCertificateIdentity.load(from: configuration.peerCertificateURL)
+            let authenticationMode: TLSAuthenticationMode
+            if let peerCertificateURL = configuration.peerCertificateURL {
+                let peerIdentity = try PublicCertificateIdentity.load(from: peerCertificateURL)
+                authenticationMode = .trusted(
+                    TrustedPeer(identity: peerIdentity, displayName: "MacRemoteApp Host")
+                )
+            } else {
+                authenticationMode = .pairingBootstrap(expectedPeer: nil)
+            }
             let tlsOptions = TLSOptions(
-                mode: .trusted(TrustedPeer(identity: peerIdentity, displayName: "MacRemoteApp Host")),
+                mode: authenticationMode,
                 localIdentity: localIdentity.secIdentity
             )
             let transport = try NetworkFramedTransport(
                 endpoint: service.endpoint,
                 tlsOptions: tlsOptions
+            )
+            let pairingCoordinator = PairingCoordinator(
+                localIdentity: localIdentity.peerIdentity,
+                trustStore: KeychainTrustStore()
             )
             let session = SessionCoordinator(
                 configuration: SessionConfiguration(
@@ -158,7 +197,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     maxVideoHeight: 1080,
                     maxFrameRate: 60
                 ),
-                transport: transport
+                transport: transport,
+                pairingCoordinator: pairingCoordinator
             )
             self.session = session
             self.inputTransport = ViewerInputTransport(session: session)
@@ -169,12 +209,164 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             loop.start()
             contentView?.updateStream(size: .zero, readiness: .awaitingAuthentication)
             try await session.start()
+            try await waitForPairing(session, pairingCoordinator: pairingCoordinator)
+            sessionMonitorTask = Task { @MainActor [weak self] in
+                await self?.monitorSession(session)
+            }
             setStatus("Connected; waiting for a selected window")
+            contentView?.setPairingRetryVisible(false)
             await refreshInputSurface()
+            return .connected
+        } catch let error as SessionError {
+            if error == .pairingDenied {
+                setStatus("Pairing was denied; click Retry pairing to try again")
+                contentView?.setPairingRetryVisible(true)
+            } else {
+                setStatus("Connection unavailable; check trusted identities and Local Network permission")
+                contentView?.setPairingRetryVisible(false)
+            }
+            await resetSession()
+            return error == .pairingDenied ? .pairingDenied : .retryableFailure
         } catch {
             setStatus("Connection unavailable; check trusted identities and Local Network permission")
-            await disconnect()
+            contentView?.setPairingRetryVisible(false)
+            await resetSession()
+            return .retryableFailure
         }
+    }
+
+    private func monitorSession(_ observedSession: SessionCoordinator) async {
+        while !Task.isCancelled {
+            do {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            } catch {
+                return
+            }
+            guard session === observedSession else { return }
+            let state = await observedSession.snapshot().state
+            guard state == .failed else { continue }
+
+            // This task owns the failure transition, so resetSession must not
+            // cancel and join this task recursively.
+            sessionMonitorTask = nil
+            await resetSession(cancelMonitor: false)
+            scheduleReconnect()
+            return
+        }
+    }
+
+    private func scheduleReconnect(immediate: Bool = false) {
+        guard reconnectTask == nil, !isShuttingDown else { return }
+        guard let service = lastDiscoveredService else {
+            setStatus("Connection lost; rediscover the Host to reconnect")
+            return
+        }
+
+        setStatus("Connection lost; reconnecting…")
+        reconnectTask = Task { @MainActor [weak self] in
+            let delays: [UInt64] = immediate ? [0, 1, 2, 3, 4] : [1, 2, 3, 4, 5]
+            for delay in delays {
+                if delay > 0 {
+                    do {
+                        try await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                    } catch {
+                        return
+                    }
+                }
+                guard let self, self.session == nil else { return }
+                switch await self.connect(to: service) {
+                case .connected:
+                    self.reconnectTask = nil
+                    return
+                case .pairingDenied:
+                    self.reconnectTask = nil
+                    return
+                case .retryableFailure:
+                    continue
+                }
+            }
+            guard let self, self.session == nil else { return }
+            self.reconnectTask = nil
+            self.setStatus("Host unavailable; start the Viewer to retry")
+        }
+    }
+
+    private func waitForPairing(
+        _ session: SessionCoordinator,
+        pairingCoordinator: PairingCoordinator
+    ) async throws {
+        var promptedChallengeID: UInt64?
+        while !Task.isCancelled {
+            let snapshot = await session.snapshot()
+            switch snapshot.state {
+            case .trusted, .capabilitiesNegotiated, .windowSelectionAuthorized, .streaming:
+                return
+            case .pairingRequired:
+                setStatus("Confirm pairing on both Macs")
+                if let challenge = await pairingCoordinator.pendingChallenge(),
+                   promptedChallengeID != challenge.challengeID {
+                    let consent = await pairingCoordinator.consentState()
+                    guard consent?.localConsent != true else {
+                        try await Task.sleep(nanoseconds: 100_000_000)
+                        continue
+                    }
+                    promptedChallengeID = challenge.challengeID
+                    let parentWindow = window
+                    let outcome = await withTaskGroup(of: ViewerPairingPromptOutcome.self) { group in
+                        group.addTask {
+                            if let enteredCode = await ViewerPairingPrompt.requestConfirmation(
+                                confirmationCode: challenge.confirmationCode,
+                                parentWindow: parentWindow,
+                                expiresAt: challenge.expiresAt
+                            ) {
+                                return .confirmation(enteredCode)
+                            }
+                            return .declined
+                        }
+                        group.addTask {
+                            while !Task.isCancelled {
+                                let state = await session.snapshot().state
+                                if state == .failed || state == .stopping {
+                                    return .sessionEnded
+                                }
+                                do {
+                                    try await Task.sleep(nanoseconds: 100_000_000)
+                                } catch {
+                                    return .sessionEnded
+                                }
+                            }
+                            return .sessionEnded
+                        }
+                        let outcome = await group.next() ?? .sessionEnded
+                        group.cancelAll()
+                        return outcome
+                    }
+                    guard !Task.isCancelled else { throw CancellationError() }
+                    switch outcome {
+                    case let .confirmation(enteredCode):
+                        try await session.confirmPairing(
+                            confirmationCode: enteredCode,
+                            accepted: true,
+                            displayName: "MacRemoteApp Host"
+                        )
+                    case .declined:
+                        try await session.confirmPairing(
+                            confirmationCode: "",
+                            accepted: false,
+                            displayName: "MacRemoteApp Host"
+                        )
+                    case .sessionEnded:
+                        throw await session.failureReason() ?? .pairingFailed
+                    }
+                }
+            case .failed, .stopping:
+                throw await session.failureReason() ?? .pairingFailed
+            case .discovered, .authenticated, .connecting, .reconnecting:
+                break
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        throw SessionError.handshakeTimeout
     }
 
     private func loadLocalIdentity() async throws -> ProvisionedIdentity {
@@ -256,7 +448,15 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
 
         case .close:
-            await disconnect()
+            // The callback is running inside ViewerSessionMessageLoop. Defer
+            // teardown until the callback returns so stop() never waits on
+            // the message-loop task itself. A peer close is recoverable; only
+            // application termination uses disconnect(), which stops Bonjour.
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.resetSession()
+                self.scheduleReconnect()
+            }
 
         default:
             await refreshInputSurface()
@@ -338,9 +538,33 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         contentView?.status = message
     }
 
+    private func retryPairing() {
+        guard !isShuttingDown, session == nil, reconnectTask == nil else { return }
+        guard lastDiscoveredService != nil else {
+            setStatus("No Host is currently discovered")
+            return
+        }
+        contentView?.setPairingRetryVisible(false)
+        scheduleReconnect(immediate: true)
+    }
+
     private func disconnect() async {
-        discoveryTask?.cancel()
-        discoveryTask = nil
+        isShuttingDown = true
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        if let discoveryTask {
+            discoveryTask.cancel()
+            await discoveryTask.value
+            self.discoveryTask = nil
+        }
+        await resetSession()
+    }
+
+    private func resetSession(cancelMonitor: Bool = true) async {
+        if cancelMonitor {
+            sessionMonitorTask?.cancel()
+            sessionMonitorTask = nil
+        }
         inputSendTail?.cancel()
         inputSendTail = nil
         if let messageLoop {
@@ -383,6 +607,7 @@ private final class ViewerContentView: NSView {
         didSet { surface.onInputRejected = onInputRejected }
     }
     var onWindowSelection: (@MainActor (UInt64, UInt64) -> Void)?
+    var onPairingRetry: (@MainActor () -> Void)?
     var status: String = "Starting…" {
         didSet { statusLabel.stringValue = status }
     }
@@ -390,6 +615,7 @@ private final class ViewerContentView: NSView {
     private let statusLabel = NSTextField(labelWithString: "Starting…")
     private let windowPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let selectWindowButton = NSButton(title: "Select", target: nil, action: nil)
+    private let retryPairingButton = NSButton(title: "Retry pairing", target: nil, action: nil)
     private var windowOptions: [WindowDescriptor] = []
     private var windowSelectionGeneration: UInt64?
     private var streamSize: CGSize = .zero
@@ -423,11 +649,16 @@ private final class ViewerContentView: NSView {
         selectWindowButton.action = #selector(selectWindow(_:))
         selectWindowButton.controlSize = .small
         selectWindowButton.isEnabled = false
+        retryPairingButton.target = self
+        retryPairingButton.action = #selector(retryPairing(_:))
+        retryPairingButton.controlSize = .small
+        retryPairingButton.isHidden = true
         addSubview(videoView)
         addSubview(surface)
         addSubview(statusLabel)
         addSubview(windowPicker)
         addSubview(selectWindowButton)
+        addSubview(retryPairingButton)
         surface.onInputEvent = onInputEvent
         surface.onInputRejected = onInputRejected
     }
@@ -439,6 +670,12 @@ private final class ViewerContentView: NSView {
     func updateStream(size: CGSize, readiness: InputReadiness) {
         streamSize = size
         self.readiness = readiness
+        needsLayout = true
+    }
+
+    func setPairingRetryVisible(_ visible: Bool) {
+        retryPairingButton.isHidden = !visible
+        retryPairingButton.isEnabled = visible
         needsLayout = true
     }
 
@@ -485,7 +722,19 @@ private final class ViewerContentView: NSView {
         super.layout()
         videoView.frame = bounds
         surface.frame = bounds
-        statusLabel.frame = NSRect(x: 12, y: 8, width: max(1, bounds.width - 24), height: 20)
+        let retryWidth: CGFloat = retryPairingButton.isHidden ? 0 : 108
+        statusLabel.frame = NSRect(
+            x: 12,
+            y: 8,
+            width: max(1, bounds.width - 24 - retryWidth),
+            height: 20
+        )
+        retryPairingButton.frame = NSRect(
+            x: max(12, bounds.width - 116),
+            y: 6,
+            width: 104,
+            height: 24
+        )
         windowPicker.frame = NSRect(
             x: 12,
             y: max(34, bounds.height - 36),
@@ -520,5 +769,10 @@ private final class ViewerContentView: NSView {
               windowPicker.indexOfSelectedItem < windowOptions.count,
               let generation = windowSelectionGeneration else { return }
         onWindowSelection?(windowOptions[windowPicker.indexOfSelectedItem].identifier, generation)
+    }
+
+    @objc private func retryPairing(_ sender: NSButton) {
+        _ = sender
+        onPairingRetry?()
     }
 }

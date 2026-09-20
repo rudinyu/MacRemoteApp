@@ -87,7 +87,18 @@ struct HostApp {
 
         do {
             let runtime = try HostRuntime(configuration: .load())
-            try await runtime.run()
+            await MainActor.run {
+                let application = NSApplication.shared
+                application.setActivationPolicy(.accessory)
+                let delegate = HostApplicationDelegate(runtime: runtime)
+                application.delegate = delegate
+                // NSApplication.delegate is weak. Keep the concrete delegate
+                // alive for the whole event loop so launch/termination
+                // callbacks cannot be lost before application.run() returns.
+                withExtendedLifetime(delegate) {
+                    application.run()
+                }
+            }
         } catch {
             fputs("MacRemoteApp Host failed: \(error)\n", stderr)
             exit(EXIT_FAILURE)
@@ -118,4 +129,46 @@ struct HostApp {
         }
     }
 #endif
+}
+
+@MainActor
+private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
+    private let runtime: HostRuntime
+    private var runtimeTask: Task<Void, Never>?
+    private var terminationRequested = false
+
+    init(runtime: HostRuntime) {
+        self.runtime = runtime
+        super.init()
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        _ = notification
+        runtimeTask = Task { [runtime] in
+            do {
+                try await runtime.run()
+            } catch {
+                fputs("MacRemoteApp Host failed: \(error)\n", stderr)
+                await runtime.stop()
+                NSApplication.shared.stop(nil)
+                exit(EXIT_FAILURE)
+            }
+            NSApplication.shared.stop(nil)
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        _ = sender
+        guard !terminationRequested else { return .terminateLater }
+        guard let runtimeTask else { return .terminateNow }
+        terminationRequested = true
+        runtimeTask.cancel()
+        Task { @MainActor [weak self] in
+            await runtimeTask.value
+            guard let self else { return }
+            NSApplication.shared.reply(toApplicationShouldTerminate: true)
+            self.runtimeTask = nil
+        }
+        return .terminateLater
+    }
 }

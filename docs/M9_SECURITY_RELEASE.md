@@ -72,7 +72,7 @@ validates that existing notarized release without rebuilding or replacing it.
 | Physical Intel-to-Apple-Silicon acceptance not run in this workspace | P1 release gate | Operator; run `docs/M10_ACCEPTANCE.md` on both Macs | Open |
 | Developer ID notarization profile is host-specific | P2 release process | Release operator; run `scripts/notarize-device-apps.sh` and inspect logs | Open |
 | Real macOS Accessibility event posting needs a disposable foreground app | P1 acceptance gate | Operator; run M6 safe-app test with permission evidence | Open |
-| Production pilot still uses pre-provisioned peer certificates instead of an interactive pairing UI | P1 product acceptance | Add and validate the two-sided pairing/operator-consent UI before calling the V1 journey complete | Open |
+| Interactive pairing UI and Keychain trust reuse are newly composed in M10 but still need physical Intel/Apple-Silicon evidence | P1 product acceptance | Run the first-pairing, repeat-connection, revoke, and identity-mismatch checks in `docs/M10_ACCEPTANCE.md` | Open — physical validation |
 | V1 does not defend a compromised local administrator or approved rogue peer | Known non-goal | Documented in `docs/SECURITY.md` | Accepted non-goal |
 
 M9 is not considered a license to weaken any permission, trust, or focus gate

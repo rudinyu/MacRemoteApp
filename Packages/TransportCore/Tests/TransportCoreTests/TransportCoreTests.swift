@@ -1161,6 +1161,119 @@ final class TransportCoreTests: XCTestCase {
         XCTAssertEqual(viewerTrustDecision, .trusted)
     }
 
+    func testPairingBootstrapReusesMatchingTrustWithoutShowingPairingUI() async throws {
+        let hostIdentity = try PeerIdentity(publicKeyRepresentation: Data("host-reuse".utf8))
+        let viewerIdentity = try PeerIdentity(publicKeyRepresentation: Data("viewer-reuse".utf8))
+        let hostTrustStore = InMemoryTrustStore()
+        let viewerTrustStore = InMemoryTrustStore()
+        try await hostTrustStore.save(TrustedPeer(identity: viewerIdentity, displayName: "Viewer"))
+        try await viewerTrustStore.save(TrustedPeer(identity: hostIdentity, displayName: "Host"))
+
+        let hostPairing = PairingCoordinator(localIdentity: hostIdentity, trustStore: hostTrustStore)
+        let viewerPairing = PairingCoordinator(localIdentity: viewerIdentity, trustStore: viewerTrustStore)
+        let pair = InMemoryTransport.makePair(
+            firstAuthentication: .pairingRequired(viewerIdentity),
+            secondAuthentication: .pairingRequired(hostIdentity)
+        )
+        let capabilities: Set<Capability> = [.pingPong]
+        let host = SessionCoordinator(
+            configuration: SessionConfiguration(role: .host, implementationIdentifier: "reuse-host", capabilities: capabilities),
+            transport: pair.first,
+            pairingCoordinator: hostPairing
+        )
+        let viewer = SessionCoordinator(
+            configuration: SessionConfiguration(role: .viewer, implementationIdentifier: "reuse-viewer", capabilities: capabilities),
+            transport: pair.second,
+            pairingCoordinator: viewerPairing
+        )
+
+        async let hostStart: Void = host.start()
+        async let viewerStart: Void = viewer.start()
+        try await hostStart
+        try await viewerStart
+
+        for _ in 0 ..< 100 {
+            let hostState = await host.snapshot().state
+            let viewerState = await viewer.snapshot().state
+            if hostState == .capabilitiesNegotiated,
+               viewerState == .capabilitiesNegotiated {
+                break
+            }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+
+        let hostSnapshot = await host.snapshot()
+        let viewerSnapshot = await viewer.snapshot()
+        let hostChallenge = await hostPairing.pendingChallenge()
+        let viewerChallenge = await viewerPairing.pendingChallenge()
+        XCTAssertEqual(hostSnapshot.state, .capabilitiesNegotiated)
+        XCTAssertEqual(viewerSnapshot.state, .capabilitiesNegotiated)
+        XCTAssertNil(hostChallenge)
+        XCTAssertNil(viewerChallenge)
+    }
+
+    func testPairingBootstrapRecoversWhenOnlyHostHasTrustRecord() async throws {
+        let hostIdentity = try PeerIdentity(publicKeyRepresentation: Data("host-asymmetric".utf8))
+        let viewerIdentity = try PeerIdentity(publicKeyRepresentation: Data("viewer-asymmetric".utf8))
+        let hostTrustStore = InMemoryTrustStore()
+        let viewerTrustStore = InMemoryTrustStore()
+        try await hostTrustStore.save(TrustedPeer(identity: viewerIdentity, displayName: "Viewer"))
+
+        let hostPairing = PairingCoordinator(localIdentity: hostIdentity, trustStore: hostTrustStore)
+        let viewerPairing = PairingCoordinator(localIdentity: viewerIdentity, trustStore: viewerTrustStore)
+        let pair = InMemoryTransport.makePair(
+            firstAuthentication: .pairingRequired(viewerIdentity),
+            secondAuthentication: .pairingRequired(hostIdentity)
+        )
+        let capabilities: Set<Capability> = [.pingPong]
+        let host = SessionCoordinator(
+            configuration: SessionConfiguration(role: .host, implementationIdentifier: "asymmetric-host", capabilities: capabilities),
+            transport: pair.first,
+            pairingCoordinator: hostPairing
+        )
+        let viewer = SessionCoordinator(
+            configuration: SessionConfiguration(role: .viewer, implementationIdentifier: "asymmetric-viewer", capabilities: capabilities),
+            transport: pair.second,
+            pairingCoordinator: viewerPairing
+        )
+
+        async let hostStart: Void = host.start()
+        async let viewerStart: Void = viewer.start()
+        try await hostStart
+        try await viewerStart
+
+        var viewerChallenge: PairingChallenge?
+        for _ in 0 ..< 100 {
+            viewerChallenge = await viewerPairing.pendingChallenge()
+            if viewerChallenge != nil { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let challenge = try XCTUnwrap(viewerChallenge)
+        try await viewer.confirmPairing(
+            confirmationCode: challenge.confirmationCode,
+            accepted: true
+        )
+
+        for _ in 0 ..< 100 {
+            let hostState = await host.snapshot().state
+            let viewerState = await viewer.snapshot().state
+            if hostState == .capabilitiesNegotiated,
+               viewerState == .capabilitiesNegotiated {
+                break
+            }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+
+        let hostSnapshot = await host.snapshot()
+        let viewerSnapshot = await viewer.snapshot()
+        let hostTrustDecision = try await hostPairing.trustDecision(for: viewerIdentity)
+        let viewerTrustDecision = try await viewerPairing.trustDecision(for: hostIdentity)
+        XCTAssertEqual(hostSnapshot.state, .capabilitiesNegotiated)
+        XCTAssertEqual(viewerSnapshot.state, .capabilitiesNegotiated)
+        XCTAssertEqual(hostTrustDecision, .trusted)
+        XCTAssertEqual(viewerTrustDecision, .trusted)
+    }
+
     func testReconnectClearsAuthorizationAndRequiresFreshHandshake() async throws {
         let hostIdentity = try PeerIdentity(publicKeyRepresentation: Data("host-reconnect".utf8))
         let viewerIdentity = try PeerIdentity(publicKeyRepresentation: Data("viewer-reconnect".utf8))
@@ -1833,6 +1946,133 @@ final class TransportCoreTests: XCTestCase {
         XCTAssertFalse(snapshot.authorized)
         XCTAssertNil(snapshot.authorizedWindowGeneration)
         XCTAssertTrue(snapshot.authorizedCapabilities.isEmpty)
+    }
+
+    func testPairingConsentCanOutlastGenericHandshakeDeadline() async throws {
+        let hostIdentity = try PeerIdentity(publicKeyRepresentation: Data("host-pairing-timeout".utf8))
+        let viewerIdentity = try PeerIdentity(publicKeyRepresentation: Data("viewer-pairing-timeout".utf8))
+        let hostPairing = PairingCoordinator(
+            localIdentity: hostIdentity,
+            trustStore: InMemoryTrustStore()
+        )
+        let viewerPairing = PairingCoordinator(
+            localIdentity: viewerIdentity,
+            trustStore: InMemoryTrustStore()
+        )
+        let pair = InMemoryTransport.makePair(
+            firstAuthentication: .pairingRequired(viewerIdentity),
+            secondAuthentication: .pairingRequired(hostIdentity)
+        )
+        try await pair.first.start()
+        try await pair.second.start()
+
+        let capabilities: Set<Capability> = [.pingPong]
+        let host = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .host,
+                implementationIdentifier: "pairing-timeout-host",
+                capabilities: capabilities,
+                handshakeTimeoutNanoseconds: 10_000_000
+            ),
+            transport: pair.first,
+            pairingCoordinator: hostPairing
+        )
+        let viewer = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .viewer,
+                implementationIdentifier: "pairing-timeout-viewer",
+                capabilities: capabilities,
+                handshakeTimeoutNanoseconds: 10_000_000
+            ),
+            transport: pair.second,
+            pairingCoordinator: viewerPairing
+        )
+
+        async let hostStart: Void = host.start()
+        async let viewerStart: Void = viewer.start()
+        try await hostStart
+        try await viewerStart
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let hostState = await host.snapshot().state
+        let viewerState = await viewer.snapshot().state
+        XCTAssertEqual(hostState, .pairingRequired)
+        XCTAssertEqual(viewerState, .pairingRequired)
+
+        await host.stop()
+        await viewer.stop()
+    }
+
+    func testPairingDeadlineFailsClosedWhenConsentNeverCompletes() async throws {
+        let hostIdentity = try PeerIdentity(publicKeyRepresentation: Data("host-pairing-deadline".utf8))
+        let viewerIdentity = try PeerIdentity(publicKeyRepresentation: Data("viewer-pairing-deadline".utf8))
+        let hostPairing = PairingCoordinator(
+            localIdentity: hostIdentity,
+            trustStore: InMemoryTrustStore()
+        )
+        let viewerPairing = PairingCoordinator(
+            localIdentity: viewerIdentity,
+            trustStore: InMemoryTrustStore()
+        )
+        let pair = InMemoryTransport.makePair(
+            firstAuthentication: .pairingRequired(viewerIdentity),
+            secondAuthentication: .pairingRequired(hostIdentity)
+        )
+        let capabilities: Set<Capability> = [.pingPong]
+        let host = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .host,
+                implementationIdentifier: "pairing-deadline-host",
+                capabilities: capabilities,
+                handshakeTimeoutNanoseconds: 1_000_000_000,
+                pairingTimeoutNanoseconds: 20_000_000
+            ),
+            transport: pair.first,
+            pairingCoordinator: hostPairing
+        )
+        let viewer = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .viewer,
+                implementationIdentifier: "pairing-deadline-viewer",
+                capabilities: capabilities,
+                handshakeTimeoutNanoseconds: 1_000_000_000,
+                pairingTimeoutNanoseconds: 20_000_000
+            ),
+            transport: pair.second,
+            pairingCoordinator: viewerPairing
+        )
+
+        async let hostStart: Void = host.start()
+        async let viewerStart: Void = viewer.start()
+        try await hostStart
+        try await viewerStart
+
+        for _ in 0 ..< 500 {
+            if (await host.snapshot()).state == .failed,
+               (await viewer.snapshot()).state == .failed {
+                break
+            }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+
+        let hostSnapshot = await host.snapshot()
+        let viewerSnapshot = await viewer.snapshot()
+        let hostFailure = await host.failureReason()
+        let viewerFailure = await viewer.failureReason()
+        XCTAssertEqual(hostSnapshot.state, .failed)
+        XCTAssertEqual(viewerSnapshot.state, .failed)
+        XCTAssertTrue(isPairingTimeoutFailure(hostFailure))
+        XCTAssertTrue(isPairingTimeoutFailure(viewerFailure))
+    }
+
+    private func isPairingTimeoutFailure(_ error: SessionError?) -> Bool {
+        guard let error else { return false }
+        switch error {
+        case .pairingFailed, .transportFailure:
+            return true
+        default:
+            return false
+        }
     }
 
     func testDuplicateHelloFailsClosed() async throws {

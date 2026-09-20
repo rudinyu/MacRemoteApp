@@ -47,9 +47,20 @@ transport fails closed when no platform identity is supplied.
    `SessionAuthorize` before protected window, media, input, or clipboard
    messages can be sent or accepted.
 
+When a bootstrap connection has an existing local trust record, that endpoint
+auto-consents to the same challenge and does not show its pairing prompt. The
+Host still sends the challenge and both `PairingConfirmation` messages are
+exchanged, so a one-sided or stale trust record cannot skip the other endpoint's
+consent flow; a successful exchange repairs both Keychain records.
+
 Pairing codes are confirmation data, not long-term credentials. They are not
 written to diagnostics. Revocation deletes the peer record and returns future
 connections to `pairingRequired`.
+
+The production pairing challenge expires after five minutes. `TransportCore`
+uses the challenge expiry as an independent teardown deadline, so a modal
+consent prompt cannot hold the Host indefinitely; the ordinary handshake
+deadline remains active until a challenge has been received.
 
 ## Session lifecycle
 
@@ -96,6 +107,7 @@ The deterministic M2 tests use in-memory transport doubles and cover:
 - trust-store round trip, revocation, pairing confirmation, wrong-code and
   expiry handling;
 - Host-initiated pairing with two-sided consent and no single-sided trust;
+- bootstrap reconnect with matching Keychain trust bypasses the pairing prompt;
 - capability negotiation and refusal to send protected content before
   authorization;
 - capability/window-scoped authorization and revoke failure fail-closed;

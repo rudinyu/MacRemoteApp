@@ -8,15 +8,15 @@ protocol documents. The repository contains the M0 foundation, M1 wire
 contract, M2 secure session, M3 capture, M4 codec/Metal, M5 Viewer input, M6
 Host input, M7 clipboard/UX, M8 resilience, M9 release audit, and M10
 production composition. M10 now wires the existing packages into launchable
-Host and Viewer runtimes for a pre-provisioned trusted peer: one eligible
+Host and Viewer runtimes with TLS bootstrap, interactive two-sided pairing,
+Keychain trust reuse, and a pre-authorized one-window path: one eligible
 window is advertised and selected, captured, H.264 encoded, transported,
 decoded, rendered, and paired with the existing authenticated input and
 opt-in text clipboard paths. The actual Intel-to-Apple-Silicon run remains
-environment-dependent. Explicit pairing UI, a Host window-picker UI,
-physical OS event posting, and the two-Mac clipboard/performance evidence
-remain acceptance gates; the current pilot uses the Viewer picker to select
-one eligible advertised window while the Host remains authoritative for
-validation.
+environment-dependent. Physical OS event posting and the two-Mac
+clipboard/performance evidence remain acceptance gates; the current pilot uses
+the Viewer picker to select one eligible advertised window while the Host
+remains authoritative for validation.
 
 ## Product goal
 
@@ -218,6 +218,10 @@ marked verified.
   permission prompts.
 - Cloud account, analytics, or remote relay dependency.
 
+The ordered proposals for capabilities outside V1 are recorded in
+`docs/POST_V1_ROADMAP.md`. They are not part of M10 acceptance and must not be
+implemented as compatibility fallbacks.
+
 ## V1 acceptance checklist
 
 V1 is acceptable only when all of the following are demonstrated on the
@@ -246,7 +250,8 @@ documented compatibility matrix:
   necessary after the baseline is measured — M2/M8; no WebRTC in V1.
 - Exact H.264 profile, bitrate/rate-control defaults, and decoder fallback —
   M4.
-- User-facing pairing UX and trust-record revocation UI — M2/M9.
+- User-facing pairing UX and Keychain trust reuse — M10; trust-record
+  revocation UI remains a release-operations follow-up.
 - Clipboard size limit, conflict policy, and text encoding edge cases — resolved
   in M7: 65,515 UTF-8 bytes, Offer/ACK/Text ordering, and deterministic
   arrival-order conflict handling.
