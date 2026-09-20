@@ -32,9 +32,11 @@ For the optional signed install artifacts, the script builds a universal Host
 checked-in SVG, embeds Local Network/Bonjour metadata, and packages both app
 bundles and role-specific signed DMGs under `.build/device-binaries/release/`.
 That package-only command is a local signing step; use
-`scripts/notarize-device-apps.sh` for the notarized artifacts used for
-distribution or TCC-stable installation. Deterministic CI and M10 validation
-use separate temporary release roots and do not overwrite that notarized
+`scripts/release-notarized.sh` for the final CI-gated notarized artifacts used
+for distribution or TCC-stable installation. It writes the final artifacts to
+the repository-adjacent `../MacRemoteApp-Release/` directory and clears the
+repository `.build` cache after success. Deterministic CI and M10 validation
+use temporary build roots and do not overwrite that external notarized
 directory.
 
 For stable macOS TCC identity, use a Developer ID Application certificate. Do
@@ -46,11 +48,21 @@ export MACREMOTEAPP_SIGNING_IDENTITY='Developer ID Application: YOUR NAME (TEAMI
 ./scripts/package-device-apps.sh
 ```
 
+For the artifacts used in the physical acceptance run, use the complete
+notarized flow instead:
+
+```sh
+./scripts/release-notarized.sh
+```
+
 For a compile-only local bundle, omit the variable and the script will use
 ad-hoc signing. Ad-hoc output is suitable for protocol smoke development but
 can cause macOS privacy permission identity to reset when the app changes.
 
 Copy these artifacts to the Macs without copying repository metadata:
+
+After `scripts/release-notarized.sh`, use the files in the external
+`../MacRemoteApp-Release/` directory:
 
 - Intel Mac: `MacRemoteApp-Host.app`, its zip, or `MacRemoteApp-Host.dmg`.
 - Apple Silicon Mac: `MacRemoteApp-Viewer.app`, its zip, or

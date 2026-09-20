@@ -115,22 +115,28 @@ universal Host/arm64 Viewer bundles, generate non-secret public certificate
 files, and run the two-machine Bonjour/TLS smoke. `scripts/package-device-apps.sh`
 also creates local signed role-specific DMGs under
 `.build/device-binaries/release/`; this package-only output is not a
-notarized distribution. `scripts/notarize-device-apps.sh` is the release path
-that signs, submits, staples, and validates the notarized apps and DMGs.
+notarized distribution. `scripts/release-notarized.sh` is the required final
+test path: it runs the repository validation (`.codex/ci.sh` when available,
+otherwise `scripts/validate.sh`), signs, submits, staples, and validates the
+notarized apps and DMGs. Its default output is the repository-adjacent
+`../MacRemoteApp-Release/` directory, outside the repository and `.build`.
+The flow stages a new release beside that directory and promotes it only
+after notarization validation succeeds, preserving the previous release if a
+run fails.
+The lower-level `scripts/notarize-device-apps.sh` remains available for the
+notarization step itself and accepts only an absent or empty output directory.
 `scripts/install-device-apps.sh` and `scripts/uninstall-device-apps.sh` manage
 the exact app bundles in `~/Applications`. The packaging source icon is
 [`Resources/MacRemoteAppIcon.svg`](Resources/MacRemoteAppIcon.svg); generated
 `.icns`, app bundles, and test identities stay outside version control.
 
-The repository validation and deterministic M10 gate write their temporary
-ad-hoc test packages under isolated `.build/ci-release/` or
-`.build/m10-acceptance/release/` directories; they do not overwrite the final
-`.build/device-binaries/release/` directory. To have validation consume an
-already notarized release directly, set
-`MACREMOTEAPP_CI_NOTARIZED_RELEASE_ROOT` to that release directory when
-running `.codex/ci.sh`. `scripts/validate-notarized-release.sh` is read-only
-with respect to the release payload and never submits credentials or uploads
-artifacts.
+The repository validation and deterministic M10 gate write temporary build
+packages under `.build/` while running. A successful `.codex/ci.sh` removes
+that cache; a failed run retains it for diagnosis. To validate an already
+notarized release directly, set `MACREMOTEAPP_CI_NOTARIZED_RELEASE_ROOT` to an
+external release directory when running `.codex/ci.sh`.
+`scripts/validate-notarized-release.sh` is read-only with respect to the
+release payload and never submits credentials or uploads artifacts.
 
 ## M10 production pilot
 

@@ -11,9 +11,17 @@ role-specific DMGs, and role-specific install/uninstall command files. The
 Keychain profile name is configurable through `MACREMOTEAPP_NOTARY_PROFILE`
 and defaults to `notarytool-profile`; profile credentials never enter the
 repository or validation logs. Deterministic CI packages are isolated under
-`.build/ci-release/` and are never treated as distributable release output.
+`.build/` while the run is active and are removed after a successful CI run;
+they are never treated as distributable release output. The complete local
+release gate is `scripts/release-notarized.sh`: it runs the repository
+validation first, writes final notarized artifacts to the repository-adjacent
+`../MacRemoteApp-Release/`
+directory by default, then removes the recreated `.build` cache after success.
+It stages and validates the new release before replacing an existing release
+directory.
 When `MACREMOTEAPP_CI_NOTARIZED_RELEASE_ROOT` is supplied, CI directly
-validates that existing notarized release without rebuilding or replacing it.
+validates that existing external notarized release without rebuilding or
+replacing it.
 
 ## Threat-model review
 

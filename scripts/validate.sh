@@ -24,6 +24,7 @@ bash -n \
     scripts/install-device-apps.sh \
     scripts/package-device-apps.sh \
     scripts/notarize-device-apps.sh \
+    scripts/release-notarized.sh \
     scripts/uninstall-device-apps.sh
 plutil -lint Resources/Host-Info.plist Resources/Viewer-Info.plist >/dev/null
 test -s Resources/MacRemoteAppIcon.svg
@@ -82,6 +83,7 @@ bash -n \
     scripts/install-device-apps.sh \
     scripts/run-m10-acceptance.sh \
     scripts/notarize-device-apps.sh \
+    scripts/release-notarized.sh \
     scripts/validate-notarized-release.sh \
     scripts/uninstall-device-apps.sh
 
@@ -174,3 +176,7 @@ MACREMOTEAPP_SIGNING_IDENTITY=- bash scripts/package-device-apps.sh
 bash scripts/audit-release.sh "${validation_release_root}"
 
 echo "Public validation passed"
+if [[ -d "${repo_root}/.build" && ! -L "${repo_root}/.build" ]]; then
+    rm -rf -- "${repo_root}/.build"
+    echo "Cleared successful validation build cache: ${repo_root}/.build"
+fi

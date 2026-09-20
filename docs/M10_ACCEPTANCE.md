@@ -29,25 +29,33 @@ build/test output must not be used as a substitute.
 
    ```bash
    export MACREMOTEAPP_SIGNING_IDENTITY='Developer ID Application: YOUR NAME (TEAMID)'
-   bash scripts/notarize-device-apps.sh
+   bash scripts/release-notarized.sh
    ```
 
-   This produces and validates notarized `MacRemoteApp-Host.dmg` and
-   `MacRemoteApp-Viewer.dmg` artifacts in `.build/device-binaries/release/`,
-   together with the stapled app bundles. The script uses the local
-   `notarytool-profile` Keychain profile by default. Do not place the profile,
-   its credentials, or the signing identity configuration in the repository.
-   To validate that exact notarized directory through the normal validation
-   entry point without rebuilding it, run:
+   This first runs the repository validation (`.codex/ci.sh` when available,
+   otherwise `scripts/validate.sh`). Only after deterministic CI passes does it
+   build, submit, staple, and validate notarized `MacRemoteApp-Host.dmg` and
+   `MacRemoteApp-Viewer.dmg`, together with the stapled app bundles. The
+   default output is the repository-adjacent
+   `../MacRemoteApp-Release/` directory, outside the repository and `.build`.
+   The flow stages a new release and replaces the previous directory only
+   after notarization validation succeeds, so a failed run does not discard the
+   last known-good release.
+   The successful CI and notarization flow removes the repository `.build`
+   cache. The script uses the local `notarytool-profile` Keychain profile by
+   default. Do not place the profile, its credentials, or the signing identity
+   configuration in the repository.
+   To validate that exact notarized directory without rebuilding or uploading,
+   run:
 
    ```bash
-   MACREMOTEAPP_CI_NOTARIZED_RELEASE_ROOT="$PWD/.build/device-binaries/release" \
-     bash .codex/ci.sh
+   bash scripts/validate-notarized-release.sh \
+     "$(cd .. && pwd)/MacRemoteApp-Release"
    ```
 
-   CI still creates isolated ad-hoc test packages in `.build/ci-release/` for
-   its deterministic packaging audit; those are test-only and never replace
-   the notarized directory.
+   `scripts/notarize-device-apps.sh` is the lower-level operation and requires
+   an absent or empty output directory; use `scripts/release-notarized.sh` for
+   the complete replacement-safe CI-gated release flow.
 
 2. On the Intel Host, grant Screen Recording and Accessibility permission to
    the installed Host app (or the exact terminal used for the debug physical
@@ -138,7 +146,9 @@ bash scripts/run-m10-acceptance.sh deterministic
 ```
 
 Its temporary release audit is written to
-`.build/m10-acceptance/release/`, not to the notarized release directory.
+`.build/m10-acceptance/release/`, not to the notarized release directory. The
+complete `scripts/release-notarized.sh` flow removes that temporary tree after
+CI and notarization succeed.
 
 ## Evidence and residual limitations
 

@@ -3,7 +3,8 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd)"
-default_release_root="${repo_root}/.build/device-binaries/release"
+package_release_root="${repo_root}/.build/device-binaries/release"
+notarized_release_root="$(cd -- "${repo_root}/.." && pwd -P)/MacRemoteApp-Release"
 
 usage() {
     cat <<'EOF'
@@ -94,8 +95,14 @@ if [[ -z "${source_root}" ]]; then
     if [[ -d "${script_dir}/MacRemoteApp-Host.app" ||
           -d "${script_dir}/MacRemoteApp-Viewer.app" ]]; then
         source_root="${script_dir}"
+    elif [[ -d "${package_release_root}" ]]; then
+        # Preserve the package-then-install workflow. The package output is
+        # preferred when present so an older external release is not selected
+        # accidentally; the notarized directory is the fallback after a
+        # successful release flow has cleared .build.
+        source_root="${package_release_root}"
     else
-        source_root="${default_release_root}"
+        source_root="${notarized_release_root}"
     fi
 fi
 
