@@ -147,7 +147,10 @@ struct HostApp {
 private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
     private let runtime: HostRuntime
     private var runtimeTask: Task<Void, Never>?
+    private var statusTask: Task<Void, Never>?
     private var statusItem: NSStatusItem?
+    private var statusMenuItem: NSMenuItem?
+    private var retryItem: NSMenuItem?
     private var terminationRequested = false
 
     init(runtime: HostRuntime) {
@@ -163,6 +166,12 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         // the bundle active before the runtime reaches the TCC APIs so macOS
         // can present Local Network and Screen Recording consent normally.
         NSApplication.shared.activate(ignoringOtherApps: true)
+        statusTask = Task { @MainActor [weak self, runtime] in
+            var iterator = runtime.statusUpdates.makeAsyncIterator()
+            while !Task.isCancelled, let status = await iterator.next() {
+                self?.apply(status: status)
+            }
+        }
         runtimeTask = Task { [runtime] in
             do {
                 try await runtime.run()
@@ -188,6 +197,7 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         guard !terminationRequested else { return .terminateLater }
         guard let runtimeTask else { return .terminateNow }
         terminationRequested = true
+        statusTask?.cancel()
         runtimeTask.cancel()
         Task { @MainActor [weak self] in
             await runtimeTask.value
@@ -211,9 +221,19 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         }
 
         let menu = NSMenu()
-        let status = NSMenuItem(title: "Host is running", action: nil, keyEquivalent: "")
+        let status = NSMenuItem(title: "Host: Starting", action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
+        statusMenuItem = status
+        let retry = NSMenuItem(
+            title: "Retry setup",
+            action: #selector(retrySetup),
+            keyEquivalent: "r"
+        )
+        retry.target = self
+        retry.isEnabled = false
+        menu.addItem(retry)
+        retryItem = retry
         menu.addItem(.separator())
 
         let stopItem = NSMenuItem(
@@ -225,6 +245,25 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(stopItem)
         item.menu = menu
         statusItem = item
+    }
+
+    private func apply(status: HostRuntimeStatus) {
+        statusMenuItem?.title = "Host: \(status.description)"
+        let canRetry: Bool
+        switch status {
+        case .needsScreenRecording, .needsLocalNetwork, .listenerFailed, .failed:
+            canRetry = true
+        case .starting, .connected, .listening, .stopped:
+            canRetry = false
+        }
+        retryItem?.isEnabled = canRetry
+        statusItem?.button?.toolTip = "MacRemoteApp Host — \(status.description)"
+    }
+
+    @objc private func retrySetup() {
+        Task { [runtime] in
+            await runtime.requestRetry()
+        }
     }
 
     @objc private func stopSessionAndQuit() {

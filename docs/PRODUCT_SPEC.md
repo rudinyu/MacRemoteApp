@@ -7,16 +7,16 @@ acceptance boundaries; implementation details belong in the architecture and
 protocol documents. The repository contains the M0 foundation, M1 wire
 contract, M2 secure session, M3 capture, M4 codec/Metal, M5 Viewer input, M6
 Host input, M7 clipboard/UX, M8 resilience, M9 release audit, and M10
-production composition. M10 now wires the existing packages into launchable
-Host and Viewer runtimes with TLS bootstrap, interactive two-sided pairing,
-Keychain trust reuse, and a pre-authorized one-window path: one eligible
-window is advertised and selected, captured, H.264 encoded, transported,
-decoded, rendered, and paired with the existing authenticated input and
-opt-in text clipboard paths. The actual Intel-to-Apple-Silicon run remains
-environment-dependent. Physical OS event posting and the two-Mac
-clipboard/performance evidence remain acceptance gates; the current pilot uses
-the Viewer picker to select one eligible advertised window while the Host
-remains authoritative for validation.
+production composition. M10 wires the existing packages into launchable Host
+and Viewer runtimes with TLS bootstrap, interactive two-sided pairing,
+Keychain trust reuse, resident permission recovery, explicit Host selection,
+same-session window replacement, and one selected-window capture/display/
+control path. The Metal presentation path reports the actual
+`MTLDrawable.presentedTime` display boundary; the physical Intel-to-Apple-
+Silicon run still supplies the clock-synchronized p50/p95 evidence. Physical
+OS event posting and the two-Mac clipboard/performance evidence remain
+acceptance gates. The Host remains authoritative for window eligibility,
+authorization, and replacement validation.
 
 ## Product goal
 

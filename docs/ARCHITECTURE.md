@@ -206,17 +206,29 @@ Additional rules:
   owns the one-time code-entry prompt. `MACREMOTEAPP_PEER_CERT` remains an
   optional pinned-peer migration/diagnostic input, not a new-installation
   requirement. The Host remains authoritative by validating eligibility and
-  generation before authorization. Physical cross-hardware evidence remains
-  the open M10 acceptance gate.
+  generation before authorization. The Host remains resident when TCC or
+  Bonjour setup is denied: `HostRuntimeStatus` is projected into the status
+  menu and an explicit Retry action re-runs setup. Physical cross-hardware
+  evidence remains the open M10 acceptance gate.
 - M10 startup ordering is intentional: `Apps/Host` enrolls the local
   Keychain-backed identity and completes the Screen Recording setup before it
   waits for Bonjour listener readiness. Starting Bonjour is the Local Network
-  consent trigger; a listener timeout is surfaced as a Local Network recovery
-  state. `Apps/Viewer` enrolls its own identity before starting discovery and
-  presents the same Local Network setup step. Neither app treats a permission
-  grant as pairing: the first connection still requires Host consent and
-  Viewer code confirmation, and only both consents commit the peer trust
-  records.
+  consent trigger; listener readiness requires both the Network.framework
+  socket-ready state and the configured service-registration callback. A
+  timeout or policy denial is surfaced as a Local Network recovery state.
+  `Apps/Viewer` enrolls its own identity before starting discovery, reports
+  discovery error categories, and requires the operator to choose a Host
+  before connecting. Neither app treats a permission grant as pairing: the
+  first connection still requires Host consent and Viewer code confirmation,
+  and only both consents commit the peer trust records.
+- Authorization enforcement is deliberately split by responsibility:
+  `SecurityCore` owns identity, trust records, pairing consent, and peer
+  identity validation; `TransportCore.SessionCoordinator` owns the
+  authenticated session authorization epoch, capability/window-generation
+  delivery gate, and protected-message invalidation; `InputCore.HostInputController`
+  performs the final per-event permission, focus, target-identity, and current
+  geometry checks. `Apps/Host/HostRuntime` composes these gates and never
+  replaces them with UI state.
 - The physical M2 diagnostic orchestration remains in `Apps/Host` and
   `Apps/Viewer`; `TransportCore` only exposes the Bonjour/TLS/session APIs.
   `SecurityCore` derives the presented peer identity from the TLS public key
@@ -234,18 +246,21 @@ Additional rules:
 ### Host UI and lifecycle
 
 The Host owns the permission education flow, pairing confirmation, session
-status, selected-window state, and stop/disconnect actions. The current M10
-Viewer presents the eligible window picker, but the Host remains the only
-component allowed to accept a selection and decide which local window becomes
-selected, subject to the product and security rules.
+status, selected-window state, and stop/disconnect actions. The Host remains
+resident while first-run permissions are incomplete and exposes a retry action
+from its status menu. The Viewer presents explicit Host and eligible-window
+pickers, but the Host remains the only component allowed to accept a selection,
+replace the selected local window in an authenticated session, and decide which
+window becomes selected, subject to the product and security rules.
 
 ### Capture path
 
 `CaptureCore` requests the smallest permitted ScreenCaptureKit capture scope:
-the selected window rather than the whole display. It emits timestamped pixel
-frames and capture-state transitions. It must stop or degrade safely when the
-window disappears, the permission is revoked, or the selected window becomes
-ineligible.
+the selected window rather than the whole display. It emits pixel frames with
+a Host monotonic capture-arrival timestamp and a separate media presentation
+timestamp, plus capture-state transitions. It must stop or degrade safely when
+the window disappears, the permission is revoked, or the selected window
+becomes ineligible.
 
 ### Encode path
 
@@ -272,8 +287,10 @@ input enablement, clipboard consent, and errors. The UI must distinguish
 
 `CodecCore` wraps the VideoToolbox decoder and emits decoded frames to a
 presentation contract. The Viewer composes that contract with a Metal-backed
-surface, preserving aspect ratio and reporting the presentation timestamp used
-for latency measurement.
+surface, preserving aspect ratio. `MetalVideoRenderer` attaches a
+`MTLDrawable` presented handler and reports `presentedTime` only after the
+drawable reaches the display handoff boundary; queue-entry time is not used as
+the display timestamp.
 
 ### Viewer input path
 

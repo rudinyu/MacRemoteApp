@@ -12,6 +12,30 @@ private enum HostPairingPromptOutcome: Sendable {
     case sessionEnded
 }
 
+enum HostRuntimeStatus: Sendable, Equatable, CustomStringConvertible {
+    case starting
+    case needsScreenRecording
+    case needsLocalNetwork
+    case listenerFailed
+    case connected
+    case listening
+    case failed
+    case stopped
+
+    var description: String {
+        switch self {
+        case .starting: return "Starting"
+        case .needsScreenRecording: return "Screen Recording permission required"
+        case .needsLocalNetwork: return "Local Network permission required"
+        case .listenerFailed: return "Bonjour service unavailable"
+        case .connected: return "Viewer connected"
+        case .listening: return "Listening for a paired Viewer"
+        case .failed: return "Startup failed — retry setup"
+        case .stopped: return "Stopped"
+        }
+    }
+}
+
 /// The production Host composition for the V1 vertical slice.
 ///
 /// The shared packages remain responsible for capture, encoding, transport,
@@ -52,6 +76,8 @@ actor HostRuntime {
     private let windowProvider: ScreenRecordingWindowProvider
     private let captureSession: WindowCaptureSession
     private let stateStore = HostInputStateStore()
+    let statusUpdates: AsyncStream<HostRuntimeStatus>
+    private let statusContinuation: AsyncStream<HostRuntimeStatus>.Continuation
 
     private var listener: NetworkBonjourListener?
     private var localIdentity: ProvisionedIdentity?
@@ -65,18 +91,82 @@ actor HostRuntime {
     private var advertisedWindowGeneration: UInt64 = 1
     private var videoConfigSentGeneration: UInt64?
     private var clipboardOptedInForSession = false
+    private var retryRequested = false
+    private var selectionTransitionInProgress = false
 
     init(
         configuration: Configuration,
         windowProvider: ScreenRecordingWindowProvider = ScreenRecordingWindowProvider(),
         captureSession: WindowCaptureSession? = nil
     ) {
+        let statusStream = AsyncStream<HostRuntimeStatus>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
         self.configuration = configuration
         self.windowProvider = windowProvider
         self.captureSession = captureSession ?? WindowCaptureSession(windowProvider: windowProvider)
+        self.statusUpdates = statusStream.stream
+        self.statusContinuation = statusStream.continuation
     }
 
     func run() async throws {
+        publish(.starting)
+        while !Task.isCancelled {
+            do {
+                try await startRuntime()
+                publish(.listening)
+                try await waitUntilCancelled()
+            } catch is CancellationError {
+                await stop()
+                publish(.stopped)
+                throw CancellationError()
+            } catch let error as HostRuntimeError {
+                await stop()
+                publish(error.status)
+                try await waitForRetry()
+            } catch {
+                // A resident accessory app must not disappear because a
+                // transient Keychain, listener, or TCC error occurred. Keep
+                // the process alive and make the recovery action explicit in
+                // the status menu instead of silently retrying forever.
+                await stop()
+                publish(.failed)
+                try await waitForRetry()
+            }
+        }
+        await stop()
+        publish(.stopped)
+    }
+
+    func requestRetry() {
+        retryRequested = true
+    }
+
+    private func publish(_ status: HostRuntimeStatus) {
+        statusContinuation.yield(status)
+    }
+
+    private func waitUntilCancelled() async throws {
+        while !Task.isCancelled {
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        throw CancellationError()
+    }
+
+    private func waitForRetry() async throws {
+        retryRequested = false
+        while !Task.isCancelled {
+            if retryRequested {
+                retryRequested = false
+                publish(.starting)
+                return
+            }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        throw CancellationError()
+    }
+
+    private func startRuntime() async throws {
         // Enroll the signed Host identity before opening any network service.
         // The first-run permission setup is deliberately completed before we
         // wait for Bonjour readiness. Screen Recording is an app capability;
@@ -151,15 +241,7 @@ actor HostRuntime {
             )
         }
 
-        do {
-            while !Task.isCancelled {
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-            }
-        } catch is CancellationError {
-            // Run the same teardown path as an orderly stop so input cleanup
-            // and capture shutdown are completed before the process exits.
-        }
-        await stop()
+        publish(.listening)
     }
 
     private func prepareScreenRecordingPermission() async throws {
@@ -250,6 +332,7 @@ actor HostRuntime {
             pairingCoordinator: pairingCoordinator
         )
         activeSession = session
+        publish(.connected)
         clipboardOptedInForSession = false
         stateStore.update(session: await session.snapshot())
 
@@ -381,7 +464,7 @@ actor HostRuntime {
                 await teardown(session: session)
                 return
             }
-            if selectedWindow != nil {
+            if selectedWindow != nil, !selectionTransitionInProgress {
                 await synchronizeInputAuthorization(session)
                 let captureSnapshot = await captureSession.snapshot()
                 switch captureSnapshot.state {
@@ -462,9 +545,11 @@ actor HostRuntime {
         guard activeSession === session else { return }
         switch message {
         case let .windowSelection(selection):
-            guard selection.windowGeneration == advertisedWindowGeneration,
-                  selectedWindow == nil else {
+            guard selection.windowGeneration == advertisedWindowGeneration else {
                 scheduleTeardown(session: session)
+                return
+            }
+            if selectedWindow?.identifier == selection.windowIdentifier {
                 return
             }
             do {
@@ -500,6 +585,8 @@ actor HostRuntime {
         generation: UInt64,
         session: SessionCoordinator
     ) async throws {
+        selectionTransitionInProgress = true
+        defer { selectionTransitionInProgress = false }
         if let inputRuntime {
             await inputRuntime.selectionWillChange()
             do {
@@ -524,8 +611,12 @@ actor HostRuntime {
         await stopVideoPipeline()
         try await captureSession.start(windowIdentifier: window.identifier)
         let captureSnapshot = await captureSession.snapshot()
-        guard captureSnapshot.generation == generation,
-              case .capturing = captureSnapshot.state,
+        // CaptureCore owns its internal engine generation. It advances that
+        // value on every restart, including a same-session window switch. The
+        // wire generation remains the advertised WindowList generation and is
+        // intentionally validated separately above.
+        guard case .capturing = captureSnapshot.state,
+              captureSnapshot.selectedWindow?.identifier == window.identifier,
               let selected = captureSnapshot.selectedWindow else {
             throw HostRuntimeError.staleWindowGeneration
         }
@@ -741,6 +832,7 @@ actor HostRuntime {
         selectedWindowGeneration = nil
         clipboardOptedInForSession = false
         stateStore.clearSelection()
+        publish(.listening)
     }
 
     private static func descriptor(_ window: CaptureWindow) -> WindowDescriptor {
@@ -764,6 +856,19 @@ enum HostRuntimeError: Error, CustomStringConvertible, Sendable {
     case sessionTimedOut
     case pairingTimedOut
     case staleWindowGeneration
+
+    var status: HostRuntimeStatus {
+        switch self {
+        case .permission:
+            return .needsScreenRecording
+        case .localNetwork:
+            return .needsLocalNetwork
+        case .listener:
+            return .listenerFailed
+        case .configuration, .sessionEnded, .sessionTimedOut, .pairingTimedOut, .staleWindowGeneration:
+            return .failed
+        }
+    }
 
     var description: String {
         switch self {

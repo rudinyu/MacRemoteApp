@@ -13,7 +13,8 @@ final class MetalVideoRenderer: NSObject, MTKViewDelegate {
     private let commandQueue: MTLCommandQueue
     private let ciContext: CIContext
     private var latestPixelBuffer: CVPixelBuffer?
-    private var latestTimestamp: UInt64 = 0
+    private var latestCaptureTimestampValue: UInt64 = 0
+    var onFramePresented: (@MainActor (UInt64, UInt64) -> Void)?
 
     init?(view: MTKView) {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -31,18 +32,18 @@ final class MetalVideoRenderer: NSObject, MTKViewDelegate {
         view.isPaused = true
     }
 
-    func submit(pixelBuffer: CVPixelBuffer, presentationTimestamp: UInt64) {
+    func submit(pixelBuffer: CVPixelBuffer, captureTimestamp: UInt64) {
         lock.withLock {
             latestPixelBuffer = pixelBuffer
-            latestTimestamp = presentationTimestamp
+            latestCaptureTimestampValue = captureTimestamp
         }
         if let view {
             view.setNeedsDisplay(view.bounds)
         }
     }
 
-    func latestPresentationTimestamp() -> UInt64 {
-        lock.withLock { latestTimestamp }
+    func latestCaptureTimestamp() -> UInt64 {
+        lock.withLock { latestCaptureTimestampValue }
     }
 
     func draw(in view: MTKView) {
@@ -83,6 +84,18 @@ final class MetalVideoRenderer: NSObject, MTKViewDelegate {
             bounds: bounds,
             colorSpace: CGColorSpaceCreateDeviceRGB()
         )
+        let sourceTimestamp = lock.withLock { latestCaptureTimestampValue }
+        drawable.addPresentedHandler { [weak self] drawable in
+            let presentedTime = drawable.presentedTime
+            guard presentedTime.isFinite, presentedTime > 0,
+                  presentedTime <= Double(UInt64.max) / 1_000_000_000 else {
+                return
+            }
+            let presentedTimestamp = UInt64(presentedTime * 1_000_000_000)
+            Task { @MainActor [weak self] in
+                self?.onFramePresented?(sourceTimestamp, presentedTimestamp)
+            }
+        }
         commandBuffer.present(drawable)
         commandBuffer.commit()
     }

@@ -106,14 +106,22 @@ public final class ScreenCaptureEngine: NSObject, WindowCaptureEngine, SCStreamO
         }
         let metadata: (UInt64, UInt64, UInt64)? = lock.withLock {
             guard let windowIdentifier, !isStopping else { return nil }
-            return (windowIdentifier, generation, timestampNanoseconds(sampleBuffer.presentationTimeStamp))
+            // Capture latency is measured from the Host's monotonic arrival
+            // boundary. The CMSampleBuffer PTS remains useful for media
+            // pacing, but it is not assumed to be a cross-host wall/uptime
+            // clock value.
+            return (
+                windowIdentifier,
+                generation,
+                DispatchTime.now().uptimeNanoseconds
+            )
         }
         guard let (windowIdentifier, generation, timestamp) = metadata else { return }
         let frame = CapturedFrame(
             windowIdentifier: windowIdentifier,
             generation: generation,
             captureTimestamp: timestamp,
-            presentationTimestamp: timestamp,
+            presentationTimestamp: timestampNanoseconds(sampleBuffer.presentationTimeStamp),
             width: UInt32(CVPixelBufferGetWidth(pixelBuffer)),
             height: UInt32(CVPixelBufferGetHeight(pixelBuffer)),
             pixelBuffer: pixelBuffer

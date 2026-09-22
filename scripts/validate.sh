@@ -188,9 +188,29 @@ if ! grep -q 'NSApplication.shared.activate(ignoringOtherApps: true)' Apps/Host/
 fi
 if ! grep -q 'listener.stateUpdateHandler' Packages/TransportCore/Sources/TransportCore/BonjourDiscovery.swift ||
    ! grep -q 'startAndWaitForReadiness' Packages/TransportCore/Sources/TransportCore/BonjourDiscovery.swift ||
+   ! grep -q 'serviceRegistrationUpdateHandler' Packages/TransportCore/Sources/TransportCore/BonjourDiscovery.swift ||
+   ! grep -q 'serviceRegistered' Packages/TransportCore/Sources/TransportCore/BonjourDiscovery.swift ||
    ! grep -q 'case .failed' Packages/TransportCore/Sources/TransportCore/BonjourDiscovery.swift ||
    ! grep -q 'try await listener.startAndWaitForReadiness()' Apps/Host/HostRuntime.swift; then
-    echo "Validation failed: Host Bonjour startup does not await and handle listener readiness" >&2
+    echo "Validation failed: Host Bonjour startup does not await socket and service-registration readiness" >&2
+    exit 1
+fi
+if ! grep -q 'func requestRetry()' Apps/Host/HostRuntime.swift ||
+   ! grep -q 'private func waitForRetry()' Apps/Host/HostRuntime.swift ||
+   ! grep -q 'Retry setup' Apps/Host/main.swift; then
+    echo "Validation failed: Host permission/listener failures are not recoverable from the resident app" >&2
+    exit 1
+fi
+if ! grep -q 'onHostSelection' Apps/Viewer/ViewerRuntime.swift ||
+   ! grep -q 'setHostOptions' Apps/Viewer/ViewerRuntime.swift ||
+   grep -q 'services.first(where:' Apps/Viewer/ViewerRuntime.swift; then
+    echo "Validation failed: Viewer must require explicit Host selection" >&2
+    exit 1
+fi
+if ! grep -q 'addPresentedHandler' Apps/Viewer/MetalVideoRenderer.swift ||
+   ! grep -q 'presentedTime' Apps/Viewer/MetalVideoRenderer.swift ||
+   ! grep -q 'DispatchTime.now().uptimeNanoseconds' Packages/CaptureCore/Sources/CaptureCore/ScreenCaptureEngine.swift; then
+    echo "Validation failed: physical presentation timing is not wired to the display boundary" >&2
     exit 1
 fi
 for forbidden_package_root in \

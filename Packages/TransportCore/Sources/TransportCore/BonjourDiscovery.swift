@@ -12,9 +12,9 @@ public protocol BonjourDiscovery: AnyObject, Sendable {
 
 public enum BonjourDiscoveryState: Sendable, Equatable {
     case setup
-    case waiting
+    case waiting(String)
     case ready
-    case failed
+    case failed(String)
     case cancelled
 }
 
@@ -58,16 +58,16 @@ public final class NetworkBonjourDiscovery: BonjourDiscovery, @unchecked Sendabl
             switch state {
             case .setup:
                 discoveryState = .setup
-            case .waiting:
-                discoveryState = .waiting
+            case let .waiting(error):
+                discoveryState = .waiting(Self.failureCode(for: error))
             case .ready:
                 discoveryState = .ready
-            case .failed:
-                discoveryState = .failed
+            case let .failed(error):
+                discoveryState = .failed(Self.failureCode(for: error))
             case .cancelled:
                 discoveryState = .cancelled
             @unknown default:
-                discoveryState = .failed
+                discoveryState = .failed("unknown")
             }
             self.publish(state: discoveryState)
             if case .failed = state {
@@ -77,6 +77,20 @@ public final class NetworkBonjourDiscovery: BonjourDiscovery, @unchecked Sendabl
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             self?.publish(results: results)
         }
+    }
+
+    private static func failureCode(for error: NWError) -> String {
+        let description = String(describing: error).lowercased()
+        if description.contains("policy") || description.contains("-65570") {
+            return "local-network-policy"
+        }
+        if description.contains("dns") {
+            return "dns"
+        }
+        if description.contains("posix") {
+            return "posix"
+        }
+        return "network"
     }
 
     public func start() {
@@ -198,7 +212,7 @@ public final class InMemoryBonjourDiscovery: BonjourDiscovery, @unchecked Sendab
 
 public enum BonjourListenerState: Sendable, Equatable {
     case setup
-    case waiting
+    case waiting(String)
     case ready
     case failed(String)
     case cancelled
@@ -230,6 +244,10 @@ public final class NetworkBonjourListener: @unchecked Sendable {
 
     public var onConnection: (@Sendable (NetworkFramedTransport) -> Void)?
     public var onStateUpdate: (@Sendable (BonjourListenerState) -> Void)?
+    /// Called only after Network.framework reports that the configured
+    /// Bonjour service was registered. Listener `.ready` means the socket is
+    /// ready; it does not, by itself, prove that peers can discover the Host.
+    public var onServiceRegistration: (@Sendable () -> Void)?
 
     private static func failureCode(for error: NWError) -> String {
         let description = String(describing: error).lowercased()
@@ -267,8 +285,8 @@ public final class NetworkBonjourListener: @unchecked Sendable {
             switch state {
             case .setup:
                 mappedState = .setup
-            case .waiting:
-                mappedState = .waiting
+            case let .waiting(error):
+                mappedState = .waiting(Self.failureCode(for: error))
             case .ready:
                 mappedState = .ready
             case let .failed(error):
@@ -279,6 +297,11 @@ public final class NetworkBonjourListener: @unchecked Sendable {
                 mappedState = .failed("unknown")
             }
             self?.onStateUpdate?(mappedState)
+        }
+
+        listener.serviceRegistrationUpdateHandler = { [weak self] change in
+            guard case .add = change else { return }
+            self?.onServiceRegistration?()
         }
 
         listener.newConnectionHandler = { [weak self] connection in
@@ -318,13 +341,22 @@ public final class NetworkBonjourListener: @unchecked Sendable {
     public func startAndWaitForReadiness(
         timeoutNanoseconds: UInt64? = 120_000_000_000
     ) async throws {
-        let stateStream = AsyncStream<BonjourListenerState>.makeStream()
+        enum StartupEvent: Sendable {
+            case state(BonjourListenerState)
+            case serviceRegistered
+        }
+
+        let eventStream = AsyncStream<StartupEvent>.makeStream()
         onStateUpdate = { state in
-            stateStream.continuation.yield(state)
+            eventStream.continuation.yield(.state(state))
+        }
+        onServiceRegistration = {
+            eventStream.continuation.yield(.serviceRegistered)
         }
         defer {
-            stateStream.continuation.finish()
+            eventStream.continuation.finish()
             onStateUpdate = nil
+            onServiceRegistration = nil
         }
 
         try await withTaskCancellationHandler(operation: {
@@ -337,17 +369,29 @@ public final class NetworkBonjourListener: @unchecked Sendable {
             }
             let result = await withTaskGroup(of: StartupWaitResult.self) { group in
                 group.addTask {
-                    guard let state = await stateStream.stream.first(where: {
-                        switch $0 {
-                        case .ready, .failed(_), .cancelled:
-                            return true
-                        case .setup, .waiting:
-                            return false
+                    var listenerReady = false
+                    var serviceRegistered = false
+                    for await event in eventStream.stream {
+                        switch event {
+                        case let .state(state):
+                            switch state {
+                            case .ready:
+                                listenerReady = true
+                            case let .failed(code):
+                                return .state(.failed(code))
+                            case .cancelled:
+                                return .state(.cancelled)
+                            case .setup, .waiting:
+                                break
+                            }
+                        case .serviceRegistered:
+                            serviceRegistered = true
                         }
-                    }) else {
-                        return .cancelled
+                        if listenerReady, serviceRegistered {
+                            return .state(.ready)
+                        }
                     }
-                    return .state(state)
+                    return .cancelled
                 }
                 if let timeoutNanoseconds {
                     group.addTask {

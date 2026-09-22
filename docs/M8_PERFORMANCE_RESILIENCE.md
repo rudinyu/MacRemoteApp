@@ -40,13 +40,18 @@ arrays. Capture-to-display latency
 is:
 
 ```text
-(Viewer presentation timestamp - estimated offset) - Host capture timestamp
+(Viewer `MTLDrawable.presentedTime` timestamp - estimated offset) - Host
+monotonic capture-arrival timestamp
 ```
 
 The report contains p50 and p95, not only an average. Viewer presentation is
-the timestamp taken by `MetalVideoRenderer` at the display handoff boundary
-when the physical integration path is wired; queue-entry timestamps are not
-accepted as presentation evidence.
+the timestamp taken by `MetalVideoRenderer` from the drawable's presented
+handler at the display handoff boundary. `CaptureCore` records the Host
+monotonic arrival timestamp separately from the media PTS. Queue-entry,
+decoder-completion, or synthetic render timestamps are not accepted as
+presentation evidence. The current Viewer callback retains the raw pair for
+the M8 collector boundary; one-way conversion remains invalid until the
+authenticated clock-sync estimate is available.
 
 ## Harness and artifacts
 

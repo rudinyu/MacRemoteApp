@@ -25,11 +25,15 @@ complete, including the two app-layer pasteboard bridges; its physical
 Intel-Host/Apple-Silicon-Viewer clipboard walkthrough remains an environment
 evidence item. M8's deterministic measurement/resilience gate and M9's
 release-audit gate are implemented. M10 now also has a launchable Host/Viewer
-production composition covering Bonjour/TLS, one-window discovery and Viewer
-selection, capture, H.264/Metal presentation, authenticated input, and opt-in
-text clipboard delivery. M10's deterministic final gate, interactive pairing
-UI, Keychain trust reuse, and acceptance checklist are implemented, while the
-physical two-machine acceptance remains unverified on this Apple Silicon
+production composition covering Bonjour/TLS, explicit Host selection,
+same-session one-window replacement, capture, H.264/Metal presentation,
+authenticated input, and opt-in text clipboard delivery. Host
+permission/listener failures are recoverable from a resident status-menu
+action, Bonjour readiness includes service registration, and the Metal path
+reports the actual drawable presentation boundary. M10's deterministic final
+gate, interactive pairing UI, Keychain trust reuse, and acceptance checklist
+are implemented, while the physical two-machine acceptance and
+clock-synchronized performance report remain unverified on this Apple Silicon
 workspace. The intentionally deferred capabilities are listed in
 `docs/POST_V1_ROADMAP.md`.
 

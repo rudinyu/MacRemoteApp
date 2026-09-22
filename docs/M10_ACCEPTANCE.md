@@ -12,10 +12,13 @@ launch, the Host enrolls its local identity, requests Screen Recording before
 waiting for Bonjour readiness, then starts Bonjour to trigger Local Network
 consent. It advertises eligible windows, validates the
 selected generation, captures and encodes it, and forwards authorized
-input/clipboard messages. A Viewer discovers the Host, presents an explicit
-picker for the eligible advertised windows, decodes and presents H.264 frames
-through Metal, and forwards mouse/keyboard events from the same aspect-fit
-surface. The production path now uses TLS bootstrap plus Keychain-backed
+input/clipboard messages. A Viewer discovers available Hosts and requires an
+explicit Host choice, presents a picker for the eligible advertised windows,
+decodes and presents H.264 frames through Metal, and forwards mouse/keyboard
+events from the same aspect-fit surface. The Viewer can request a safe
+same-session window replacement. The Host remains resident when Screen
+Recording or Local Network setup is incomplete and exposes a status-menu Retry
+action. The production path now uses TLS bootstrap plus Keychain-backed
 two-sided pairing: a first connection shows a Host consent prompt and a Viewer
 code-entry prompt, while a later connection silently exchanges the same
 challenge when both trust records match and reuses them without prompting. If
@@ -89,7 +92,9 @@ build/test output must not be used as a substitute.
 2. On the Intel Host, complete the first-run setup shown by the signed Host
    app. Screen Recording is requested before the Host waits for Bonjour
    readiness; starting Bonjour then gives macOS an opportunity to present Local
-   Network consent. After a
+   Network consent. The Host remains running if either permission is denied;
+   use the status-menu `Retry setup` item after changing System Settings.
+   After a
    Viewer negotiates input and the operator selects a window, the signed Host
    requests Accessibility/post-event access from the Host bundle. Until those
    input permissions are authorized, the Host remains view-only and does not
