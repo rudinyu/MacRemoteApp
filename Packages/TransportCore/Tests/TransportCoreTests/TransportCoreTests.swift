@@ -24,6 +24,25 @@ final class TransportCoreTests: XCTestCase {
         XCTAssertEqual(TransportCoreModule.name, "TransportCore")
     }
 
+    func testInMemoryBonjourDiscoveryPublishesReadinessSeparatelyFromResults() async {
+        let discovery = InMemoryBonjourDiscovery()
+        var stateIterator = discovery.stateUpdates.makeAsyncIterator()
+        var resultIterator = discovery.updates.makeAsyncIterator()
+
+        discovery.start()
+        let readyState = await stateIterator.next()
+        XCTAssertEqual(readyState, .ready)
+
+        discovery.publish([])
+        let emptyResults = await resultIterator.next()
+        XCTAssertEqual(emptyResults, [])
+        discovery.cancel()
+        let cancelledState = await stateIterator.next()
+        XCTAssertEqual(cancelledState, .cancelled)
+        let finishedState = await stateIterator.next()
+        XCTAssertNil(finishedState)
+    }
+
     func testMessageStreamCanDiscardOnlyQueuedInputMessages() async throws {
         let stream = try MessageStream.makeBounded(
             maxControlMessages: 8,

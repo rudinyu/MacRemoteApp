@@ -20,8 +20,12 @@ verify_dmg_payload() {
     local manifest_path="${mount_point}/${manifest_name}"
     local expected_manifest="${audit_tmp_dir}/${app_name}.expected.sha256"
     local extra_entry
-    local applications_alias="${mount_point}/Applications"
-    local applications_alias_target
+    local applications_drop_target="${mount_point}/Applications.app"
+    local applications_executable
+    local applications_binary
+    local applications_arches
+    local applications_signature_info
+    local applications_entitlement_info
     local payload_status=0
 
     mkdir -p -- "${mount_point}"
@@ -42,7 +46,7 @@ verify_dmg_payload() {
         ! -name "MacRemoteApp-User-Guide.txt" \
         ! -name "MacRemoteApp-How-to-Debug.txt" \
         ! -name "MacRemoteApp-How-to-Collect-Debug-Logs.txt" \
-        ! -name "Applications" \
+        ! -name "Applications.app" \
         ! -name "${manifest_name}" \
         -print -quit)"
     if [[ -n "${extra_entry}" ]]; then
@@ -50,15 +54,37 @@ verify_dmg_payload() {
         payload_status=1
     fi
 
-    if [[ -e "${applications_alias}" || -L "${applications_alias}" ]]; then
-        applications_alias_target="$(readlink "${applications_alias}" 2>/dev/null || true)"
-        if [[ ! -L "${applications_alias}" || "${applications_alias_target}" != "/Applications" ]]; then
-            echo "Release audit failed: Applications entry must be a symlink to /Applications in ${dmg_path}" >&2
+    if [[ ! -d "${applications_drop_target}" ]]; then
+        echo "Release audit failed: per-user Applications drop target is missing from ${dmg_path}" >&2
+        payload_status=1
+    elif ! codesign --verify --deep --strict "${applications_drop_target}"; then
+        echo "Release audit failed: Applications drop target signature is invalid in ${dmg_path}" >&2
+        payload_status=1
+    else
+        applications_signature_info="$(codesign --display --verbose=4 "${applications_drop_target}" 2>&1)"
+        applications_entitlement_info="$(codesign --display --entitlements :- "${applications_drop_target}" 2>&1)"
+        applications_executable="$(/usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleExecutable' \
+            "${applications_drop_target}/Contents/Info.plist" 2>/dev/null || true)"
+        applications_binary="${applications_drop_target}/Contents/MacOS/${applications_executable}"
+        applications_arches="$(lipo -archs "${applications_binary}" 2>/dev/null || true)"
+        if (( ${#applications_signature_info} == 0 )); then
+            echo "Release audit failed: Applications drop target signature metadata is missing in ${dmg_path}" >&2
             payload_status=1
         fi
-    else
-        echo "Release audit failed: standard Applications alias is missing from ${dmg_path}" >&2
-        payload_status=1
+        if ! printf '%s\n' "${applications_signature_info}" | grep -Eq 'flags=.*runtime'; then
+            echo "Release audit failed: Applications drop target lacks the hardened runtime in ${dmg_path}" >&2
+            payload_status=1
+        fi
+        if ! printf '%s\n' "${applications_entitlement_info}" | grep -Eq 'com\.apple\.security\.automation\.apple-events'; then
+            echo "Release audit failed: Applications drop target lacks Finder Apple Events entitlement in ${dmg_path}" >&2
+            payload_status=1
+        fi
+        if ! printf '%s\n' "${applications_arches}" | grep -Eq '(^|[[:space:]])arm64([[:space:]]|$)' ||
+           ! printf '%s\n' "${applications_arches}" | grep -Eq '(^|[[:space:]])x86_64([[:space:]]|$)'; then
+            echo "Release audit failed: Applications drop target is not universal in ${dmg_path}" >&2
+            payload_status=1
+        fi
     fi
 
     if [[ ! -d "${mount_point}/${app_name}.app" ]]; then

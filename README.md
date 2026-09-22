@@ -48,7 +48,7 @@ The user-facing documents are [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md),
 [`docs/DEBUGGING.md`](docs/DEBUGGING.md), and
 [`docs/DEBUG_LOG_COLLECTION.md`](docs/DEBUG_LOG_COLLECTION.md). The DMG
 packaging flow puts plain-text copies of all three documents beside the app,
-the standard `Applications` Finder alias, and optional role-specific install
+the per-user `Applications` drop target, and optional role-specific install
 and uninstall commands in every newly generated Host and Viewer DMG. The DMG
 commands are user-facing, double-click-only helpers: they have no CI, testing,
 ad-hoc, arbitrary-path, or repository-cleanup options.
@@ -164,9 +164,9 @@ The repository-only `scripts/install-device-apps.sh` and
 state for development. They are not copied into a DMG. The DMG's
 role-specific helpers only install a verified app into `~/Applications` or
 move that exact per-user app to the Trash; the DMG also includes the User
-Guide, How to Debug, and How to Collect Debug Logs text files. Users may use
-the DMG's `Applications` alias for the standard Finder drag-and-drop flow
-instead of the optional helper. The DMG uninstall helper only moves a
+Guide, How to Debug, and How to Collect Debug Logs text files. Users may drag
+the app onto the DMG's `Applications` drop target to install into their own
+`~/Applications`, or use the optional helper. The DMG uninstall helper only moves a
 Developer ID/Gatekeeper-accepted, exact-identity per-user app to the Trash;
 it refuses ad-hoc or modified testing bundles. To remove ad-hoc testing residue,
 run `scripts/uninstall-device-apps.sh --clean-testing --yes`; add
@@ -207,9 +207,9 @@ open ~/Applications/MacRemoteApp-Viewer.app
 The Host displays a one-time code and asks for local approval; the Viewer
 displays the same code and asks the operator to enter it. Both endpoints store
 the resulting peer identity in the Keychain only after local and remote
-consent complete. The Host starts Bonjour to trigger Local Network consent, then
-requests Screen Recording at startup. It requests Accessibility/post-event input
-permission from its signed app bundle only
+consent complete. The Host requests Screen Recording before waiting for Bonjour
+readiness, then starts Bonjour to trigger Local Network consent. It requests
+Accessibility/post-event input permission from its signed app bundle only
 after a Viewer negotiates input and the operator selects a window; without
 input permission it remains view-only. After the Host authorizes text clipboard for
 the session, the Viewer exposes an explicit clipboard opt-in toggle.

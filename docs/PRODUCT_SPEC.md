@@ -67,9 +67,10 @@ available on every macOS version.
 ### Host setup and pairing
 
 1. The Operator launches the Host.
-2. The Host starts its Bonjour listener and requests Local Network access, then
-   explains and requests Screen Recording at startup. Accessibility permission
-   is requested only when the corresponding input capability is needed.
+2. The Host requests Screen Recording at startup before waiting for Bonjour
+   readiness, then starts its listener so macOS can request Local Network
+   access. Accessibility permission is requested only when the corresponding
+   input capability is needed.
 3. The Host advertises a non-sensitive LAN discovery record after its Local
    Network path is ready.
 4. The Viewer finds the Host and requests a connection.

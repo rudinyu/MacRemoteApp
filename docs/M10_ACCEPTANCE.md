@@ -7,9 +7,10 @@ not add features beyond the V1 specification. Use a disposable foreground test
 application whose content contains no private data.
 
 The repository now contains a production runtime composition in
-`Apps/Host/HostRuntime.swift` and `Apps/Viewer/ViewerRuntime.swift`. A Host
-starts Bonjour to trigger Local Network consent, requests Screen Recording,
-advertises eligible windows, validates the
+`Apps/Host/HostRuntime.swift` and `Apps/Viewer/ViewerRuntime.swift`. On first
+launch, the Host enrolls its local identity, requests Screen Recording before
+waiting for Bonjour readiness, then starts Bonjour to trigger Local Network
+consent. It advertises eligible windows, validates the
 selected generation, captures and encodes it, and forwards authorized
 input/clipboard messages. A Viewer discovers the Host, presents an explicit
 picker for the eligible advertised windows, decodes and presents H.264 frames
@@ -85,19 +86,21 @@ build/test output must not be used as a substitute.
    `scripts/release-notarized.sh` for the complete clean-channel CI-gated
    release flow.
 
-2. On the Intel Host, grant Local Network and Screen Recording permission to
-   the installed Host app (or the exact terminal used for the debug physical
-   smoke). The Host starts Bonjour first so Local Network consent can appear.
-   After a
+2. On the Intel Host, complete the first-run setup shown by the signed Host
+   app. Screen Recording is requested before the Host waits for Bonjour
+   readiness; starting Bonjour then gives macOS an opportunity to present Local
+   Network consent. After a
    Viewer negotiates input and the operator selects a window, the signed Host
    requests Accessibility/post-event access from the Host bundle. Until those
    input permissions are authorized, the Host remains view-only and does not
    authorize mouse/keyboard capabilities.
    The capability may still appear in the negotiation offer; authorization is
    the security gate that reflects the current permission state.
-   Install the role-specific app with the DMG's standard `Applications` alias,
-   or use its optional `Install-MacRemoteApp-*.command` helper. The DMG helper
-   is double-click-only and has no CI or testing options. The repository-only
+   Install the role-specific app by dragging it onto the DMG's per-user
+   `Applications` drop target, or use its optional
+   `Install-MacRemoteApp-*.command` helper. Both paths install under the
+   current user's `~/Applications`; the DMG helper is double-click-only and
+   has no CI or testing options. The repository-only
    `scripts/install-device-apps.sh` is reserved for debug/release workflows.
    On the Apple Silicon Viewer, grant Local Network access.
 3. No production identity file is required. On first launch, each app creates

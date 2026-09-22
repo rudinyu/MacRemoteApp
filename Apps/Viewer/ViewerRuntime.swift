@@ -54,6 +54,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let decoder = H264Decoder()
     private var identityEnrollmentTask: Task<Void, Never>?
     private var discoveryTask: Task<Void, Never>?
+    private var discoveryStateTask: Task<Void, Never>?
     private var sessionMonitorTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var lastDiscoveredService: DiscoveredService?
@@ -90,6 +91,11 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return }
             do {
                 localIdentity = try await loadLocalIdentity()
+                guard ViewerStartupOnboarding.prepareLocalNetwork() else {
+                    setStatus("Local Network setup is required before Host discovery")
+                    return
+                }
+                setStatus("Searching for a MacRemoteApp Host…")
                 startDiscovery()
             } catch {
                 macRemoteAppStartupLogger.error(
@@ -112,9 +118,31 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func startDiscovery() {
-        guard discoveryTask == nil, !isShuttingDown else { return }
-        discovery.start()
+        guard discoveryTask == nil, discoveryStateTask == nil, !isShuttingDown else { return }
         let updates = discovery.updates
+        let stateUpdates = discovery.stateUpdates
+        discoveryStateTask = Task { @MainActor [weak self] in
+            var iterator = stateUpdates.makeAsyncIterator()
+            while !Task.isCancelled, let state = await iterator.next() {
+                guard let self, !self.isShuttingDown else { return }
+                switch state {
+                case .setup:
+                    break
+                case .waiting:
+                    self.setStatus("Waiting for Local Network access…")
+                case .ready:
+                    ViewerStartupOnboarding.markLocalNetworkReady()
+                    if self.session == nil {
+                        self.setStatus("Searching for a MacRemoteApp Host…")
+                    }
+                case .failed:
+                    self.setStatus("Local Network discovery failed; enable MacRemoteApp Viewer in System Settings and relaunch")
+                case .cancelled:
+                    return
+                }
+            }
+        }
+        discovery.start()
         discoveryTask = Task { @MainActor [weak self] in
             var iterator = updates.makeAsyncIterator()
             while !Task.isCancelled, let services = await iterator.next() {
@@ -137,6 +165,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     self.scheduleReconnect()
                 }
             }
+            guard !Task.isCancelled, let self, !self.isShuttingDown else { return }
+            self.setStatus("Local Network discovery stopped; enable MacRemoteApp Viewer in System Settings and relaunch")
         }
     }
 
@@ -636,6 +666,12 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         isShuttingDown = true
         reconnectTask?.cancel()
         reconnectTask = nil
+        discovery.cancel()
+        if let discoveryStateTask {
+            discoveryStateTask.cancel()
+            await discoveryStateTask.value
+            self.discoveryStateTask = nil
+        }
         if let discoveryTask {
             discoveryTask.cancel()
             await discoveryTask.value

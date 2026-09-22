@@ -4,18 +4,29 @@ import RemoteProtocol
 
 public protocol BonjourDiscovery: AnyObject, Sendable {
     var updates: AsyncStream<[DiscoveredService]> { get }
+    var stateUpdates: AsyncStream<BonjourDiscoveryState> { get }
 
     func start()
     func cancel()
 }
 
+public enum BonjourDiscoveryState: Sendable, Equatable {
+    case setup
+    case waiting
+    case ready
+    case failed
+    case cancelled
+}
+
 public final class NetworkBonjourDiscovery: BonjourDiscovery, @unchecked Sendable {
     public let updates: AsyncStream<[DiscoveredService]>
+    public let stateUpdates: AsyncStream<BonjourDiscoveryState>
 
     private let browser: NWBrowser
     private let callbackQueue: DispatchQueue
     private let lock = NSLock()
     private var continuation: AsyncStream<[DiscoveredService]>.Continuation?
+    private var stateContinuation: AsyncStream<BonjourDiscoveryState>.Continuation?
     private var isCancelled = false
 
     public init(
@@ -25,8 +36,13 @@ public final class NetworkBonjourDiscovery: BonjourDiscovery, @unchecked Sendabl
         let stream = AsyncStream<[DiscoveredService]>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
         )
+        let stateStream = AsyncStream<BonjourDiscoveryState>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
         self.updates = stream.stream
         self.continuation = stream.continuation
+        self.stateUpdates = stateStream.stream
+        self.stateContinuation = stateStream.continuation
         self.callbackQueue = callbackQueue
 
         let parameters = NWParameters.tcp
@@ -38,6 +54,22 @@ public final class NetworkBonjourDiscovery: BonjourDiscovery, @unchecked Sendabl
 
         browser.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
+            let discoveryState: BonjourDiscoveryState
+            switch state {
+            case .setup:
+                discoveryState = .setup
+            case .waiting:
+                discoveryState = .waiting
+            case .ready:
+                discoveryState = .ready
+            case .failed:
+                discoveryState = .failed
+            case .cancelled:
+                discoveryState = .cancelled
+            @unknown default:
+                discoveryState = .failed
+            }
+            self.publish(state: discoveryState)
             if case .failed = state {
                 self.finish()
             }
@@ -58,9 +90,20 @@ public final class NetworkBonjourDiscovery: BonjourDiscovery, @unchecked Sendabl
     public func cancel() {
         lock.lock()
         isCancelled = true
+        stateContinuation?.yield(.cancelled)
         lock.unlock()
         browser.cancel()
         finish()
+    }
+
+    private func publish(state: BonjourDiscoveryState) {
+        lock.lock()
+        guard !isCancelled else {
+            lock.unlock()
+            return
+        }
+        stateContinuation?.yield(state)
+        lock.unlock()
     }
 
     private func publish(results: Set<NWBrowser.Result>) {
@@ -79,7 +122,9 @@ public final class NetworkBonjourDiscovery: BonjourDiscovery, @unchecked Sendabl
     private func finish() {
         lock.lock()
         continuation?.finish()
+        stateContinuation?.finish()
         continuation = nil
+        stateContinuation = nil
         lock.unlock()
     }
 
@@ -99,20 +144,35 @@ public final class NetworkBonjourDiscovery: BonjourDiscovery, @unchecked Sendabl
 
 public final class InMemoryBonjourDiscovery: BonjourDiscovery, @unchecked Sendable {
     public let updates: AsyncStream<[DiscoveredService]>
+    public let stateUpdates: AsyncStream<BonjourDiscoveryState>
 
     private let lock = NSLock()
     private var continuation: AsyncStream<[DiscoveredService]>.Continuation?
+    private var stateContinuation: AsyncStream<BonjourDiscoveryState>.Continuation?
     private var isCancelled = false
 
     public init() {
         let stream = AsyncStream<[DiscoveredService]>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
         )
+        let stateStream = AsyncStream<BonjourDiscoveryState>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
         self.updates = stream.stream
         self.continuation = stream.continuation
+        self.stateUpdates = stateStream.stream
+        self.stateContinuation = stateStream.continuation
     }
 
-    public func start() {}
+    public func start() {
+        lock.lock()
+        guard !isCancelled else {
+            lock.unlock()
+            return
+        }
+        stateContinuation?.yield(.ready)
+        lock.unlock()
+    }
 
     public func publish(_ services: [DiscoveredService]) {
         lock.lock()
@@ -127,8 +187,11 @@ public final class InMemoryBonjourDiscovery: BonjourDiscovery, @unchecked Sendab
     public func cancel() {
         lock.lock()
         isCancelled = true
+        stateContinuation?.yield(.cancelled)
         continuation?.finish()
+        stateContinuation?.finish()
         continuation = nil
+        stateContinuation = nil
         lock.unlock()
     }
 }
@@ -245,13 +308,13 @@ public final class NetworkBonjourListener: @unchecked Sendable {
     }
 
     /// Starts Bonjour and waits until Network.framework reports a terminal
-    /// startup state. Waiting for readiness lets the Host sequence Local
-    /// Network consent before asking for Screen Recording, and it also makes
-    /// listener publication failures visible to the app lifecycle. The Host
-    /// uses the two-minute default so macOS has time to present Local Network
-    /// consent, while a stalled `.waiting` state still produces recoverable
-    /// startup guidance instead of hanging forever. Pass `nil` only for an
-    /// explicitly unbounded diagnostic wait.
+    /// startup state. The start call happens before the wait, which gives
+    /// macOS an opportunity to present Local Network consent while the caller
+    /// completes its own first-run setup. The Host uses the two-minute default
+    /// so macOS has time to present Local Network consent, while a stalled
+    /// `.waiting` state still produces recoverable startup guidance instead of
+    /// hanging forever. Pass `nil` only for an explicitly unbounded diagnostic
+    /// wait.
     public func startAndWaitForReadiness(
         timeoutNanoseconds: UInt64? = 120_000_000_000
     ) async throws {

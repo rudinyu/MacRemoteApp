@@ -60,7 +60,7 @@ replacing it.
   advisory lock when the process ends, so an interrupted run cannot leave a
   PID/reclaim race; unexpected directory or symlink lock paths fail closed.
 - `scripts/create-device-dmgs.sh` creates one DMG per role, includes the
-  signed app, a standard `Applications` alias, and minimal role-specific
+  signed app, a signed per-user `Applications` drop target, and minimal role-specific
   install/uninstall command files, and signs the DMG with the same identity. It
   also includes the User Guide, debugging guide, and debug-log collection guide,
   plus a SHA-256 payload manifest. The DMG command files are double-click-only

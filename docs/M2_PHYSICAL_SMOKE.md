@@ -88,7 +88,7 @@ After `scripts/release-notarized.sh`, use the files in the repository-local
 - Apple Silicon Mac: `MacRemoteApp-Viewer.app`, its zip, or
   `MacRemoteApp-Viewer.dmg`.
 
-The DMG follows the standard drag-and-drop layout with an `Applications` alias
+The DMG follows a per-user drag-and-drop layout with an `Applications` drop target
 and also contains optional role-specific `Install-MacRemoteApp-*.command` and
 `Uninstall-MacRemoteApp-*.command` helpers. The helpers are double-click-only
 user actions with no CI or testing options. The DMG installer and uninstaller

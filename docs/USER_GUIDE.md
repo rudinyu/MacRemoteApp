@@ -15,23 +15,29 @@ the capability for the current paired session.
 
 1. Use `MacRemoteApp-Host.dmg` on the Intel Mac and
    `MacRemoteApp-Viewer.dmg` on the Apple Silicon Mac.
-2. Open the DMG. The standard Apple workflow is to drag the role app onto the
-   `Applications` alias in the DMG, then launch it from `/Applications`.
-   Alternatively, double-click the role-specific
+2. Open the DMG. The `Applications` item in this DMG is a per-user drop target:
+   drag the role app onto it and it copies the app to `~/Applications`, then
+   launch that copy. Alternatively, double-click the role-specific
    `Install-MacRemoteApp-*.command` helper; it performs an interactive,
    signature-checked per-user install in `~/Applications`. The DMG helper has
-   no command-line options and is not a CI or testing tool.
+   no command-line options and is not a CI or testing tool. For safety, the
+   drop target refuses a symlink or non-directory at `~/Applications`.
 3. Open the installed app bundle. On first launch, the app creates or reuses a
    local P-256 TLS identity in that Mac's login
    Keychain. The private key never leaves the Mac and no `.p12` file is needed.
-4. On the Host, the first launch starts its Bonjour service and requests Local
-   Network access, then asks for Screen Recording. Accessibility/post-event
-   input access is requested from the signed Host bundle only after a Viewer has
-   negotiated input and the operator selects a window. Allow the requested
-   access for `MacRemoteApp-Host` in System Settings > Privacy & Security. If
-   input permission is missing, the Viewer remains view-only.
-5. On the Viewer, the first Bonjour discovery requests Local Network access;
-   allow it when macOS asks.
+4. On the Host, the first launch shows a setup step for Screen Recording before
+   it waits for Bonjour readiness. Continue there so macOS can ask for access
+   for the signed `MacRemoteApp-Host` bundle. The Host then starts Bonjour and
+   shows the Local Network setup step. Allow both requested accesses in System
+   Settings > Privacy & Security. Accessibility/post-event input access is
+   intentionally requested later, only after a Viewer has paired, negotiated
+   input, and the operator selects a window. If input permission is missing,
+   the Viewer remains view-only.
+5. On the Viewer, the first launch creates its local identity, shows the Local
+   Network setup step, and then starts Bonjour discovery. Allow Local Network
+   access for the signed `MacRemoteApp-Viewer` bundle when macOS asks. If
+   access is denied or the browser cannot start, the setup is retryable on the
+   next launch; the Viewer does not treat a denied permission as completed.
 
 Launch the `.app` bundle itself from Finder or with `open`; do not launch the
 executable inside `Contents/MacOS` when testing app permissions. macOS records
@@ -61,10 +67,11 @@ normal user setup.
 
 1. Put both Macs on the same trusted LAN.
 2. Start the Host first, then start the Viewer.
-3. The Host displays a one-time pairing code and asks for local consent.
+3. After discovery, the Host displays a one-time pairing code and asks for
+   local consent.
 4. Enter the matching code on the Viewer and approve the connection there.
-5. Both endpoints save the peer trust record in the macOS Keychain after both
-   operators consent.
+5. Both endpoints save the peer trust record in the macOS Keychain only after
+   both operators consent. A permission grant alone never creates a pairing.
 
 New production installations do not need `MACREMOTEAPP_PEER_CERT`. That
 variable is reserved for the pinned-certificate migration and debug smoke

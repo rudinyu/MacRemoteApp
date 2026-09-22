@@ -195,7 +195,8 @@ Additional rules:
   selected target. A permission/focus outage can therefore temporarily block
   reconnection; cancelling the cleanup lease could leave an OS key/button
   pressed indefinitely.
-- In M10, `Apps/Host/HostRuntime` composes the listener, `CaptureCore`,
+- In M10, `Apps/Host/HostRuntime` composes first-run permission onboarding, the
+  listener, `CaptureCore`,
   `CodecCore`, `InputCore`, clipboard bridges, and `SessionCoordinator` for
   one authenticated Viewer. `Apps/Viewer/ViewerRuntime` composes Bonjour
   discovery, the authenticated session, H.264 decode, Metal presentation, the
@@ -207,6 +208,15 @@ Additional rules:
   requirement. The Host remains authoritative by validating eligibility and
   generation before authorization. Physical cross-hardware evidence remains
   the open M10 acceptance gate.
+- M10 startup ordering is intentional: `Apps/Host` enrolls the local
+  Keychain-backed identity and completes the Screen Recording setup before it
+  waits for Bonjour listener readiness. Starting Bonjour is the Local Network
+  consent trigger; a listener timeout is surfaced as a Local Network recovery
+  state. `Apps/Viewer` enrolls its own identity before starting discovery and
+  presents the same Local Network setup step. Neither app treats a permission
+  grant as pairing: the first connection still requires Host consent and
+  Viewer code confirmation, and only both consents commit the peer trust
+  records.
 - The physical M2 diagnostic orchestration remains in `Apps/Host` and
   `Apps/Viewer`; `TransportCore` only exposes the Bonjour/TLS/session APIs.
   `SecurityCore` derives the presented peer identity from the TLS public key

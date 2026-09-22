@@ -176,10 +176,10 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :NSScreenCaptureUsageDescription' Reso
 test "$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' Resources/Viewer-Info.plist 2>/dev/null)" != ""
 test -s Resources/MacRemoteAppIcon.svg
 host_listener_line="$(grep -n 'let listener = try NetworkBonjourListener' Apps/Host/HostRuntime.swift | head -1 | cut -d: -f1)"
-host_permission_line="$(grep -n 'let currentPermission = await captureSession.permissionState()' Apps/Host/HostRuntime.swift | head -1 | cut -d: -f1)"
+host_permission_line="$(grep -n 'try await prepareScreenRecordingPermission()' Apps/Host/HostRuntime.swift | head -1 | cut -d: -f1)"
 if [[ -z "${host_listener_line}" || -z "${host_permission_line}" ||
-      "${host_listener_line}" -ge "${host_permission_line}" ]]; then
-    echo "Validation failed: Host must start Bonjour before requesting Screen Recording" >&2
+      "${host_permission_line}" -ge "${host_listener_line}" ]]; then
+    echo "Validation failed: Host must complete the Screen Recording setup before constructing the Bonjour listener" >&2
     exit 1
 fi
 if ! grep -q 'NSApplication.shared.activate(ignoringOtherApps: true)' Apps/Host/main.swift; then

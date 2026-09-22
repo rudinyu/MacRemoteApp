@@ -61,6 +61,10 @@ test -x "${uninstall_script}"
 test -s "${user_guide}"
 test -s "${debug_guide}"
 test -s "${log_guide}"
+command -v osacompile >/dev/null 2>&1 || {
+    echo "The macOS osacompile utility is required to create the per-user Applications drop target." >&2
+    exit 1
+}
 
 staging_root="$(mktemp -d "${TMPDIR:-/private/tmp}/macremoteapp-dmg-staging.XXXXXX")"
 trap 'rm -rf -- "${staging_root}"' EXIT
@@ -98,6 +102,59 @@ write_payload_manifest() {
     done
 }
 
+create_applications_drop_target() {
+    local output_path="$1"
+    local helper_executable
+    local helper_binary
+    local helper_arches
+    local helper_usage_description="MacRemoteApp uses Finder to copy the selected app into your user Applications folder."
+    osacompile \
+        -o "${output_path}" \
+        "${script_dir}/dmg-applications-helper.applescript" >/dev/null
+
+    helper_executable="$(/usr/libexec/PlistBuddy \
+        -c 'Print :CFBundleExecutable' \
+        "${output_path}/Contents/Info.plist")"
+    helper_binary="${output_path}/Contents/MacOS/${helper_executable}"
+    test -x "${helper_binary}"
+    helper_arches="$(lipo -archs "${helper_binary}")"
+    if ! printf '%s\n' "${helper_arches}" | grep -Eq '(^|[[:space:]])arm64([[:space:]]|$)' ||
+       ! printf '%s\n' "${helper_arches}" | grep -Eq '(^|[[:space:]])x86_64([[:space:]]|$)'; then
+        echo "Applications drop target must contain both arm64 and x86_64 slices; found: ${helper_arches}" >&2
+        return 1
+    fi
+
+    /usr/libexec/PlistBuddy \
+        -c "Set :NSAppleEventsUsageDescription ${helper_usage_description}" \
+        "${output_path}/Contents/Info.plist" 2>/dev/null ||
+        /usr/libexec/PlistBuddy \
+            -c "Add :NSAppleEventsUsageDescription string ${helper_usage_description}" \
+            "${output_path}/Contents/Info.plist"
+
+    if [[ "${signing_identity}" == "-" ]]; then
+        codesign --force --deep --options runtime \
+            --entitlements "${script_dir}/dmg-applications-helper.entitlements" \
+            --sign - --timestamp=none "${output_path}"
+    else
+        codesign --force --deep --options runtime \
+            --entitlements "${script_dir}/dmg-applications-helper.entitlements" \
+            --sign "${signing_identity}" --timestamp "${output_path}"
+    fi
+    codesign --verify --deep --strict "${output_path}"
+    local signature_info
+    signature_info="$(codesign --display --verbose=4 "${output_path}" 2>&1)"
+    if ! printf '%s\n' "${signature_info}" | grep -Eq 'flags=.*runtime'; then
+        echo "Applications drop target must use the hardened runtime: ${output_path}" >&2
+        return 1
+    fi
+    local entitlement_info
+    entitlement_info="$(codesign --display --entitlements :- "${output_path}" 2>&1)"
+    if ! printf '%s\n' "${entitlement_info}" | grep -Eq 'com\.apple\.security\.automation\.apple-events'; then
+        echo "Applications drop target must allow Finder Apple Events: ${output_path}" >&2
+        return 1
+    fi
+}
+
 create_dmg() {
     local app_name="$1"
     local role_name="${app_name#MacRemoteApp-}"
@@ -109,6 +166,7 @@ create_dmg() {
     test -d "${app_path}"
     codesign --verify --deep --strict "${app_path}"
     if (( require_developer_id )); then
+        local app_signature_info
         app_signature_info="$(codesign --display --verbose=4 "${app_path}" 2>&1)"
         if ! printf '%s\n' "${app_signature_info}" | grep -Eq 'Authority=Developer ID Application:'; then
             echo "Formal DMG packaging requires a Developer ID Application-signed app payload: ${app_path}" >&2
@@ -122,7 +180,7 @@ create_dmg() {
     rm -f -- "${dmg_path}"
     mkdir -p -- "${staging_dir}"
     ditto -- "${app_path}" "${staging_dir}/${app_name}.app"
-    ln -s /Applications "${staging_dir}/Applications"
+    create_applications_drop_target "${staging_dir}/Applications.app"
     cp -- "${install_script}" "${staging_dir}/Install-MacRemoteApp-${role_name}.command"
     cp -- "${uninstall_script}" "${staging_dir}/Uninstall-MacRemoteApp-${role_name}.command"
     cp -- "${user_guide}" "${staging_dir}/MacRemoteApp-User-Guide.txt"
