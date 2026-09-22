@@ -19,7 +19,8 @@ Options:
   --source DIRECTORY            Directory containing MacRemoteApp-*.app bundles
   --destination DIRECTORY       Destination application directory
   --replace                     Replace an existing exact app bundle path
-  --require-developer-id        Require a Developer ID Application signature
+  --require-developer-id        Require Developer ID and Gatekeeper approval (default)
+  --allow-ad-hoc                Allow ad-hoc local testing artifacts explicitly
   --help                        Show this help
 EOF
 }
@@ -32,48 +33,66 @@ infer_role() {
     esac
 }
 
-role="$(infer_role)"
-source_root="${MACREMOTEAPP_RELEASE_ROOT:-}"
-destination="${MACREMOTEAPP_INSTALL_DIR:-${HOME:?}/Applications}"
-replace_existing=0
-require_developer_id=0
+parse_args() {
+    role="$(infer_role)"
+    source_root="${MACREMOTEAPP_RELEASE_ROOT:-}"
+    destination="${MACREMOTEAPP_INSTALL_DIR:-${HOME:?}/Applications}"
+    replace_existing=0
+    require_developer_id=1
 
-while (( $# > 0 )); do
-    case "$1" in
-        --role)
-            [[ $# -ge 2 ]] || { echo "--role requires host, viewer, or both" >&2; exit 2; }
-            role="$2"
-            shift 2
-            ;;
-        --source)
-            [[ $# -ge 2 ]] || { echo "--source requires a directory" >&2; exit 2; }
-            source_root="$2"
-            shift 2
-            ;;
-        --destination)
-            [[ $# -ge 2 ]] || { echo "--destination requires a directory" >&2; exit 2; }
-            destination="$2"
-            shift 2
-            ;;
-        --replace)
-            replace_existing=1
-            shift
-            ;;
-        --require-developer-id)
-            require_developer_id=1
-            shift
-            ;;
-        --help|-h)
-            usage
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1" >&2
-            usage >&2
-            exit 2
-            ;;
-    esac
-done
+    while (( $# > 0 )); do
+        case "$1" in
+            --role)
+                [[ $# -ge 2 ]] || { echo "--role requires host, viewer, or both" >&2; exit 2; }
+                role="$2"
+                shift 2
+                ;;
+            --source)
+                [[ $# -ge 2 ]] || { echo "--source requires a directory" >&2; exit 2; }
+                source_root="$2"
+                shift 2
+                ;;
+            --destination)
+                [[ $# -ge 2 ]] || { echo "--destination requires a directory" >&2; exit 2; }
+                destination="$2"
+                shift 2
+                ;;
+            --replace)
+                replace_existing=1
+                shift
+                ;;
+            --require-developer-id)
+                require_developer_id=1
+                shift
+                ;;
+            --allow-ad-hoc)
+                require_developer_id=0
+                shift
+                ;;
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
+}
+
+normalize_destination() {
+    [[ -n "${destination}" && "${destination}" != "/" ]] || {
+        echo "Refusing to install into an empty or root destination." >&2
+        exit 2
+    }
+    mkdir -p -- "${destination}"
+    destination="$(cd -P -- "${destination}" && pwd)"
+}
+
+main() {
+parse_args "$@"
 
 case "${role}" in
     host)
@@ -125,13 +144,7 @@ fi
     exit 1
 }
 source_root="$(cd -P -- "${source_root}" && pwd)"
-
-[[ -n "${destination}" && "${destination}" != "/" ]] || {
-    echo "Refusing to install into an empty or root destination." >&2
-    exit 2
-}
-mkdir -p -- "${destination}"
-destination="$(cd -P -- "${destination}" && pwd)"
+normalize_destination
 if [[ "${source_root}" == "${destination}" ]]; then
     echo "Source and destination must be different directories." >&2
     exit 2
@@ -139,13 +152,48 @@ fi
 
 verify_app() {
     local app_name="$1"
-    local app_path="${source_root}/${app_name}.app"
+    local app_path="$2"
     local binary_path="${app_path}/Contents/MacOS/${app_name}"
+    local expected_bundle_identifier
+    local bundle_identifier
+    local bundle_executable
 
     [[ -d "${app_path}" && ! -L "${app_path}" ]] || {
         echo "App bundle not found: ${app_path}" >&2
         return 1
     }
+    case "${app_name}" in
+        MacRemoteApp-Host)
+            expected_bundle_identifier="com.rudinyu.MacRemoteApp.Host"
+            ;;
+        MacRemoteApp-Viewer)
+            expected_bundle_identifier="com.rudinyu.MacRemoteApp.Viewer"
+            ;;
+        *)
+            echo "Unsupported MacRemoteApp role: ${app_name}" >&2
+            return 2
+            ;;
+    esac
+    if ! bundle_identifier="$(/usr/libexec/PlistBuddy \
+        -c 'Print :CFBundleIdentifier' \
+        "${app_path}/Contents/Info.plist" 2>/dev/null)"; then
+        echo "App bundle metadata is unreadable: ${app_path}" >&2
+        return 1
+    fi
+    if [[ "${bundle_identifier}" != "${expected_bundle_identifier}" ]]; then
+        echo "Unexpected bundle identifier for ${app_name}: ${bundle_identifier}" >&2
+        return 1
+    fi
+    if ! bundle_executable="$(/usr/libexec/PlistBuddy \
+        -c 'Print :CFBundleExecutable' \
+        "${app_path}/Contents/Info.plist" 2>/dev/null)"; then
+        echo "App executable metadata is unreadable: ${app_path}" >&2
+        return 1
+    fi
+    if [[ "${bundle_executable}" != "${app_name}" ]]; then
+        echo "Unexpected bundle executable for ${app_name}: ${bundle_executable}" >&2
+        return 1
+    fi
     [[ -x "${binary_path}" ]] || {
         echo "App executable not found: ${binary_path}" >&2
         return 1
@@ -154,11 +202,78 @@ verify_app() {
     if (( require_developer_id )); then
         local signature_info
         signature_info="$(codesign --display --verbose=4 "${app_path}" 2>&1)"
-        if ! printf '%s\n' "${signature_info}" | rg -q 'Authority=Developer ID Application:'; then
+        if ! printf '%s\n' "${signature_info}" | grep -Eq 'Authority=Developer ID Application:'; then
             echo "A Developer ID Application signature is required: ${app_path}" >&2
             return 1
         fi
+        if ! printf '%s\n' "${signature_info}" | grep -Eq 'flags=.*runtime'; then
+            echo "A hardened-runtime Developer ID signature is required: ${app_path}" >&2
+            return 1
+        fi
+        if ! spctl --assess --type exec --verbose=4 "${app_path}" >/dev/null 2>&1; then
+            echo "Gatekeeper rejected the app bundle: ${app_path}" >&2
+            return 1
+        fi
     fi
+}
+
+recover_interrupted_install() {
+    local app_name="$1"
+    local destination_app="$2"
+    local backup_candidates=()
+    local staging_candidate
+    local candidate
+
+    while IFS= read -r candidate; do
+        [[ -n "${candidate}" ]] && backup_candidates+=("${candidate}")
+    done < <(find "${destination}" -mindepth 1 -maxdepth 1 -type d \
+        -name ".${app_name}.backup.*" -print)
+
+    if (( ${#backup_candidates[@]} > 1 )); then
+        echo "Multiple interrupted backups need manual recovery for ${app_name}:" >&2
+        printf '  %s\n' "${backup_candidates[@]}" >&2
+        return 1
+    fi
+    if (( ${#backup_candidates[@]} == 1 )); then
+        local backup_app="${backup_candidates[0]}/${app_name}.app"
+        if [[ ! -d "${backup_app}" || -L "${backup_app}" ]]; then
+            echo "Refusing to recover an invalid interrupted-install backup: ${backup_app}" >&2
+            return 1
+        fi
+        if [[ -L "${destination_app}" ]]; then
+            echo "Refusing to recover over symlink: ${destination_app}" >&2
+            return 1
+        elif [[ ! -e "${destination_app}" ]]; then
+            if ! verify_app "${app_name}" "${backup_app}"; then
+                echo "Refusing to recover an interrupted-install backup that did not pass app validation: ${backup_app}" >&2
+                return 1
+            fi
+            mv -- "${backup_app}" "${destination_app}"
+            rmdir -- "${backup_candidates[0]}"
+            echo "Recovered the previous ${app_name} after an interrupted install."
+        else
+            # The replacement reached its destination before cleanup was
+            # interrupted. Delete the old backup only when the current app is
+            # still a complete, verifiable installation. A partial destination
+            # may be the result of a failed rollback, so retain the known-good
+            # backup and require manual recovery instead of discarding it.
+            if verify_app "${app_name}" "${destination_app}"; then
+                rm -rf -- "${backup_candidates[0]}"
+            else
+                echo "Existing ${app_name} is not verifiable; retaining interrupted-install backup ${backup_candidates[0]}" >&2
+                return 1
+            fi
+        fi
+    fi
+
+    # A staging directory contains only a disposable copy. Remove abandoned
+    # copies after the backup decision above; never use a broad destination
+    # glob for cleanup.
+    while IFS= read -r staging_candidate; do
+        [[ -n "${staging_candidate}" ]] || continue
+        rm -rf -- "${staging_candidate}"
+    done < <(find "${destination}" -mindepth 1 -maxdepth 1 -type d \
+        -name ".${app_name}.install.*" -print)
 }
 
 install_one() {
@@ -166,8 +281,11 @@ install_one() {
     local source_app="${source_root}/${app_name}.app"
     local destination_app="${destination}/${app_name}.app"
     local staging_dir
+    local backup_dir=""
+    local staged_app
 
-    verify_app "${app_name}"
+    recover_interrupted_install "${app_name}" "${destination_app}"
+    verify_app "${app_name}" "${source_app}"
 
     if [[ -e "${destination_app}" || -L "${destination_app}" ]]; then
         if [[ -L "${destination_app}" ]]; then
@@ -187,23 +305,96 @@ install_one() {
                 return 2
             fi
         fi
-        rm -rf -- "${destination_app}"
     fi
 
     staging_dir="$(mktemp -d "${destination}/.${app_name}.install.XXXXXX")"
+    staged_app="${staging_dir}/${app_name}.app"
     if ! ditto -- "${source_app}" "${staging_dir}/${app_name}.app"; then
         rm -rf -- "${staging_dir}"
         return 1
     fi
-    if ! codesign --verify --deep --strict "${staging_dir}/${app_name}.app"; then
+    if ! codesign --verify --deep --strict "${staged_app}"; then
         rm -rf -- "${staging_dir}"
         return 1
     fi
-    mv -- "${staging_dir}/${app_name}.app" "${destination_app}"
-    rmdir -- "${staging_dir}"
+
+    if [[ -e "${destination_app}" ]]; then
+        backup_dir="$(mktemp -d "${destination}/.${app_name}.backup.XXXXXX")"
+        if ! mv -- "${destination_app}" "${backup_dir}/${app_name}.app"; then
+            rm -rf -- "${staging_dir}" "${backup_dir}"
+            return 1
+        fi
+    fi
+
+    if ! mv -- "${staged_app}" "${destination_app}"; then
+        rm -rf -- "${staging_dir}"
+        if [[ -n "${backup_dir}" ]]; then
+            if ! mv -- "${backup_dir}/${app_name}.app" "${destination_app}"; then
+                echo "Installation failed and the previous app could not be restored: ${destination_app}" >&2
+                echo "The previous app remains in: ${backup_dir}/${app_name}.app" >&2
+                return 1
+            fi
+            rmdir -- "${backup_dir}" || true
+        fi
+        return 1
+    fi
+    if ! verify_app "${app_name}" "${destination_app}"; then
+        rm -rf -- "${destination_app}"
+        if [[ -n "${backup_dir}" ]]; then
+            if ! mv -- "${backup_dir}/${app_name}.app" "${destination_app}"; then
+                echo "Installation validation failed and the previous app could not be restored: ${destination_app}" >&2
+                echo "The previous app remains in: ${backup_dir}/${app_name}.app" >&2
+                return 1
+            fi
+            rmdir -- "${backup_dir}" || true
+        fi
+        echo "Installation aborted because the installed app did not pass signature validation." >&2
+        return 1
+    fi
+    rmdir -- "${staging_dir}" || true
+    if [[ -n "${backup_dir}" ]]; then
+        if ! rm -rf -- "${backup_dir}"; then
+            echo "Warning: the previous app backup was retained at ${backup_dir}" >&2
+        fi
+    fi
     echo "Installed ${destination_app}"
 }
 
 for app_name in "${app_names[@]}"; do
     install_one "${app_name}"
 done
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    original_args=("$@")
+    parse_args "${original_args[@]}"
+    normalize_destination
+
+    install_lock="${destination}/.MacRemoteApp.install.lock"
+    if [[ -L "${install_lock}" || ( -e "${install_lock}" && ! -f "${install_lock}" ) ]]; then
+        echo "Refusing an unexpected install lock type: ${install_lock}" >&2
+        exit 2
+    fi
+    command -v lockf >/dev/null 2>&1 || {
+        echo "The macOS lockf utility is required for the install lock." >&2
+        exit 2
+    }
+    install_script="${script_dir}/$(basename -- "${BASH_SOURCE[0]}")"
+    worker_invocation="${0}-locked-worker"
+    if lockf -t 0 "${install_lock}" bash -c '
+        set -euo pipefail
+        worker_script="$1"
+        shift
+        source "${worker_script}"
+        main "$@"
+    ' "${worker_invocation}" "${install_script}" "${original_args[@]}"
+    then
+        exit 0
+    else
+        lock_status=$?
+        if (( lock_status == 75 )); then
+            echo "Another MacRemoteApp installer is already running for this destination: ${destination}" >&2
+        fi
+        exit "${lock_status}"
+    fi
+fi

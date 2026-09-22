@@ -1,5 +1,6 @@
 @preconcurrency import Network
 import Foundation
+import Security
 import SecurityCore
 import TransportCore
 import XCTest
@@ -25,6 +26,46 @@ final class M2LanSmokeTests: XCTestCase {
             at: URL(fileURLWithPath: viewerPath),
             password: password
         )
+
+        try await runLoopback(hostIdentity: hostIdentity, viewerIdentity: viewerIdentity)
+    }
+
+    func testM2LoopbackTLSAndSessionWithGeneratedIdentities() async throws {
+        guard ProcessInfo.processInfo.environment["MACREMOTEAPP_RUN_M2_LOCAL_IDENTITY_SMOKE"] == "1" else {
+            throw XCTSkip("set MACREMOTEAPP_RUN_M2_LOCAL_IDENTITY_SMOKE=1 to run the generated-identity smoke test")
+        }
+
+        let suffix = UUID().uuidString
+        let temporaryKeychain = try TemporaryKeychain()
+        let hostProvider = KeychainIdentityProvider(
+            label: "MacRemoteApp Local Host Test",
+            applicationTag: "com.rudinyu.MacRemoteApp.test.host.\(suffix)",
+            keychain: KeychainReference(temporaryKeychain.reference)
+        )
+        let viewerProvider = KeychainIdentityProvider(
+            label: "MacRemoteApp Local Viewer Test",
+            applicationTag: "com.rudinyu.MacRemoteApp.test.viewer.\(suffix)",
+            keychain: KeychainReference(temporaryKeychain.reference)
+        )
+        let hostIdentity = try await hostProvider.loadOrCreate()
+        let viewerIdentity = try await viewerProvider.loadOrCreate()
+        XCTAssertNotEqual(hostIdentity.peerIdentity, viewerIdentity.peerIdentity)
+
+        do {
+            try await runLoopback(hostIdentity: hostIdentity, viewerIdentity: viewerIdentity)
+            try await hostProvider.removeGeneratedIdentity()
+            try await viewerProvider.removeGeneratedIdentity()
+        } catch {
+            try? await hostProvider.removeGeneratedIdentity()
+            try? await viewerProvider.removeGeneratedIdentity()
+            throw error
+        }
+    }
+
+    private func runLoopback(
+        hostIdentity: ProvisionedIdentity,
+        viewerIdentity: ProvisionedIdentity
+    ) async throws {
 
         let hostTLS = TLSOptions(
             mode: .trusted(TrustedPeer(identity: viewerIdentity.peerIdentity)),
@@ -152,5 +193,57 @@ final class M2LanSmokeTests: XCTestCase {
         await serverTransport.close()
         await clientTransport.close()
         listener.cancel()
+    }
+
+}
+
+private final class TemporaryKeychain {
+    let reference: SecKeychain
+    private let previousSearchList: [SecKeychain]
+    private let url: URL
+
+    init() throws {
+        url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MacRemoteApp-M2-Test-\(UUID().uuidString).keychain")
+        let password = Data(UUID().uuidString.utf8)
+        var created: SecKeychain?
+        let status = url.path.withCString { path in
+            password.withUnsafeBytes { bytes in
+                SecKeychainCreate(
+                    path,
+                    UInt32(password.count),
+                    bytes.baseAddress,
+                    false,
+                    nil,
+                    &created
+                )
+            }
+        }
+        guard status == errSecSuccess, let created else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
+        reference = created
+
+        var existingSearchList: CFArray?
+        let copyStatus = SecKeychainCopySearchList(&existingSearchList)
+        guard copyStatus == errSecSuccess else {
+            _ = SecKeychainDelete(created)
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(copyStatus))
+        }
+        previousSearchList = existingSearchList as? [SecKeychain] ?? []
+        let newSearchList = ([created] + previousSearchList) as CFArray
+        let setStatus = SecKeychainSetSearchList(newSearchList)
+        guard setStatus == errSecSuccess else {
+            _ = SecKeychainDelete(created)
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(setStatus))
+        }
+    }
+
+    deinit {
+        _ = SecKeychainSetSearchList(previousSearchList as CFArray)
+        _ = SecKeychainDelete(reference)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 }

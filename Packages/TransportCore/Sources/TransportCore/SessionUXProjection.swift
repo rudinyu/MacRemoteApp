@@ -140,3 +140,66 @@ public enum SessionUXProjection {
         }
     }
 }
+
+/// Pure capability gates used by the app UI. Keeping these checks in the
+/// shared package makes partial authorization fail closed in both app targets
+/// and gives the permission/clipboard states deterministic coverage.
+public struct SessionInputAvailability: Equatable, Sendable {
+    public let mouseInputEnabled: Bool
+    public let keyboardInputEnabled: Bool
+
+    public init(mouseInputEnabled: Bool, keyboardInputEnabled: Bool) {
+        self.mouseInputEnabled = mouseInputEnabled
+        self.keyboardInputEnabled = keyboardInputEnabled
+    }
+
+    public static let none = SessionInputAvailability(
+        mouseInputEnabled: false,
+        keyboardInputEnabled: false
+    )
+
+    public var anyInputEnabled: Bool {
+        mouseInputEnabled || keyboardInputEnabled
+    }
+}
+
+public enum SessionCapabilityProjection {
+    public static let interactiveInputCapabilities: Set<Capability> = [
+        .mouseInput,
+        .keyboardInput
+    ]
+
+    public static func inputReady(
+        for session: SessionSnapshot,
+        selectedWindowGeneration: UInt64?,
+        selectedStreamGeneration: UInt64?
+    ) -> Bool {
+        inputAvailability(
+            for: session,
+            selectedWindowGeneration: selectedWindowGeneration,
+            selectedStreamGeneration: selectedStreamGeneration
+        ).anyInputEnabled
+    }
+
+    public static func inputAvailability(
+        for session: SessionSnapshot,
+        selectedWindowGeneration: UInt64?,
+        selectedStreamGeneration: UInt64?
+    ) -> SessionInputAvailability {
+        guard session.authorized,
+              let selectedWindowGeneration,
+              let selectedStreamGeneration,
+              session.authorizedWindowGeneration == selectedWindowGeneration,
+              selectedStreamGeneration == selectedWindowGeneration else {
+            return .none
+        }
+        return SessionInputAvailability(
+            mouseInputEnabled: session.authorizedCapabilities.contains(.mouseInput),
+            keyboardInputEnabled: session.authorizedCapabilities.contains(.keyboardInput)
+        )
+    }
+
+    public static func clipboardAvailable(for session: SessionSnapshot) -> Bool {
+        session.authorized && session.authorizedCapabilities.contains(.textClipboard)
+    }
+}

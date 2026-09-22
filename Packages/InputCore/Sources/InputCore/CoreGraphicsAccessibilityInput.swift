@@ -80,6 +80,25 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         return .inactive
     }
 
+    /// Returns the current local permission state without presenting a
+    /// consent prompt. Hosts use this to keep remote input capabilities in
+    /// sync with macOS TCC state.
+    public static func currentPermissionState() -> HostInputPermissionState {
+        permissionState()
+    }
+
+    /// Requests the two local permissions required for post-event input.
+    /// The request is intentionally initiated by the signed Host bundle so
+    /// TCC records the decision against MacRemoteApp, not a launching shell.
+    @discardableResult
+    public static func requestPermission() -> HostInputPermissionState {
+        _ = CGRequestPostEventAccess()
+        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        let options = [promptKey: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+        return permissionState()
+    }
+
     public func currentContext() -> HostInputContext {
         let session = sessionStateProvider()
         guard let selection = selectionProvider() else {
@@ -90,7 +109,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
                 currentWindowIdentifier: nil,
                 currentProcessIdentifier: nil,
                 currentWindowBounds: nil,
-                permission: permissionState(),
+                permission: Self.permissionState(),
                 focus: .windowUnavailable,
                 mouseInputEnabled: session.mouseInputEnabled,
                 keyboardInputEnabled: session.keyboardInputEnabled
@@ -106,7 +125,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             currentProcessIdentifier: currentProcessIdentifier(windows: windows),
             currentApplicationIdentifier: currentApplicationIdentifier(windows: windows),
             currentWindowBounds: currentWindowBounds(for: selection, windows: windows),
-            permission: permissionState(),
+            permission: Self.permissionState(),
             focus: focusState(for: selection, windows: windows),
             mouseInputEnabled: session.mouseInputEnabled,
             keyboardInputEnabled: session.keyboardInputEnabled
@@ -143,14 +162,14 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             currentProcessIdentifier: currentProcessIdentifier(windows: windows),
             currentApplicationIdentifier: currentApplicationIdentifier(windows: windows),
             currentWindowBounds: liveWindow.bounds,
-            permission: permissionState(),
+            permission: Self.permissionState(),
             focus: focusState(for: selection, windows: windows),
             mouseInputEnabled: session.mouseInputEnabled,
             keyboardInputEnabled: session.keyboardInputEnabled
         )
     }
 
-    private func permissionState() -> HostInputPermissionState {
+    private static func permissionState() -> HostInputPermissionState {
         guard CGPreflightPostEventAccess(), AXIsProcessTrusted() else {
             return .missing
         }

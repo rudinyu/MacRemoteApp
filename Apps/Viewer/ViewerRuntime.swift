@@ -52,6 +52,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let configuration: Configuration
     private let discovery = NetworkBonjourDiscovery()
     private let decoder = H264Decoder()
+    private var identityEnrollmentTask: Task<Void, Never>?
     private var discoveryTask: Task<Void, Never>?
     private var sessionMonitorTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
@@ -63,6 +64,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var contentView: ViewerContentView?
     private var renderer: MetalVideoRenderer?
     private var window: NSWindow?
+    private var localIdentity: ProvisionedIdentity?
     private var selectedGeneration: UInt64?
     private var streamGenerationGate = StreamGenerationGate()
     private var streamDimensions: CGSize = .zero
@@ -84,9 +86,36 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
+        identityEnrollmentTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                localIdentity = try await loadLocalIdentity()
+                startDiscovery()
+            } catch {
+                macRemoteAppStartupLogger.error(
+                    "MacRemoteApp Viewer local identity setup failed (code: \(viewerStartupErrorCode(error), privacy: .public))"
+                )
+                setStatus("Local identity setup failed; check Keychain access and relaunch")
+            }
+            identityEnrollmentTask = nil
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        _ = sender
+        identityEnrollmentTask?.cancel()
+        Task { @MainActor [weak self] in
+            await self?.disconnect()
+            NSApplication.shared.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    private func startDiscovery() {
+        guard discoveryTask == nil, !isShuttingDown else { return }
         discovery.start()
         let updates = discovery.updates
-        discoveryTask = Task { [weak self] in
+        discoveryTask = Task { @MainActor [weak self] in
             var iterator = updates.makeAsyncIterator()
             while !Task.isCancelled, let services = await iterator.next() {
                 guard let self,
@@ -111,15 +140,6 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        _ = sender
-        Task { @MainActor [weak self] in
-            await self?.disconnect()
-            NSApplication.shared.reply(toApplicationShouldTerminate: true)
-        }
-        return .terminateLater
-    }
-
     func windowWillClose(_ notification: Notification) {
         _ = notification
         NSApplication.shared.terminate(nil)
@@ -136,6 +156,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         content.onPairingRetry = { [weak self] in
             self?.retryPairing()
+        }
+        content.onClipboardToggle = { [weak self] in
+            self?.toggleClipboard()
         }
         content.onInputRejected = { [weak self] error in
             self?.setStatus(error.description)
@@ -205,6 +228,11 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let loop = ViewerSessionMessageLoop(session: session) { [weak self] message in
                 await self?.handle(message)
             }
+            loop.onClipboardStatusChange = { [weak self] in
+                Task { @MainActor [weak self] in
+                    await self?.refreshInputSurface()
+                }
+            }
             messageLoop = loop
             loop.start()
             contentView?.updateStream(size: .zero, readiness: .awaitingAuthentication)
@@ -236,6 +264,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func monitorSession(_ observedSession: SessionCoordinator) async {
+        var previous = await observedSession.snapshot()
         while !Task.isCancelled {
             do {
                 try await Task.sleep(nanoseconds: 100_000_000)
@@ -243,8 +272,15 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 return
             }
             guard session === observedSession else { return }
-            let state = await observedSession.snapshot().state
-            guard state == .failed else { continue }
+            let current = await observedSession.snapshot()
+            if current.authorizationGeneration != previous.authorizationGeneration ||
+                current.authorized != previous.authorized ||
+                current.authorizedWindowGeneration != previous.authorizedWindowGeneration ||
+                current.authorizedCapabilities != previous.authorizedCapabilities {
+                await refreshInputSurface()
+            }
+            previous = current
+            guard current.state == .failed else { continue }
 
             // This task owns the failure transition, so resetSession must not
             // cancel and join this task recursively.
@@ -380,7 +416,12 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             )
         }
 #endif
-        return try await KeychainIdentityProvider(label: configuration.identityLabel).load()
+        if let localIdentity {
+            return localIdentity
+        }
+        let identity = try await KeychainIdentityProvider(label: configuration.identityLabel).loadOrCreate()
+        self.localIdentity = identity
+        return identity
     }
 
     private func handle(_ message: MessagePayload) async {
@@ -515,23 +556,66 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func refreshInputSurface() async {
         guard let session else {
             contentView?.updateStream(size: streamDimensions, readiness: .awaitingAuthentication)
+            contentView?.updateClipboard(status: nil, available: false)
             return
         }
         let snapshot = await session.snapshot()
         let readiness: InputReadiness
+        let inputCapabilities: ViewerInputCapabilities
         if snapshot.state == .connecting || snapshot.state == .reconnecting {
             readiness = .awaitingAuthentication
+            inputCapabilities = .none
         } else if snapshot.authorizedWindowGeneration == nil || selectedGeneration == nil {
             readiness = .awaitingAuthorization
+            inputCapabilities = .none
         } else if let generation = selectedGeneration,
-                  snapshot.authorizedWindowGeneration == generation,
-                  snapshot.authorizedCapabilities.contains(.mouseInput) ||
-                    snapshot.authorizedCapabilities.contains(.keyboardInput) {
+                  SessionCapabilityProjection.inputAvailability(
+                      for: snapshot,
+                      selectedWindowGeneration: snapshot.authorizedWindowGeneration,
+                      selectedStreamGeneration: generation
+                  ).anyInputEnabled {
+            let availability = SessionCapabilityProjection.inputAvailability(
+                for: snapshot,
+                selectedWindowGeneration: snapshot.authorizedWindowGeneration,
+                selectedStreamGeneration: generation
+            )
             readiness = .ready(windowGeneration: generation)
+            inputCapabilities = ViewerInputCapabilities(
+                mouseInputEnabled: availability.mouseInputEnabled,
+                keyboardInputEnabled: availability.keyboardInputEnabled
+            )
         } else {
             readiness = .awaitingAuthorization
+            inputCapabilities = .none
         }
-        contentView?.updateStream(size: streamDimensions, readiness: readiness)
+        contentView?.updateStream(
+            size: streamDimensions,
+            readiness: readiness,
+            capabilities: inputCapabilities
+        )
+        let clipboardAvailable = SessionCapabilityProjection.clipboardAvailable(for: snapshot)
+        contentView?.updateClipboard(
+            status: messageLoop?.clipboardStatus,
+            available: clipboardAvailable
+        )
+    }
+
+    private func toggleClipboard() {
+        guard let messageLoop else {
+            setStatus("Text clipboard is unavailable until the session is authorized")
+            return
+        }
+        let enabled = messageLoop.clipboardStatus.localEnabled
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await messageLoop.setClipboardEnabled(!enabled)
+                await refreshInputSurface()
+            } catch {
+                setStatus("Text clipboard is not authorized for this session")
+                await refreshInputSurface()
+            }
+        }
     }
 
     private func setStatus(_ message: String) {
@@ -583,6 +667,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         streamDimensions = .zero
         contentView?.clearWindowOptions()
         contentView?.updateStream(size: .zero, readiness: .awaitingAuthentication)
+        contentView?.updateClipboard(status: nil, available: false)
     }
 }
 
@@ -608,6 +693,7 @@ private final class ViewerContentView: NSView {
     }
     var onWindowSelection: (@MainActor (UInt64, UInt64) -> Void)?
     var onPairingRetry: (@MainActor () -> Void)?
+    var onClipboardToggle: (@MainActor () -> Void)?
     var status: String = "Starting…" {
         didSet { statusLabel.stringValue = status }
     }
@@ -615,11 +701,13 @@ private final class ViewerContentView: NSView {
     private let statusLabel = NSTextField(labelWithString: "Starting…")
     private let windowPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let selectWindowButton = NSButton(title: "Select", target: nil, action: nil)
+    private let clipboardButton = NSButton(title: "Text clipboard unavailable", target: nil, action: nil)
     private let retryPairingButton = NSButton(title: "Retry pairing", target: nil, action: nil)
     private var windowOptions: [WindowDescriptor] = []
     private var windowSelectionGeneration: UInt64?
     private var streamSize: CGSize = .zero
     private var readiness: InputReadiness = .awaitingAuthentication
+    private var inputCapabilities: ViewerInputCapabilities = .none
 
     override var isFlipped: Bool { true }
 
@@ -649,6 +737,10 @@ private final class ViewerContentView: NSView {
         selectWindowButton.action = #selector(selectWindow(_:))
         selectWindowButton.controlSize = .small
         selectWindowButton.isEnabled = false
+        clipboardButton.target = self
+        clipboardButton.action = #selector(toggleClipboard(_:))
+        clipboardButton.controlSize = .small
+        clipboardButton.isEnabled = false
         retryPairingButton.target = self
         retryPairingButton.action = #selector(retryPairing(_:))
         retryPairingButton.controlSize = .small
@@ -658,6 +750,7 @@ private final class ViewerContentView: NSView {
         addSubview(statusLabel)
         addSubview(windowPicker)
         addSubview(selectWindowButton)
+        addSubview(clipboardButton)
         addSubview(retryPairingButton)
         surface.onInputEvent = onInputEvent
         surface.onInputRejected = onInputRejected
@@ -667,10 +760,31 @@ private final class ViewerContentView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func updateStream(size: CGSize, readiness: InputReadiness) {
+    func updateStream(
+        size: CGSize,
+        readiness: InputReadiness,
+        capabilities: ViewerInputCapabilities = .none
+    ) {
         streamSize = size
         self.readiness = readiness
+        inputCapabilities = capabilities
         needsLayout = true
+    }
+
+    func updateClipboard(status: ClipboardSyncStatus?, available: Bool) {
+        guard available else {
+            clipboardButton.title = "Text clipboard unavailable"
+            clipboardButton.isEnabled = false
+            return
+        }
+        if let status, status.localEnabled {
+            clipboardButton.title = status.remoteEnabled
+                ? "Disable text clipboard"
+                : "Clipboard enabled (waiting)"
+        } else {
+            clipboardButton.title = "Enable text clipboard"
+        }
+        clipboardButton.isEnabled = true
     }
 
     func setPairingRetryVisible(_ visible: Bool) {
@@ -735,16 +849,24 @@ private final class ViewerContentView: NSView {
             width: 104,
             height: 24
         )
+        let controlY = max(34, bounds.height - 36)
+        let clipboardWidth: CGFloat = 176
         windowPicker.frame = NSRect(
             x: 12,
-            y: max(34, bounds.height - 36),
-            width: min(520, max(180, bounds.width - 92)),
+            y: controlY,
+            width: min(520, max(180, bounds.width - 288)),
             height: 24
         )
         selectWindowButton.frame = NSRect(
             x: windowPicker.frame.maxX + 8,
             y: windowPicker.frame.minY,
             width: 64,
+            height: 24
+        )
+        clipboardButton.frame = NSRect(
+            x: max(selectWindowButton.frame.maxX + 8, bounds.width - clipboardWidth - 12),
+            y: controlY,
+            width: clipboardWidth,
             height: 24
         )
         let contentRect = VideoContentLayout.aspectFitRect(
@@ -759,7 +881,8 @@ private final class ViewerContentView: NSView {
                 width: contentRect.width,
                 height: contentRect.height
             ),
-            readiness: readiness
+            readiness: readiness,
+            capabilities: inputCapabilities
         )
     }
 
@@ -774,5 +897,10 @@ private final class ViewerContentView: NSView {
     @objc private func retryPairing(_ sender: NSButton) {
         _ = sender
         onPairingRetry?()
+    }
+
+    @objc private func toggleClipboard(_ sender: NSButton) {
+        _ = sender
+        onClipboardToggle?()
     }
 }

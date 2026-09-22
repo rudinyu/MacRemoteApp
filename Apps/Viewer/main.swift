@@ -2,9 +2,15 @@ import Darwin
 import CodecCore
 import Foundation
 import InputCore
+import os
 import RemoteProtocol
 import SecurityCore
 import TransportCore
+
+let macRemoteAppStartupLogger = Logger(
+    subsystem: "com.rudinyu.MacRemoteApp",
+    category: "startup"
+)
 
 @MainActor
 @main
@@ -51,8 +57,21 @@ struct ViewerApp {
             let runtime = try ViewerRuntime(configuration: .load())
             runtime.run()
         } catch {
+            macRemoteAppStartupLogger.error(
+                "MacRemoteApp Viewer startup failed (code: \(viewerStartupErrorCode(error), privacy: .public))"
+            )
             fputs("MacRemoteApp Viewer failed: \(error)\n", stderr)
             exit(EXIT_FAILURE)
         }
     }
+}
+
+func viewerStartupErrorCode(_ error: Error) -> String {
+    if error is ViewerRuntimeError {
+        return "configuration"
+    }
+    if error is SecurityCoreError {
+        return "security"
+    }
+    return "unknown"
 }

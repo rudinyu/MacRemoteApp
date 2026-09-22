@@ -10,7 +10,7 @@ if [[ -L "${artifact_root}" || ( -e "${artifact_root}" && ! -d "${artifact_root}
     exit 2
 fi
 mkdir -p -- "${artifact_root}"
-default_release_root="${repo_root}/build/release"
+default_release_root="${repo_root}/build/MacRemoteApp-notarize.staging.$$"
 release_root="${MACREMOTEAPP_RELEASE_ROOT:-${default_release_root}}"
 release_build_root="${MACREMOTEAPP_RELEASE_BUILD_ROOT:-${repo_root}/.build/notarized-release-build}"
 signing_identity="${MACREMOTEAPP_SIGNING_IDENTITY:-}"
@@ -47,11 +47,17 @@ case "${release_root}" in
         exit 2
         ;;
     "${repo_root}/build/beta"|"${repo_root}/build/rc"|"${repo_root}/build/release")
+        echo "Refusing to notarize directly into a formal channel; use scripts/release-notarized.sh for the lock-protected promotion: ${release_root}" >&2
+        exit 2
         ;;
     "${repo_root}/build/MacRemoteApp-"*.staging.*)
         ;;
     "${repo_root}"|"${repo_root}"/*)
-        echo "MACREMOTEAPP_RELEASE_ROOT must be a dedicated build channel directory or an external directory: ${release_root}" >&2
+        echo "MACREMOTEAPP_RELEASE_ROOT must be a repository-local build channel or controlled staging directory: ${release_root}" >&2
+        exit 2
+        ;;
+    *)
+        echo "MACREMOTEAPP_RELEASE_ROOT must be a repository-local build channel or controlled staging directory: ${release_root}" >&2
         exit 2
         ;;
 esac
@@ -81,6 +87,7 @@ echo "Building and signing release apps with Developer ID"
 MACREMOTEAPP_RELEASE_BUILD_ROOT="${release_build_root}" \
 MACREMOTEAPP_RELEASE_ROOT="${release_root}" \
 MACREMOTEAPP_SIGNING_IDENTITY="${signing_identity}" \
+MACREMOTEAPP_REQUIRE_DEVELOPER_ID=1 \
     bash "${script_dir}/package-device-apps.sh"
 
 notarized_zip_dir="$(mktemp -d "${TMPDIR:-/private/tmp}/macremoteapp-notarized.XXXXXX")"
@@ -93,11 +100,11 @@ for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
     test -s "${app_zip}"
 
     signature_info="$(codesign --display --verbose=4 "${app_path}" 2>&1)"
-    if ! printf '%s\n' "${signature_info}" | rg -q 'Authority=Developer ID Application:'; then
+    if ! printf '%s\n' "${signature_info}" | grep -Eq 'Authority=Developer ID Application:'; then
         echo "Notarization requires a Developer ID Application signature: ${app_name}" >&2
         exit 1
     fi
-    if ! printf '%s\n' "${signature_info}" | rg -q 'flags=.*runtime'; then
+    if ! printf '%s\n' "${signature_info}" | grep -Eq 'flags=.*runtime'; then
         echo "Notarization requires the hardened runtime: ${app_name}" >&2
         exit 1
     fi
@@ -131,7 +138,7 @@ for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
     test -s "${dmg_path}"
 
     signature_info="$(codesign --display --verbose=4 "${dmg_path}" 2>&1)"
-    if ! printf '%s\n' "${signature_info}" | rg -q 'Authority=Developer ID Application:'; then
+    if ! printf '%s\n' "${signature_info}" | grep -Eq 'Authority=Developer ID Application:'; then
         echo "Notarization requires a Developer ID Application signature: ${dmg_path}" >&2
         exit 1
     fi

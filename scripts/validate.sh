@@ -5,6 +5,13 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd)"
 build_root="${repo_root}/.build/public-validation"
 
+if [[ -L "${repo_root}/.build" || ( -e "${repo_root}/.build" && ! -d "${repo_root}/.build" ) ]]; then
+    echo "Refusing to clean an unexpected .build path: ${repo_root}/.build" >&2
+    exit 2
+fi
+echo "Removing previous validation build cache before starting validation"
+rm -rf -- "${repo_root}/.build"
+
 mkdir -p "${build_root}/clang-module-cache" "${build_root}/swift-module-cache"
 export TMPDIR="${build_root}/tmp"
 export CLANG_MODULE_CACHE_PATH="${build_root}/clang-module-cache"
@@ -26,17 +33,29 @@ bash -n \
     scripts/notarize-device-apps.sh \
     scripts/release-notarized.sh \
     scripts/uninstall-device-apps.sh
+if ! bash scripts/install-device-apps.sh --help | grep -Eq -- '--allow-ad-hoc'; then
+    echo "Validation failed: installer does not expose explicit ad-hoc opt-in" >&2
+    exit 1
+fi
 test -x scripts/ensure-local-build-exclude.sh
+test -x scripts/check-notary-profile.sh
 bash -n scripts/ensure-local-build-exclude.sh
+bash -n scripts/check-notary-profile.sh
 test -s scripts/clear-testing-keychain.swift
 swiftc -parse scripts/clear-testing-keychain.swift
 plutil -lint Resources/Host-Info.plist Resources/Viewer-Info.plist >/dev/null
+test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' Resources/Host-Info.plist 2>/dev/null)" = "true"
+test "$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' Resources/Host-Info.plist 2>/dev/null)" != ""
+test "$(/usr/libexec/PlistBuddy -c 'Print :NSScreenCaptureUsageDescription' Resources/Host-Info.plist 2>/dev/null)" != ""
+test "$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' Resources/Viewer-Info.plist 2>/dev/null)" != ""
 test -s Resources/MacRemoteAppIcon.svg
 for forbidden_package_root in \
     "${repo_root}" \
     "${repo_root}/build" \
     "${repo_root}/build/other-channel" \
     "${repo_root}/build/MacRemoteApp-release.invalid" \
+    "${repo_root}/../MacRemoteApp-Release" \
+    "${HOME}/Downloads/MacRemoteApp-release" \
     /
 do
     if MACREMOTEAPP_RELEASE_ROOT="${forbidden_package_root}" \
@@ -45,6 +64,37 @@ do
         exit 1
     fi
 done
+if MACREMOTEAPP_RELEASE_ROOT="${repo_root}/build/release" \
+    MACREMOTEAPP_SIGNING_IDENTITY=- \
+    bash scripts/package-device-apps.sh >/dev/null 2>&1; then
+    echo "Validation failed: package script accepted ad-hoc signing for the formal release channel" >&2
+    exit 1
+fi
+for forbidden_build_root in \
+    "${repo_root}/.build" \
+    "${repo_root}/.build/.." \
+    "${repo_root}/.build/../outside" \
+    /
+do
+    if MACREMOTEAPP_RELEASE_BUILD_ROOT="${forbidden_build_root}" \
+        MACREMOTEAPP_RELEASE_ROOT="${repo_root}/build/testing" \
+        MACREMOTEAPP_SIGNING_IDENTITY=- \
+        bash scripts/package-device-apps.sh >/dev/null 2>&1; then
+        echo "Validation failed: package script accepted unsafe build root ${forbidden_build_root}" >&2
+        exit 1
+    fi
+done
+if MACREMOTEAPP_SIGNING_IDENTITY=- \
+    bash scripts/create-device-dmgs.sh "${repo_root}/build/release" >/dev/null 2>&1; then
+    echo "Validation failed: DMG script accepted ad-hoc signing for the formal release channel" >&2
+    exit 1
+fi
+if MACREMOTEAPP_RELEASE_ROOT="${repo_root}/build/release" \
+    MACREMOTEAPP_SIGNING_IDENTITY=- \
+    bash scripts/notarize-device-apps.sh >/dev/null 2>&1; then
+    echo "Validation failed: notarization script accepted direct writes to the formal release channel" >&2
+    exit 1
+fi
 if bash scripts/uninstall-device-apps.sh \
     --clean-testing \
     --identities "${repo_root}" \
@@ -76,22 +126,24 @@ do
 done
 
 echo "Checking M8-M10 boundary"
-forbidden_hits="$(rg -n \
-    'WebRTC|AVAudio|AVAsset' \
-    Apps Packages Tests --glob '*.swift' || true)"
+forbidden_hits="$(find Apps Packages Tests \
+    -type f -name '*.swift' \
+    -exec grep -nE 'WebRTC|AVAudio|AVAsset' {} + || true)"
 if [[ -n "${forbidden_hits}" ]]; then
     echo "Validation failed: a later-milestone product API or feature was added" >&2
     echo "${forbidden_hits}" >&2
     exit 1
 fi
-pasteboard_scope_hits="$(rg -n 'NSPasteboard' Packages Tests --glob '*.swift' || true)"
+pasteboard_scope_hits="$(find Packages Tests \
+    -type f -name '*.swift' \
+    -exec grep -nE 'NSPasteboard' {} + || true)"
 if [[ -n "${pasteboard_scope_hits}" ]]; then
     echo "Validation failed: NSPasteboard is allowed only in Apps/Host and Apps/Viewer" >&2
     echo "${pasteboard_scope_hits}" >&2
     exit 1
 fi
 
-echo "Checking required M5 documents"
+echo "Checking required repository documents"
 for document in \
     docs/PRODUCT_SPEC.md \
     docs/ARCHITECTURE.md \
@@ -108,7 +160,10 @@ for document in \
     docs/M7_CLIPBOARD_UX.md \
     docs/M8_PERFORMANCE_RESILIENCE.md \
     docs/M9_SECURITY_RELEASE.md \
-    docs/M10_ACCEPTANCE.md
+    docs/M10_ACCEPTANCE.md \
+    docs/USER_GUIDE.md \
+    docs/DEBUGGING.md \
+    docs/DEBUG_LOG_COLLECTION.md
 do
     test -s "${document}"
 done
@@ -117,6 +172,7 @@ bash -n \
     scripts/run-m8-benchmark.sh \
     scripts/audit-release.sh \
     scripts/create-device-dmgs.sh \
+    scripts/check-notary-profile.sh \
     scripts/install-device-apps.sh \
     scripts/run-m10-acceptance.sh \
     scripts/notarize-device-apps.sh \
@@ -152,7 +208,8 @@ swift build \
     --scratch-path "${build_root}/m8-benchmark"
 
 echo "Testing root smoke target"
-swift test --configuration debug --scratch-path "${build_root}/root"
+MACREMOTEAPP_RUN_M2_LOCAL_IDENTITY_SMOKE=1 \
+    swift test --configuration debug --scratch-path "${build_root}/root"
 
 for package_dir in \
     Packages/RemoteProtocol \

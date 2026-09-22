@@ -43,6 +43,10 @@ actor HostRuntime {
         .keyboardInput,
         .textClipboard
     ]
+    private static let inputCapabilities: Set<Capability> = [
+        .mouseInput,
+        .keyboardInput
+    ]
 
     private let configuration: Configuration
     private let windowProvider: ScreenRecordingWindowProvider
@@ -57,8 +61,10 @@ actor HostRuntime {
     private var captureTask: Task<Void, Never>?
     private var encoder: H264Encoder?
     private var selectedWindow: CaptureWindow?
+    private var selectedWindowGeneration: UInt64?
     private var advertisedWindowGeneration: UInt64 = 1
     private var videoConfigSentGeneration: UInt64?
+    private var clipboardOptedInForSession = false
 
     init(
         configuration: Configuration,
@@ -71,9 +77,20 @@ actor HostRuntime {
     }
 
     func run() async throws {
-        let permission = await captureSession.permissionState()
+        let currentPermission = await captureSession.permissionState()
+        let permission: CapturePermissionState
+        if currentPermission == .authorized {
+            permission = currentPermission
+        } else {
+            // A preflight check is read-only and never presents the macOS
+            // consent UI. Ask through the app bundle before failing closed so
+            // a first launch can actually reach the Screen Recording prompt.
+            permission = await captureSession.requestPermission()
+        }
         guard permission == .authorized else {
-            throw HostRuntimeError.permission("Screen Recording permission is not authorized")
+            throw HostRuntimeError.permission(
+                "Screen Recording permission is not authorized; enable MacRemoteApp Host in System Settings > Privacy & Security > Screen Recording, then relaunch the app"
+            )
         }
 
         let localIdentity = try await loadLocalIdentity()
@@ -127,6 +144,8 @@ actor HostRuntime {
         }
         activeSession = nil
         selectedWindow = nil
+        selectedWindowGeneration = nil
+        clipboardOptedInForSession = false
         stateStore.clearSelection()
         listener?.cancel()
         listener = nil
@@ -143,7 +162,7 @@ actor HostRuntime {
             )
         }
 #endif
-        return try await KeychainIdentityProvider(label: configuration.identityLabel).load()
+        return try await KeychainIdentityProvider(label: configuration.identityLabel).loadOrCreate()
     }
 
     private func accept(_ transport: NetworkFramedTransport) async {
@@ -171,6 +190,7 @@ actor HostRuntime {
             pairingCoordinator: pairingCoordinator
         )
         activeSession = session
+        clipboardOptedInForSession = false
         stateStore.update(session: await session.snapshot())
 
         let contextProvider = CoreGraphicsAccessibilityContextProvider(
@@ -302,6 +322,7 @@ actor HostRuntime {
                 return
             }
             if selectedWindow != nil {
+                await synchronizeInputAuthorization(session)
                 let captureSnapshot = await captureSession.snapshot()
                 switch captureSnapshot.state {
                 case .capturing:
@@ -316,6 +337,64 @@ actor HostRuntime {
                 }
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
+    private func synchronizeInputAuthorization(_ session: SessionCoordinator) async {
+        guard selectedWindow != nil, let selectedWindowGeneration else { return }
+        let snapshot = await session.snapshot()
+        guard snapshot.authorized,
+              snapshot.authorizedWindowGeneration == selectedWindowGeneration else {
+            return
+        }
+
+        let permission = await MainActor.run {
+            CoreGraphicsAccessibilityContextProvider.currentPermissionState()
+        }
+        let negotiatedInput = snapshot.negotiatedCapabilities.intersection(Self.inputCapabilities)
+        var desired = snapshot.authorizedCapabilities
+        if permission == .authorized {
+            desired.formUnion(negotiatedInput)
+        } else {
+            desired.subtract(Self.inputCapabilities)
+        }
+        if clipboardOptedInForSession,
+           snapshot.negotiatedCapabilities.contains(.textClipboard) {
+            desired.insert(.textClipboard)
+        } else {
+            desired.remove(.textClipboard)
+        }
+        guard desired != snapshot.authorizedCapabilities else { return }
+        let shouldRestoreClipboard = clipboardOptedInForSession &&
+            desired.contains(.textClipboard)
+
+        do {
+            try await session.authorize(
+                windowGeneration: selectedWindowGeneration,
+                capabilities: desired
+            )
+            stateStore.update(session: await session.snapshot())
+            if shouldRestoreClipboard, let inputRuntime {
+                do {
+                    try await inputRuntime.setClipboardEnabled(true)
+                } catch {
+                    // A lifecycle reset can race this reauthorization. If
+                    // the local clipboard bridge cannot be re-enabled, do
+                    // not leave the peer with an apparently authorized but
+                    // unusable clipboard capability.
+                    var fallback = desired
+                    fallback.remove(.textClipboard)
+                    try? await session.authorize(
+                        windowGeneration: selectedWindowGeneration,
+                        capabilities: fallback
+                    )
+                    stateStore.update(session: await session.snapshot())
+                }
+            }
+        } catch {
+            // The session loop will handle a failed peer. Keep the local
+            // admission state synchronized with the latest session snapshot.
+            stateStore.update(session: await session.snapshot())
         }
     }
 
@@ -390,7 +469,59 @@ actor HostRuntime {
               let selected = captureSnapshot.selectedWindow else {
             throw HostRuntimeError.staleWindowGeneration
         }
+
+        let negotiatedCapabilities = (await session.snapshot()).negotiatedCapabilities
+        let negotiatedInput = negotiatedCapabilities.intersection(Self.inputCapabilities)
+        let permission = await MainActor.run {
+            let current = CoreGraphicsAccessibilityContextProvider.currentPermissionState()
+            guard !negotiatedInput.isEmpty, current != .authorized else {
+                return current
+            }
+            // Ask only after a Viewer has negotiated input and the operator has
+            // selected a Host window. The signed Host bundle owns the TCC
+            // request; a view-only session never receives this prompt.
+            return CoreGraphicsAccessibilityContextProvider.requestPermission()
+        }
+        if negotiatedCapabilities.contains(.textClipboard) {
+            let consented = await HostClipboardPrompt.requestConsent(
+                expiresAt: Date().addingTimeInterval(60),
+                isSessionActive: {
+                    let snapshot = await session.snapshot()
+                    guard snapshot.authorized else { return false }
+                    switch snapshot.state {
+                    case .failed, .stopping, .reconnecting:
+                        return false
+                    default:
+                        return true
+                    }
+                }
+            )
+            let currentSnapshot = await session.snapshot()
+            clipboardOptedInForSession = consented &&
+                activeSession === session &&
+                currentSnapshot.authorized &&
+                currentSnapshot.state != .failed &&
+                currentSnapshot.state != .stopping &&
+                currentSnapshot.state != .reconnecting
+        } else {
+            clipboardOptedInForSession = false
+        }
+
+        // Authorize only the capabilities both endpoints negotiated. A Viewer
+        // may intentionally omit optional input or clipboard support; that
+        // must degrade to view-only/partial control instead of rejecting the
+        // entire selected window.
+        var authorizedCapabilities = Self.capabilities.intersection(negotiatedCapabilities)
+        if permission != .authorized {
+            authorizedCapabilities.subtract(Self.inputCapabilities)
+        }
+        if !clipboardOptedInForSession {
+            authorizedCapabilities.remove(.textClipboard)
+        }
+
+        try await session.authorize(windowGeneration: generation, capabilities: authorizedCapabilities)
         selectedWindow = selected
+        selectedWindowGeneration = generation
         stateStore.setSelection(
             HostInputWindowSelection(
                 windowIdentifier: selected.identifier,
@@ -405,9 +536,10 @@ actor HostRuntime {
                 )
             )
         )
-
-        try await session.authorize(windowGeneration: generation, capabilities: Self.capabilities)
         stateStore.update(session: await session.snapshot())
+        if clipboardOptedInForSession {
+            try await inputRuntime?.setClipboardEnabled(true)
+        }
 
         let dimensions = CaptureConfiguration.default.outputDimensions(for: selected.bounds)
         let encoder = try H264Encoder(
@@ -546,6 +678,8 @@ actor HostRuntime {
         await session.stop(reason: .normal)
         activeSession = nil
         selectedWindow = nil
+        selectedWindowGeneration = nil
+        clipboardOptedInForSession = false
         stateStore.clearSelection()
     }
 

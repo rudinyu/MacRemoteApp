@@ -164,7 +164,8 @@ or WebRTC.
 
 - A Host and Viewer can discover and establish a protected test session on the
   LAN using the documented pairing flow, with peer authentication required on
-  every connection and a provisioned platform identity.
+  every connection and a locally enrolled platform identity. The explicit
+  PKCS#12 provisioning path remains only for diagnostic smoke commands.
 - Both local operators explicitly consent to first pairing; a remote
   confirmation alone cannot create a permanent trust record.
 - Identity mismatch, pairing denial, malformed handshake, timeout, normal EOF,

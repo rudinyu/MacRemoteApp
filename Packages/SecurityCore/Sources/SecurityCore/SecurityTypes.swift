@@ -14,8 +14,10 @@ public enum SecurityCoreError: Error, Equatable, Sendable, CustomStringConvertib
     case peerIdentityMismatch
     case invalidNonce
     case identityUnavailable
+    case identityAmbiguous
     case invalidPKCS12
     case certificateUnavailable
+    case identityEnrollmentFailed
 
     public var description: String {
         switch self {
@@ -29,9 +31,11 @@ public enum SecurityCoreError: Error, Equatable, Sendable, CustomStringConvertib
         case .noPendingPairing: return "no pairing challenge is pending"
         case .peerIdentityMismatch: return "peer identity does not match the pending challenge"
         case .invalidNonce: return "pairing nonce is invalid"
-        case .identityUnavailable: return "a provisioned platform identity is unavailable"
+        case .identityUnavailable: return "a local platform identity is unavailable"
+        case .identityAmbiguous: return "multiple local platform identities match the configured label"
         case .invalidPKCS12: return "the PKCS#12 identity bundle is invalid"
         case .certificateUnavailable: return "the identity certificate is unavailable"
+        case .identityEnrollmentFailed: return "local identity enrollment failed"
         }
     }
 }

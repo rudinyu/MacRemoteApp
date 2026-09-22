@@ -1,6 +1,20 @@
 import AppKit
 import InputCore
 
+struct ViewerInputCapabilities: Equatable {
+    let mouseInputEnabled: Bool
+    let keyboardInputEnabled: Bool
+
+    static let none = ViewerInputCapabilities(
+        mouseInputEnabled: false,
+        keyboardInputEnabled: false
+    )
+
+    var anyInputEnabled: Bool {
+        mouseInputEnabled || keyboardInputEnabled
+    }
+}
+
 /// A remote-content-only event surface. It emits typed records and never
 /// injects or archives platform events.
 @MainActor
@@ -19,6 +33,7 @@ final class ViewerInputSurface: NSView {
     private var inputState = InputStateTracker()
     private var modifierKeyTracker = ModifierKeyTracker()
     private var admittedModifierKeyCodes: Set<UInt16> = []
+    private(set) var inputCapabilities: ViewerInputCapabilities
 
     private(set) var inputReadiness: InputReadiness {
         didSet {
@@ -32,13 +47,16 @@ final class ViewerInputSurface: NSView {
     var onInputRejected: (@MainActor (InputCoreError) -> Void)?
 
     var inputReady: Bool {
-        inputReadiness.isReady && normalizer.contentRect.isValid
+        inputReadiness.isReady &&
+            inputCapabilities.anyInputEnabled &&
+            normalizer.contentRect.isValid
     }
 
     init(
         frame frameRect: NSRect,
         contentRect: InputContentRect,
         readiness: InputReadiness = .surfaceUnavailable,
+        capabilities: ViewerInputCapabilities = .none,
         limits: InputEventLimits = .default
     ) {
         self.normalizer = InputEventNormalizer(
@@ -48,6 +66,7 @@ final class ViewerInputSurface: NSView {
         )
         self.rateLimiter = InputEventRateLimiter(limits: limits)
         self.inputReadiness = readiness
+        self.inputCapabilities = capabilities
         super.init(frame: frameRect)
         configureSurface()
     }
@@ -60,29 +79,33 @@ final class ViewerInputSurface: NSView {
         )
         self.rateLimiter = InputEventRateLimiter()
         self.inputReadiness = readiness
+        self.inputCapabilities = .none
         super.init(coder: coder)
         configureSurface()
     }
 
     func updateInputState(
         contentRect: InputContentRect,
-        readiness: InputReadiness
+        readiness: InputReadiness,
+        capabilities: ViewerInputCapabilities = .none
     ) {
         let readinessChanged = inputReadiness != readiness
+        let capabilitiesChanged = inputCapabilities != capabilities
         let wasReady = inputReady
-        let willBeReady = readiness.isReady && contentRect.isValid
-        if !inputState.isEmpty && (readinessChanged || wasReady != willBeReady) {
+        let willBeReady = readiness.isReady && capabilities.anyInputEnabled && contentRect.isValid
+        if !inputState.isEmpty && (readinessChanged || capabilitiesChanged || wasReady != willBeReady) {
             // Keep the old readiness and normalizer generation in place while
             // synthetic releases are admitted. Clearing state first would
             // leave the Host believing a key or button is still pressed.
             releasePressedState()
-        } else if readinessChanged || wasReady != willBeReady {
+        } else if readinessChanged || capabilitiesChanged || wasReady != willBeReady {
             beginModifierResynchronization()
             admittedModifierKeyCodes.removeAll(keepingCapacity: false)
             rateLimiter.reset()
         }
         normalizer.update(contentRect: contentRect, readiness: readiness)
         inputReadiness = readiness
+        inputCapabilities = capabilities
         rateLimiter.reset()
         if !readinessChanged && wasReady == willBeReady {
             for _ in inputState.activeKeys {
@@ -175,10 +198,19 @@ final class ViewerInputSurface: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if !inputCapabilities.mouseInputEnabled {
+            // A keyboard-only session still needs a way to return focus to the
+            // remote surface after a picker or clipboard control was used.
+            // Consume the local click without admitting a mouse event.
+            guard inputCapabilities.keyboardInputEnabled else { return }
+            _ = window?.makeFirstResponder(self)
+            return
+        }
         emitButtonDown(event, button: 0)
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard inputCapabilities.mouseInputEnabled else { return }
         emit(
             priority: priority(for: .pointerButton(0), pressed: false),
             stateTransition: .ended(.pointerButton(0))
@@ -209,24 +241,29 @@ final class ViewerInputSurface: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
+        guard inputCapabilities.mouseInputEnabled else { return }
         emit(throttleMovementWhenRateLimited: true) {
             try normalizer.pointerMove(at: point(for: event), timestampNanoseconds: now())
         }
     }
 
     override func mouseDragged(with event: NSEvent) {
+        guard inputCapabilities.mouseInputEnabled else { return }
         mouseMoved(with: event)
     }
 
     override func rightMouseDragged(with event: NSEvent) {
+        guard inputCapabilities.mouseInputEnabled else { return }
         mouseMoved(with: event)
     }
 
     override func otherMouseDragged(with event: NSEvent) {
+        guard inputCapabilities.mouseInputEnabled else { return }
         mouseMoved(with: event)
     }
 
     override func scrollWheel(with event: NSEvent) {
+        guard inputCapabilities.mouseInputEnabled else { return }
         emit {
             try normalizer.scroll(
                 at: point(for: event),
@@ -238,15 +275,17 @@ final class ViewerInputSurface: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
+        guard inputCapabilities.keyboardInputEnabled else { return }
         emitKey(event, pressed: true)
     }
 
     override func keyUp(with event: NSEvent) {
+        guard inputCapabilities.keyboardInputEnabled else { return }
         emitKey(event, pressed: false)
     }
 
     override func flagsChanged(with event: NSEvent) {
-        guard inputReady else { return }
+        guard inputReady, inputCapabilities.keyboardInputEnabled else { return }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard modifierFlag(for: event.keyCode) != nil else { return }
 
@@ -292,6 +331,7 @@ final class ViewerInputSurface: NSView {
 
     private func emitButtonDown(_ event: NSEvent, button: UInt8) {
         guard inputReady,
+              inputCapabilities.mouseInputEnabled,
               let window,
               window.makeFirstResponder(self) else { return }
         emit { try normalizer.focusIntent(timestampNanoseconds: now()) }
@@ -299,6 +339,7 @@ final class ViewerInputSurface: NSView {
     }
 
     private func emitButton(_ event: NSEvent, button: UInt8, pressed: Bool) {
+        guard inputCapabilities.mouseInputEnabled else { return }
         emit(
             priority: priority(
                 for: .pointerButton(button),
@@ -324,6 +365,7 @@ final class ViewerInputSurface: NSView {
         priority: InputEventPriority? = nil,
         modifierFlags: NSEvent.ModifierFlags? = nil
     ) -> Bool {
+        guard inputCapabilities.keyboardInputEnabled else { return false }
         let flags = modifierFlags ?? event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let eventPriority = priority ?? self.priority(
             for: .key(event.keyCode),

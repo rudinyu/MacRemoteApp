@@ -19,14 +19,17 @@ injection, or clipboard transfer.
 | Bootstrap policy | An unknown but actually presented certificate may establish the TLS-protected bootstrap session, but the session remains pairing-required and unauthorized until both endpoints record local consent and the displayed code matches |
 | Queue policy | Control queue capacity 128; media queue capacity 3; a full media queue replaces only an unsent discardable video frame before wire admission, while a full control queue fails closed |
 
-The local device key is generated and retained by `KeychainDeviceIdentityProvider`.
-`KeychainIdentityProvider` now loads a provisioned Keychain `SecIdentity` or
-imports a supplied PKCS#12 bundle without persisting private material in the
-repository. `SecurityCore` canonicalizes P-256 public-key representations so
-the certificate path and Network.framework metadata produce the same peer
-fingerprint. Certificate enrollment policy, key/certificate continuity,
-rotation, and Keychain access-control choices remain deployment-specific; the
-transport fails closed when no platform identity is supplied.
+The local device key is generated and retained by `SecurityCore` in the login
+Keychain. `KeychainIdentityProvider.loadOrCreate()` reuses an existing
+identity or creates a non-exportable P-256 private key and a matching local
+self-signed TLS certificate; `SecIdentity` is assembled in memory for
+Network.framework. The private key and certificate record never leave the
+endpoint. `KeychainIdentityProvider.importPKCS12()` remains only for the
+explicit M2 diagnostic smoke workflow. `SecurityCore` canonicalizes P-256
+public-key representations so the certificate path and Network.framework
+metadata produce the same peer fingerprint. Key/certificate continuity is
+fail-closed: a missing or mismatched generated certificate is not silently
+rotated. The transport fails closed when local enrollment cannot complete.
 
 ## Pairing flow
 

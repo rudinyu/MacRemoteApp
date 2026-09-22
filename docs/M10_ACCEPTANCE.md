@@ -18,9 +18,9 @@ two-sided pairing: a first connection shows a Host consent prompt and a Viewer
 code-entry prompt, while a later connection silently exchanges the same
 challenge when both trust records match and reuses them without prompting. If
 only one endpoint has a record, the other endpoint still receives the consent
-flow and the completed exchange repairs both records. A local device identity
-must still be provisioned in the Keychain. The physical evidence below remains
-required; deterministic
+flow and the completed exchange repairs both records. Each endpoint
+automatically enrolls its own local P-256 identity in the login Keychain. The
+physical evidence below remains required; deterministic
 build/test output must not be used as a substitute.
 
 ## Prerequisites
@@ -32,8 +32,8 @@ build/test output must not be used as a substitute.
    bash scripts/release-notarized.sh
    ```
 
-   This first runs the repository validation (`.codex/ci.sh` when available,
-   otherwise `scripts/validate.sh`). Only after deterministic CI passes does it
+   This first runs the canonical `scripts/validate.sh` repository validation.
+   Only after deterministic CI passes does it
    build, submit, staple, and validate notarized `MacRemoteApp-Host.dmg` and
    `MacRemoteApp-Viewer.dmg`, together with the stapled app bundles. The
    default output is the repository-local `build/release/` directory, outside
@@ -41,13 +41,34 @@ build/test output must not be used as a substitute.
    `build/beta/`, `build/rc/`, and `build/release/`; the whole `build/` tree
    is excluded through `.git/info/exclude` and must never be staged or pushed.
    Use `bash scripts/release-notarized.sh beta` or `rc` for those channels.
-   The flow stages a new release and replaces the previous directory only
-   after notarization validation succeeds, so a failed run does not discard the
-   last known-good release.
+   The release lock is acquired through the macOS kernel-backed `lockf` utility
+   and the repository `.build` cache is removed before deterministic validation.
+   The operating system releases the advisory lock after an interrupted run;
+   unexpected directory or symlink lock paths fail closed. The existing selected channel remains in
+   place while the new release is built, signed, and notarized beside it. The
+   new channel is promoted only after final validation; a failure before
+   promotion leaves the old channel intact, while a failure during promotion
+   restores it.
    The successful CI and notarization flow removes the repository `.build`
    cache. The script uses the local `notarytool-profile` Keychain profile by
    default. Do not place the profile, its credentials, or the signing identity
    configuration in the repository.
+   If a separate read-only profile diagnostic is useful, run it in the same
+   logged-in macOS session that will run the release command:
+
+   ```bash
+   bash scripts/check-notary-profile.sh \
+     "${MACREMOTEAPP_NOTARY_PROFILE:-notarytool-profile}"
+   ```
+
+   This diagnostic does not submit an artifact or print profile credentials.
+   It is advisory only; the release flow validates the profile through the
+   actual `notarytool submit` calls. A Codex or app-server runner can have a
+   different visibility context for the separate history operation.
+   Each role-specific DMG also contains `MacRemoteApp-User-Guide.txt`,
+   `MacRemoteApp-How-to-Debug.txt`, and
+   `MacRemoteApp-How-to-Collect-Debug-Logs.txt` beside the install and
+   uninstall commands.
    To validate that exact notarized directory without rebuilding or uploading,
    run:
 
@@ -56,28 +77,39 @@ build/test output must not be used as a substitute.
      "$PWD/build/release"
    ```
 
-   `scripts/notarize-device-apps.sh` is the lower-level operation and requires
-   an absent or empty output directory; use `scripts/release-notarized.sh` for
-   the complete replacement-safe CI-gated release flow.
+   `scripts/notarize-device-apps.sh` is the lower-level operation. Without
+   `MACREMOTEAPP_RELEASE_ROOT`, it writes to a fresh controlled staging
+   directory under `build/`; with that variable, the directory must be an
+   absent or empty controlled staging directory. Use
+   `scripts/release-notarized.sh` for the complete clean-channel CI-gated
+   release flow.
 
-2. On the Intel Host, grant Screen Recording and Accessibility permission to
-   the installed Host app (or the exact terminal used for the debug physical
-   smoke). Install the role-specific app with
+2. On the Intel Host, grant Screen Recording permission to the installed Host
+   app (or the exact terminal used for the debug physical smoke). After a
+   Viewer negotiates input and the operator selects a window, the signed Host
+   requests Accessibility/post-event access from the Host bundle. Until those
+   input permissions are authorized, the Host remains view-only and does not
+   authorize mouse/keyboard capabilities.
+   The capability may still appear in the negotiation offer; authorization is
+   the security gate that reflects the current permission state.
+   Install the role-specific app with
    `scripts/install-device-apps.sh` or the
    `Install-MacRemoteApp-*.command` file in its DMG. On the Apple Silicon
    Viewer, grant Local Network access.
-3. Generate fresh M2 identities outside the repository and provision each
-   endpoint's own identity in its local Keychain. Never copy a private key or
-   PKCS#12 file into the repository or to the other Mac.
+3. No production identity file is required. On first launch, each app creates
+   or reuses its own P-256 TLS identity in that Mac's login Keychain. Never
+   copy a private key or PKCS#12 file into the repository or to the other Mac.
+   Generate fresh M2 identities outside the repository only when running the
+   explicit debug physical-smoke commands below.
 
-For the production runtime, provision the local identity in the Keychain under
-the `MacRemoteApp` label (or set `MACREMOTEAPP_LOCAL_IDENTITY_LABEL`). When
-launching the installed production bundles below, do not set
+When launching the installed production bundles below, do not set
 `MACREMOTEAPP_PEER_CERT` for the normal AirPlay-like first-pairing flow: the
-Host and Viewer establish the presented TLS identities, show the same one-time
-code, require local consent on both endpoints, and then save the peer records
-in the Keychain. `MACREMOTEAPP_PEER_CERT` remains an optional pinned-peer
-migration/diagnostic path.
+Host and Viewer enroll their local TLS identities, establish the presented
+peer identities, show the same one-time code, require local consent on both
+endpoints, and then save the peer records in the Keychain.
+`MACREMOTEAPP_PEER_CERT` remains an optional pinned-peer migration/diagnostic
+path. `MACREMOTEAPP_LOCAL_IDENTITY_LABEL` remains a controlled diagnostic
+override for the generated identity label.
 
 The debug role commands below intentionally exercise the existing M2/M7
 physical smoke harness, which uses explicit PKCS#12 identities and pinned
@@ -90,11 +122,12 @@ from the production bundle's first-pairing flow.
 | Step | Acceptance evidence | State |
 | --- | --- | --- |
 | Fresh install | Host/Viewer app bundles launch and signatures verify | ☐ |
+| User documentation | Each DMG contains the User Guide, debugging guide, and debug-log collection guide | ☐ |
 | Pairing | Host displays a code, Viewer enters the matching code, both operators consent, and trust records are stored | ☐ |
 | Window selection | Exactly one eligible foreground window is selected | ☐ |
 | Capture/display | Viewer renders the selected window with aspect preservation | ☐ |
 | Performance | 30-second report has clock probes, valid samples, p50/p95, fps and resource data | ☐ |
-| Input | Pointer, button, scroll, keyboard and modifiers work only while authorized | ☐ |
+| Input | Each authorized input capability works only while authorized; mouse-only or keyboard-only authorization keeps the other local controls disabled | ☐ |
 | Clipboard | Text-only opt-in works; opt-out and echo prevention work | ☐ |
 | Permission recovery | Screen Recording/Accessibility denial or revocation disables the affected path | ☐ |
 | Window recovery | Close/change/focus loss disables input and reports a recoverable state | ☐ |
@@ -117,14 +150,18 @@ bash scripts/run-m10-acceptance.sh viewer
 ```
 
 The production binaries use their runtime by default when launched from the
-installed app bundle. For a direct terminal launch during setup, use the
-bundle executable paths. No peer-certificate environment variable is needed
-for the normal first-pairing flow:
+installed app bundle. Launch the bundles themselves during setup so macOS
+records TCC decisions against the signed app identity. No peer-certificate
+environment variable is needed for the normal first-pairing flow:
 
 ```bash
-"$HOME/Applications/MacRemoteApp-Host.app/Contents/MacOS/MacRemoteApp-Host"
-"$HOME/Applications/MacRemoteApp-Viewer.app/Contents/MacOS/MacRemoteApp-Viewer"
+open "$HOME/Applications/MacRemoteApp-Host.app"
+open "$HOME/Applications/MacRemoteApp-Viewer.app"
 ```
+
+For terminal-visible startup diagnostics, collect the unified logs described in
+`docs/DEBUG_LOG_COLLECTION.md`; do not execute the file inside `Contents/MacOS`
+when validating permissions.
 
 The explicit M7 text-clipboard opt-in path is available from the same debug
 build when the clipboard row is being exercised. It enables only the bounded

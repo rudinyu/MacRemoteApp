@@ -210,10 +210,12 @@ Additional rules:
 - The physical M2 diagnostic orchestration remains in `Apps/Host` and
   `Apps/Viewer`; `TransportCore` only exposes the Bonjour/TLS/session APIs.
   `SecurityCore` derives the presented peer identity from the TLS public key
-  and persists only the trusted peer record. Each app loads its own private
-  `SecIdentity` from Keychain (or the debug-only PKCS#12 provisioning path).
-  No peer private key is exchanged; the optional public-certificate path is
-  retained only for pinned migration and diagnostics.
+  and persists only the trusted peer record. Each app loads or locally enrolls
+  its own P-256 private key and certificate in Keychain, then assembles the
+  `SecIdentity` used by Network.framework. The debug-only PKCS#12 provisioning
+  path remains for physical smoke diagnostics. No peer private key is
+  exchanged; the optional public-certificate path is retained only for pinned
+  migration and diagnostics.
 - Cross-cutting diagnostics use a narrow structured logging interface. They do
   not pass raw clipboard text, secrets, or full captured frames.
 

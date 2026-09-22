@@ -2689,6 +2689,83 @@ final class TransportCoreTests: XCTestCase {
         XCTAssertFalse(snapshot.indicators.contains(.paired))
     }
 
+    func testSessionCapabilityProjectionExposesPartialInputCapabilitiesAndMatchingWindow() throws {
+        let identity = try PeerIdentity(publicKeyRepresentation: Data("m10-capabilities".utf8))
+        let base = SessionSnapshot(
+            state: .windowSelectionAuthorized,
+            peerIdentity: identity,
+            negotiatedCapabilities: [.mouseInput, .keyboardInput, .textClipboard],
+            authorized: true,
+            authorizedWindowGeneration: 4,
+            authorizedCapabilities: [.mouseInput],
+            reconnectGeneration: 0,
+            lastHeartbeatAt: nil
+        )
+
+        XCTAssertTrue(
+            SessionCapabilityProjection.inputReady(
+                for: base,
+                selectedWindowGeneration: 4,
+                selectedStreamGeneration: 4
+            )
+        )
+        XCTAssertEqual(
+            SessionCapabilityProjection.inputAvailability(
+                for: base,
+                selectedWindowGeneration: 4,
+                selectedStreamGeneration: 4
+            ),
+            SessionInputAvailability(mouseInputEnabled: true, keyboardInputEnabled: false)
+        )
+        XCTAssertFalse(
+            SessionCapabilityProjection.inputReady(
+                for: base,
+                selectedWindowGeneration: 3,
+                selectedStreamGeneration: 4
+            )
+        )
+        XCTAssertEqual(
+            SessionCapabilityProjection.inputAvailability(
+                for: base,
+                selectedWindowGeneration: 3,
+                selectedStreamGeneration: 4
+            ),
+            .none
+        )
+        XCTAssertFalse(SessionCapabilityProjection.clipboardAvailable(for: base))
+
+        let fullyAuthorized = SessionSnapshot(
+            state: base.state,
+            peerIdentity: base.peerIdentity,
+            negotiatedCapabilities: base.negotiatedCapabilities,
+            authorized: base.authorized,
+            authorizedWindowGeneration: base.authorizedWindowGeneration,
+            authorizedCapabilities: [.mouseInput, .keyboardInput, .textClipboard],
+            reconnectGeneration: base.reconnectGeneration,
+            lastHeartbeatAt: base.lastHeartbeatAt
+        )
+        XCTAssertTrue(
+            SessionCapabilityProjection.inputReady(
+                for: fullyAuthorized,
+                selectedWindowGeneration: 4,
+                selectedStreamGeneration: 4
+            )
+        )
+        XCTAssertTrue(SessionCapabilityProjection.clipboardAvailable(for: fullyAuthorized))
+
+        let unauthorized = SessionSnapshot(
+            state: base.state,
+            peerIdentity: base.peerIdentity,
+            negotiatedCapabilities: base.negotiatedCapabilities,
+            authorized: false,
+            authorizedWindowGeneration: nil,
+            authorizedCapabilities: fullyAuthorized.authorizedCapabilities,
+            reconnectGeneration: base.reconnectGeneration,
+            lastHeartbeatAt: base.lastHeartbeatAt
+        )
+        XCTAssertFalse(SessionCapabilityProjection.clipboardAvailable(for: unauthorized))
+    }
+
     private func makeVideoEnvelope(sequence: UInt64, keyframe: Bool) throws -> Envelope {
         try Envelope(
             message: .videoFrame(

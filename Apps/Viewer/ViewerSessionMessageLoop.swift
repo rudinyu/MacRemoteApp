@@ -11,6 +11,7 @@ final class ViewerSessionMessageLoop {
     private let onMessage: @MainActor (MessagePayload) async -> Void
     private var task: Task<Void, Never>?
     private var lifecycleTask: Task<Void, Never>?
+    var onClipboardStatusChange: (@MainActor () -> Void)?
 
     init(
         session: SessionCoordinator,
@@ -19,6 +20,9 @@ final class ViewerSessionMessageLoop {
         self.session = session
         self.clipboardController = ViewerClipboardSessionController(session: session)
         self.onMessage = onMessage
+        clipboardController.onStatusChange = { [weak self] in
+            self?.onClipboardStatusChange?()
+        }
     }
 
     var clipboardStatus: ClipboardSyncStatus {

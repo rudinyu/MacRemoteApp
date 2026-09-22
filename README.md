@@ -10,8 +10,9 @@ Host; this is deliberately not a full remote-desktop product.
 The M0 Repository Foundation and M1 RemoteProtocol wire contract are complete.
 The Host target is validated for both `x86_64` and `arm64` builds; the V1
 physical Host target remains Intel, while the Viewer target is Apple Silicon.
-The M2 secure LAN session implementation, PKCS#12/Keychain identity
-provisioning, and real loopback mutual-TLS/session smoke test are complete.
+The M2 secure LAN session implementation, local Keychain identity enrollment,
+PKCS#12 diagnostic provisioning, and real loopback mutual-TLS/session smoke
+test are complete.
 The repository now includes a repeatable physical Intel Host to Apple Silicon
 Viewer Bonjour/TLS/capability smoke harness, signed app/DMG packaging, and
 role-specific install/uninstall scripts;
@@ -42,6 +43,13 @@ Host windows in a picker so a system/helper window is not selected silently.
 The interactive pairing UI is implemented with Keychain trust reuse. The
 actual Intel-to-Apple-Silicon run and OS Accessibility/input evidence remain
 environment gates until they are executed on both Macs.
+
+The user-facing documents are [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md),
+[`docs/DEBUGGING.md`](docs/DEBUGGING.md), and
+[`docs/DEBUG_LOG_COLLECTION.md`](docs/DEBUG_LOG_COLLECTION.md). The DMG
+packaging flow puts plain-text copies of all three documents beside the
+role-specific install and uninstall commands in every newly generated Host and
+Viewer DMG.
 
 The repository root is:
 
@@ -80,6 +88,9 @@ MacRemoteApp/
     ├── M9_SECURITY_RELEASE.md
     ├── M10_ACCEPTANCE.md
     ├── POST_V1_ROADMAP.md
+    ├── USER_GUIDE.md
+    ├── DEBUGGING.md
+    ├── DEBUG_LOG_COLLECTION.md
     ├── PRODUCT_SPEC.md
     ├── PROTOCOL.md
     └── SECURITY.md
@@ -116,21 +127,40 @@ files, and run the two-machine Bonjour/TLS smoke. `scripts/package-device-apps.s
 also creates local signed role-specific DMGs under
 `build/testing/`; this package-only output is not a
 notarized distribution. `scripts/release-notarized.sh` is the required final
-test path: it runs the repository validation (`.codex/ci.sh` when available,
-otherwise `scripts/validate.sh`), signs, submits, staples, and validates the
+test path: it runs the canonical `scripts/validate.sh` validation directly,
+then signs, submits, staples, and validates the
 notarized apps and DMGs. Its default output is the repository-local
 `build/release/` directory, outside `.build`. Local artifacts are organized as
 `build/testing/`, `build/beta/`, `build/rc/`, and `build/release/`; the
 `build/` tree is excluded through the checkout-local `.git/info/exclude`
 (configured automatically by the packaging script) and must never be staged or
-pushed to GitHub. The flow stages a new release beside the selected channel
-and promotes it only after notarization validation succeeds, preserving the
-previous channel output if a run fails. Pass `beta` or `rc` to
+pushed to GitHub. The release flow acquires a repository-local kernel-backed
+`lockf` file lock and removes the repository `.build` cache before deterministic
+validation. The operating system releases the advisory lock when the process
+ends, so an interrupted run does not leave a PID/reclaim race; unexpected
+directory or symlink lock paths fail closed. The
+existing selected channel remains available while signing and notarization run;
+the new release is staged beside it and promoted only after notarization
+validation succeeds. A failed run before promotion leaves the existing channel
+untouched; a failure during promotion restores the previous known-good channel.
+The selected channel is protected by a repository-local `lockf` file lock, and
+`MACREMOTEAPP_RELEASE_ROOT` must match that channel; concurrent release
+runs and cross-channel promotion are rejected. Pass `beta` or `rc` to
 `scripts/release-notarized.sh` to target those channels.
 The lower-level `scripts/notarize-device-apps.sh` remains available for the
-notarization step itself and accepts only an absent or empty output directory.
+notarization step itself and accepts only an absent or empty controlled staging
+directory; it refuses direct writes to `build/beta`, `build/rc`, and
+`build/release`, which require the lock-protected promotion flow.
+Both notarization entry points pass the named Keychain profile directly to
+each `notarytool submit`; the submit operation is the authoritative profile
+check for the actual release path. `scripts/check-notary-profile.sh` remains
+an optional history-based diagnostic, but it is not a release gate because a
+Codex runner may reject the separate `history` operation even when the actual
+submit path can read the profile.
 `scripts/install-device-apps.sh` and `scripts/uninstall-device-apps.sh` manage
-the exact app bundles in `~/Applications`. To remove ad-hoc testing residue,
+the exact app bundles in `~/Applications`. Newly generated DMGs also include
+the User Guide, How to Debug, and How to Collect Debug Logs text files. To
+remove ad-hoc testing residue,
 run `scripts/uninstall-device-apps.sh --clean-testing --yes`; add
 `--identities "$HOME/MacRemoteApp-identities"` when that disposable M2
 identity directory and its matching imported Keychain identities should also
@@ -155,9 +185,11 @@ release payload and never submits credentials or uploads artifacts.
 ## M10 production pilot
 
 The installed Host and Viewer binaries start their production runtime when
-launched without debug-only smoke arguments. They require a provisioned
-Keychain identity. On the first connection, omit `MACREMOTEAPP_PEER_CERT` to
-use the interactive Host/Viewer pairing flow:
+launched without debug-only smoke arguments. On first launch, each endpoint
+creates or reuses its own P-256 TLS identity in the login Keychain. No
+`host.p12` or `viewer.p12` is required for the production path. On the first
+connection, omit `MACREMOTEAPP_PEER_CERT` to use the interactive Host/Viewer
+pairing flow:
 
 ```bash
 open ~/Applications/MacRemoteApp-Host.app
@@ -167,17 +199,24 @@ open ~/Applications/MacRemoteApp-Viewer.app
 The Host displays a one-time code and asks for local approval; the Viewer
 displays the same code and asks the operator to enter it. Both endpoints store
 the resulting peer identity in the Keychain only after local and remote
-consent complete. `MACREMOTEAPP_PEER_CERT` remains an optional pinned-peer
+consent complete. The Host requests Screen Recording at startup, then requests
+Accessibility/post-event input permission from its signed app bundle only
+after a Viewer negotiates input and the operator selects a window; without
+input permission it remains view-only. After the Host authorizes text clipboard for
+the session, the Viewer exposes an explicit clipboard opt-in toggle.
+`MACREMOTEAPP_PEER_CERT` remains an optional pinned-peer
 migration/diagnostic mode; it is not required for new installations.
 
-Debug builds may load a PKCS#12 identity through the existing
+Debug-only smoke builds may load a PKCS#12 identity through the existing
 `MACREMOTEAPP_LOCAL_IDENTITY_P12` and `MACREMOTEAPP_P12_PASSWORD` test
-workflow; those variables are not compiled into release behavior. The current
-pilot uses the existing one-window selection protocol and a Viewer picker; the
-Host remains authoritative and validates the selected generation. Use
+workflow; those variables are not required for, or used by, normal release
+launches. The current pilot uses the existing one-window selection protocol and
+a Viewer picker; the Host remains authoritative and validates the selected
+generation. Use
 [`docs/M10_ACCEPTANCE.md`](docs/M10_ACCEPTANCE.md) for the
-required permissions, local identity provisioning, pairing flow, and physical
-evidence; a successful local build is not a two-Mac acceptance result. Future
+required permissions, automatic local identity enrollment, pairing flow, and
+physical evidence; a successful local build is not a two-Mac acceptance
+result. Future
 capabilities are recorded in
 [`docs/POST_V1_ROADMAP.md`](docs/POST_V1_ROADMAP.md).
 

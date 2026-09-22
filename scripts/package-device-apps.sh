@@ -21,6 +21,80 @@ if [[ -L "${artifact_root}" || ( -e "${artifact_root}" && ! -d "${artifact_root}
     exit 2
 fi
 mkdir -p -- "${artifact_root}"
+if [[ "${build_root}" != /* ]]; then
+    build_root="${repo_root}/${build_root}"
+fi
+build_base="${repo_root}/.build"
+if [[ -L "${build_base}" || ( -e "${build_base}" && ! -d "${build_base}" ) ]]; then
+    echo "Refusing to use a non-directory or symlink build base: ${build_base}" >&2
+    exit 2
+fi
+mkdir -p -- "${build_base}"
+build_base="$(cd -P -- "${build_base}" && pwd -P)"
+if [[ "${build_base}" != "${repo_root}/.build" ]]; then
+    echo "MACREMOTEAPP_RELEASE_BUILD_ROOT must resolve inside the repository .build directory: ${build_root}" >&2
+    exit 2
+fi
+
+case "${build_root}" in
+    "${build_base}/"*)
+        ;;
+    *)
+        echo "MACREMOTEAPP_RELEASE_BUILD_ROOT must be a repository-local .build descendant: ${build_root}" >&2
+        exit 2
+        ;;
+esac
+if [[ -L "${build_root}" || ( -e "${build_root}" && ! -d "${build_root}" ) ]]; then
+    echo "Refusing to use a non-directory or symlink build root: ${build_root}" >&2
+    exit 2
+fi
+
+# Resolve the nearest existing parent before mkdir/rm. A missing path beneath
+# an existing symlink would otherwise pass the lexical prefix check and make
+# the cleanup below follow that symlink outside the repository.
+build_parent="$(dirname -- "${build_root}")"
+existing_parent="${build_parent}"
+while [[ ! -e "${existing_parent}" && ! -L "${existing_parent}" ]]; do
+    next_parent="$(dirname -- "${existing_parent}")"
+    if [[ "${next_parent}" == "${existing_parent}" ]]; then
+        echo "Unable to resolve build-root parent: ${build_parent}" >&2
+        exit 2
+    fi
+    existing_parent="${next_parent}"
+done
+if [[ -L "${existing_parent}" || ! -d "${existing_parent}" ]]; then
+    echo "Refusing to follow a symlink or non-directory build-root parent: ${existing_parent}" >&2
+    exit 2
+fi
+existing_parent="$(cd -P -- "${existing_parent}" && pwd -P)"
+case "${existing_parent}" in
+    "${build_base}"|"${build_base}/"*)
+        ;;
+    *)
+        echo "MACREMOTEAPP_RELEASE_BUILD_ROOT must resolve inside the repository .build directory: ${build_root}" >&2
+        exit 2
+        ;;
+esac
+mkdir -p -- "${build_parent}"
+if [[ -L "${build_root}" || ( -e "${build_root}" && ! -d "${build_root}" ) ]]; then
+    echo "Refusing to use a non-directory or symlink build root: ${build_root}" >&2
+    exit 2
+fi
+build_name="$(basename -- "${build_root}")"
+if [[ "${build_name}" == "." || "${build_name}" == ".." || -z "${build_name}" ]]; then
+    echo "MACREMOTEAPP_RELEASE_BUILD_ROOT must name a dedicated directory: ${build_root}" >&2
+    exit 2
+fi
+build_parent="$(cd -P -- "${build_parent}" && pwd -P)"
+build_root="${build_parent}/${build_name}"
+case "${build_root}" in
+    "${build_base}/"*)
+        ;;
+    *)
+        echo "MACREMOTEAPP_RELEASE_BUILD_ROOT must resolve inside the repository .build directory: ${build_root}" >&2
+        exit 2
+        ;;
+esac
 if [[ "${release_root}" != /* ]]; then
     release_root="${repo_root}/${release_root}"
 fi
@@ -50,6 +124,8 @@ case "${release_root}" in
     "${repo_root}/build/testing")
         ;;
     "${repo_root}/build/beta"|"${repo_root}/build/rc"|"${repo_root}/build/release")
+        echo "Refusing to write a formal channel directly; use scripts/release-notarized.sh for replacement-safe notarized promotion: ${release_root}" >&2
+        exit 2
         ;;
     "${repo_root}/build/MacRemoteApp-"*.staging.*)
         ;;
@@ -59,6 +135,10 @@ case "${release_root}" in
         echo "MACREMOTEAPP_RELEASE_ROOT must be a build channel or an isolated .build descendant: ${release_root}" >&2
         exit 2
         ;;
+    *)
+        echo "MACREMOTEAPP_RELEASE_ROOT must be a repository-local build channel or isolated .build descendant: ${release_root}" >&2
+        exit 2
+        ;;
 esac
 case "${repo_root}" in
     "${release_root}"/*)
@@ -66,7 +146,22 @@ case "${repo_root}" in
         exit 2
         ;;
 esac
-rm -rf -- "${release_root}"
+
+signing_identity="${MACREMOTEAPP_SIGNING_IDENTITY:-}"
+if [[ -z "${signing_identity}" ]]; then
+    signing_identity="-"
+fi
+require_developer_id=0
+if [[ "${MACREMOTEAPP_REQUIRE_DEVELOPER_ID:-0}" == "1" ]]; then
+    require_developer_id=1
+    if [[ "${signing_identity}" == "-" ]]; then
+        echo "This release path requires a Developer ID Application identity; ad-hoc signing is not allowed." >&2
+        exit 2
+    fi
+fi
+
+echo "Removing previous build output before building ${release_root}"
+rm -rf -- "${release_root}" "${build_root}"
 mkdir -p -- "${release_root}"
 
 build_target() {
@@ -156,10 +251,8 @@ package_app \
     "${viewer_binary}" \
     "${repo_root}/Resources/Viewer-Info.plist"
 
-signing_identity="${MACREMOTEAPP_SIGNING_IDENTITY:-}"
-if [[ -z "${signing_identity}" ]]; then
-    signing_identity="-"
-    echo "MACREMOTEAPP_SIGNING_IDENTITY is unset; using ad-hoc signing." >&2
+if [[ "${signing_identity}" == "-" ]]; then
+    echo "MACREMOTEAPP_SIGNING_IDENTITY=-; using ad-hoc signing for local validation." >&2
     echo "For stable macOS TCC identity, set it to a Developer ID Application certificate." >&2
 fi
 
@@ -176,6 +269,17 @@ do
         --sign "${signing_identity}" \
         "${timestamp_arguments[@]}" "${app_dir}"
     codesign --verify --deep --strict "${app_dir}"
+    if (( require_developer_id )); then
+        signature_info="$(codesign --display --verbose=4 "${app_dir}" 2>&1)"
+        if ! printf '%s\n' "${signature_info}" | grep -Eq 'Authority=Developer ID Application:'; then
+            echo "Formal release packaging requires a Developer ID Application signature: ${app_dir}" >&2
+            exit 1
+        fi
+        if ! printf '%s\n' "${signature_info}" | grep -Eq 'flags=.*runtime'; then
+            echo "Formal release packaging requires the hardened runtime: ${app_dir}" >&2
+            exit 1
+        fi
+    fi
 done
 
 ditto -c -k --keepParent \

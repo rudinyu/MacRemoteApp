@@ -16,9 +16,10 @@ Options:
   --role host|viewer|both       Remove one role or both (default: inferred/both)
   --destination DIRECTORY       Application directory to inspect
   --clean-testing               Also remove build/testing and .build, reset
-                                MacRemoteApp Host TCC grants, remove the app's
-                                trust/device identity Keychain items; imported
-                                M2 identities are removed only when
+                                Host Screen Recording/Accessibility and
+                                Host/Viewer Local Network TCC grants, remove
+                                the app's trust/device identity Keychain items;
+                                imported M2 identities are removed only when
                                 --identities is supplied
   --identities DIRECTORY        Dedicated external MacRemoteApp-identities
                                 directory containing generated M2 files;
@@ -192,7 +193,7 @@ if (( dry_run )); then
     if (( clean_testing )); then
         echo "Dry run: would remove ${repo_root}/build/testing"
         echo "Dry run: would remove ${repo_root}/.build"
-        echo "Dry run: would reset Host Screen Recording and Accessibility TCC grants"
+        echo "Dry run: would reset Host Screen Recording/Accessibility and Host/Viewer Local Network TCC grants"
         echo "Dry run: would remove MacRemoteApp trust/device identity Keychain items"
         [[ -n "${identity_dir}" ]] && echo "Dry run: would remove generated files and the empty ${identity_dir}"
     fi
@@ -214,7 +215,7 @@ if (( ! confirm )); then
             printf '%s\n' 'Also clean repository testing state:'
             printf '  %s\n' "${repo_root}/build/testing"
             printf '  %s\n' "${repo_root}/.build"
-            printf '  Host Screen Recording and Accessibility TCC grants'
+            printf '  Host Screen Recording/Accessibility and Host/Viewer Local Network TCC grants'
             printf '\n  MacRemoteApp trust/device identity Keychain items\n'
             [[ -n "${identity_dir}" ]] && printf '  %s\n' "${identity_dir}"
         fi
@@ -314,6 +315,14 @@ if (( clean_testing )); then
             echo "Reset Host ${service} TCC grant"
         else
             echo "Warning: unable to reset Host ${service} TCC grant; check macOS Privacy settings." >&2
+            cleanup_failure=1
+        fi
+    done
+    for bundle_id in com.rudinyu.MacRemoteApp.Host com.rudinyu.MacRemoteApp.Viewer; do
+        if tccutil reset LocalNetwork "${bundle_id}" >/dev/null 2>&1; then
+            echo "Reset ${bundle_id} LocalNetwork TCC grant"
+        else
+            echo "Warning: unable to reset ${bundle_id} LocalNetwork TCC grant; check macOS Privacy settings." >&2
             cleanup_failure=1
         fi
     done

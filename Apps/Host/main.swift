@@ -3,9 +3,15 @@ import Darwin
 import CaptureCore
 import CodecCore
 import InputCore
+import os
 import RemoteProtocol
 import SecurityCore
 import TransportCore
+
+let macRemoteAppStartupLogger = Logger(
+    subsystem: "com.rudinyu.MacRemoteApp",
+    category: "startup"
+)
 
 @main
 struct HostApp {
@@ -100,6 +106,12 @@ struct HostApp {
                 }
             }
         } catch {
+            await MainActor.run {
+                presentHostStartupFailure(error)
+            }
+            macRemoteAppStartupLogger.error(
+                "MacRemoteApp Host startup failed (code: \(hostStartupErrorCode(error), privacy: .public))"
+            )
             fputs("MacRemoteApp Host failed: \(error)\n", stderr)
             exit(EXIT_FAILURE)
         }
@@ -135,6 +147,7 @@ struct HostApp {
 private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
     private let runtime: HostRuntime
     private var runtimeTask: Task<Void, Never>?
+    private var statusItem: NSStatusItem?
     private var terminationRequested = false
 
     init(runtime: HostRuntime) {
@@ -144,10 +157,15 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
+        installStatusItem()
         runtimeTask = Task { [runtime] in
             do {
                 try await runtime.run()
             } catch {
+                presentHostStartupFailure(error)
+                macRemoteAppStartupLogger.error(
+                    "MacRemoteApp Host startup failed (code: \(hostStartupErrorCode(error), privacy: .public))"
+                )
                 fputs("MacRemoteApp Host failed: \(error)\n", stderr)
                 await runtime.stop()
                 NSApplication.shared.stop(nil)
@@ -171,4 +189,97 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         }
         return .terminateLater
     }
+
+    private func installStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.title = "MacRemoteApp Host"
+        item.button?.toolTip = "MacRemoteApp Host — listening for a paired Viewer"
+        if let iconURL = Bundle.main.url(forResource: "MacRemoteAppIcon", withExtension: "icns"),
+           let image = NSImage(contentsOf: iconURL) {
+            image.isTemplate = true
+            image.size = NSSize(width: 18, height: 18)
+            item.button?.image = image
+            item.button?.imagePosition = .imageOnly
+        }
+
+        let menu = NSMenu()
+        let status = NSMenuItem(title: "Host is running", action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        menu.addItem(status)
+        menu.addItem(.separator())
+
+        let stopItem = NSMenuItem(
+            title: "Stop session and quit",
+            action: #selector(stopSessionAndQuit),
+            keyEquivalent: "q"
+        )
+        stopItem.target = self
+        menu.addItem(stopItem)
+        item.menu = menu
+        statusItem = item
+    }
+
+    @objc private func stopSessionAndQuit() {
+        NSApplication.shared.terminate(nil)
+    }
+}
+
+@MainActor
+private func presentHostStartupFailure(_ error: Error) {
+    let isPermissionFailure: Bool
+    let message: String
+    if let runtimeError = error as? HostRuntimeError {
+        switch runtimeError {
+        case .permission:
+            isPermissionFailure = true
+            message = "Screen Recording permission is required. Open Privacy & Security > Screen Recording, enable MacRemoteApp Host, then relaunch the Host."
+        case .configuration:
+            isPermissionFailure = false
+            message = "The Host configuration is invalid. Check the documented configuration and relaunch the app."
+        default:
+            isPermissionFailure = false
+            message = "The Host could not start. Check the debug guide for a safe recovery path."
+        }
+    } else if error is SecurityCoreError {
+        isPermissionFailure = false
+        message = "The Host could not enroll its local Keychain identity. Check Keychain access and relaunch the app."
+    } else {
+        isPermissionFailure = false
+        message = "The Host could not start. Check the debug guide for a safe recovery path."
+    }
+
+    NSApplication.shared.setActivationPolicy(.accessory)
+    NSApplication.shared.activate(ignoringOtherApps: true)
+    let alert = NSAlert()
+    alert.alertStyle = .critical
+    alert.messageText = "MacRemoteApp Host could not start"
+    alert.informativeText = message
+    if isPermissionFailure {
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Quit")
+        if alert.runModal() == .alertFirstButtonReturn,
+           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
+    } else {
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+}
+
+private func hostStartupErrorCode(_ error: Error) -> String {
+    if let runtimeError = error as? HostRuntimeError {
+        switch runtimeError {
+        case .configuration: return "configuration"
+        case .permission: return "permission"
+        case .sessionEnded: return "session-ended"
+        case .sessionTimedOut: return "session-timeout"
+        case .pairingTimedOut: return "pairing-timeout"
+        case .staleWindowGeneration: return "stale-window"
+        }
+    }
+    if error is SecurityCoreError {
+        return "security"
+    }
+    return "unknown"
 }

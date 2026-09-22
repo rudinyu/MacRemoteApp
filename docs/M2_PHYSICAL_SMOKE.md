@@ -41,8 +41,11 @@ the repository `.build` cache after success. Local artifacts use
 `build/testing/`, `build/beta/`, `build/rc/`, and `build/release/`; the whole
 `build/` tree is excluded through the checkout-local `.git/info/exclude`
 (configured automatically by the packaging script) and must not be staged or
-pushed. Deterministic CI and M10 validation use temporary build roots and do
-not overwrite that notarized directory.
+pushed. The release lock is acquired and the repository `.build` cache is
+removed before deterministic validation. The selected channel remains in place
+while the new release is built and notarized beside it; only after final
+validation is it promoted into the channel. A failure before promotion leaves
+the old channel intact, while a failure during promotion restores it.
 
 For stable macOS TCC identity, use a Developer ID Application certificate. Do
 not put the certificate name in the repository; pass it only in the shell:
@@ -60,6 +63,18 @@ notarized flow instead:
 ./scripts/release-notarized.sh
 ```
 
+The release flow validates the Keychain profile through its actual
+`notarytool submit` calls. To run the optional history-based diagnostic
+separately, use the same logged-in macOS session and run:
+
+```sh
+bash scripts/check-notary-profile.sh \
+  "${MACREMOTEAPP_NOTARY_PROFILE:-notarytool-profile}"
+```
+
+The profile name and its credentials remain in Keychain; the repository never
+stores them.
+
 For a compile-only local bundle, omit the variable and the script will use
 ad-hoc signing. Ad-hoc output is suitable for protocol smoke development but
 can cause macOS privacy permission identity to reset when the app changes.
@@ -76,7 +91,11 @@ After `scripts/release-notarized.sh`, use the files in the repository-local
 The DMG contains the role-specific `Install-MacRemoteApp-*.command` and
 `Uninstall-MacRemoteApp-*.command` files. From a release directory, the same
 workflow is available with `scripts/install-device-apps.sh`; it installs into
-`~/Applications` by default and verifies the app signature before copying.
+`~/Applications` by default and requires a stapled, Developer ID-signed app
+that Gatekeeper accepts before and after installation. This prevents an old
+ad-hoc/testing bundle from being installed accidentally. For an explicitly
+local ad-hoc test only, add `--allow-ad-hoc`; do not use that option for the
+two-machine acceptance run.
 Use `scripts/uninstall-device-apps.sh --role host --yes` or the corresponding
 Viewer command to remove only the selected app bundle. To clean all disposable
 ad-hoc testing residue after the smoke, run this from the repository checkout:
@@ -92,11 +111,12 @@ Use `--dry-run` first to inspect the exact cleanup plan without changing the
 system.
 
 That command removes `build/testing/`, `.build`, the installed Host/Viewer
-bundles, the Host Screen Recording/Accessibility grants, MacRemoteApp trust
-and device-identity Keychain items, plus only the imported M2 identities whose
-fingerprints match the explicitly named generated identity material present on
-that Mac. Because the physical workflow keeps the local `.p12` and only the
-opposite `.cer`, export `MACREMOTEAPP_P12_PASSWORD` for this cleanup command
+bundles, the Host Screen Recording/Accessibility and Host/Viewer Local Network
+grants, MacRemoteApp trust and generated local TLS/device-identity Keychain
+items, plus only the
+imported M2 identities whose fingerprints match the explicitly named generated
+identity material present on that Mac. Because the physical workflow keeps the
+local `.p12` and only the opposite `.cer`, export `MACREMOTEAPP_P12_PASSWORD` for this cleanup command
 so the local identity can be fingerprinted without printing the password. If
 the password or certificate check fails, the generated identity directory is
 preserved for a safe retry. It preserves `build/beta/`, `build/rc/`, and

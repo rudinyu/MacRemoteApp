@@ -13,15 +13,18 @@ and defaults to `notarytool-profile`; profile credentials never enter the
 repository or validation logs. Deterministic CI packages are isolated under
 `.build/` while the run is active and are removed after a successful CI run;
 they are never treated as distributable release output. The complete local
-release gate is `scripts/release-notarized.sh`: it runs the repository
-validation first, writes final notarized artifacts to the repository-local
+release gate is `scripts/release-notarized.sh`: it acquires the release lock and
+removes the repository `.build` cache before deterministic validation, then
+writes final notarized artifacts to the repository-local
 `build/release/` directory by default, then removes the recreated `.build`
 cache after success. Local artifacts are organized under
 `build/testing/`, `build/beta/`, `build/rc/`, and `build/release/`; the whole
 `build/` tree is excluded through the checkout-local `.git/info/exclude`
 (configured automatically by the packaging script) and is never a GitHub
-artifact. It stages and validates the new release before replacing an
-existing channel directory.
+artifact. The existing selected channel remains in place while the new release
+is staged, signed, and notarized beside it. It is promoted only after final
+validation; a failure before promotion leaves the old channel intact, while a
+failure during promotion restores it.
 When `MACREMOTEAPP_CI_NOTARIZED_RELEASE_ROOT` is supplied, CI directly
 validates that existing external notarized release without rebuilding or
 replacing it.
@@ -46,19 +49,36 @@ replacing it.
   configuration. Release binaries do not contain those command markers.
 - Release app bundles are signed with the hardened runtime. Developer ID
   signing is selected through `MACREMOTEAPP_SIGNING_IDENTITY`; ad-hoc signing
-  is allowed only for local validation and is not a distribution claim.
+  is allowed only for `build/testing` and isolated validation output; the
+  `build/beta`, `build/rc`, and `build/release` channels reject ad-hoc output.
+  Packaging and notarization output is restricted to repository-local build
+  channels or controlled staging directories, so a path such as `Downloads`,
+  `Documents`, or `/` cannot be recursively replaced. The release script also
+  requires `MACREMOTEAPP_RELEASE_ROOT` to match the selected channel and holds
+  a kernel-backed `lockf` repository-local file lock across CI, notarization,
+  `.build` cleanup, rollback, and promotion. The operating system releases the
+  advisory lock when the process ends, so an interrupted run cannot leave a
+  PID/reclaim race; unexpected directory or symlink lock paths fail closed.
 - `scripts/create-device-dmgs.sh` creates one DMG per role, includes the
   signed app and role-specific install/uninstall command files, and signs the
-  DMG with the same identity. The shell scripts are not standalone code
-  signing objects; their copies are covered by the signed DMG and are
-  syntax-checked before release.
-- `scripts/install-device-apps.sh` verifies the app signature before copying
-  an app atomically into `~/Applications` by default. It refuses to replace
-  an existing app non-interactively unless `--replace` is supplied.
+  DMG with the same identity. It also includes the User Guide, debugging guide,
+  and debug-log collection guide, plus a SHA-256 payload manifest. The shell
+  scripts are not standalone code signing objects; their copies and guides are
+  covered by the signed DMG and are checked against the embedded manifest before
+  release.
+- `scripts/install-device-apps.sh` verifies the source and final installed app
+  with `codesign` and Gatekeeper before copying a notarized app atomically into
+  `~/Applications` by default. It does not require Xcode or Command Line Tools
+  on the target Mac; stapled-ticket validation remains in the release audit.
+  It refuses to replace an existing app non-interactively unless `--replace`
+  is supplied.
+  Ad-hoc testing output requires the explicit `--allow-ad-hoc` opt-in and is
+  never accepted by the DMG install path by default.
 - `scripts/uninstall-device-apps.sh` removes only the exact selected app
   bundle paths and requires confirmation for non-interactive removal. Its
   explicit `--clean-testing --yes` mode also removes `build/testing/`, `.build`,
-  the Host TCC grants, MacRemoteApp trust/device-identity Keychain items, and
+  the Host Screen Recording/Accessibility and Host/Viewer Local Network TCC
+  grants, MacRemoteApp trust/device-identity Keychain items, and
   only the imported M2 identities whose fingerprints match generated identity
   material present in an explicitly named M2 identity directory; beta, RC, and
   release artifacts are preserved. On a device that retains only its local
@@ -69,20 +89,48 @@ replacing it.
 - `scripts/notarize-device-apps.sh` requires a Developer ID identity, submits
   both app archives and both DMGs with `xcrun notarytool --keychain-profile`,
   staples the tickets, validates them, and refreshes the distributable
-  archives. It does not create, print, or store Keychain credentials.
+  archives. It refuses direct writes to `build/beta`, `build/rc`, or
+  `build/release`; those channels can only be promoted through the
+  lock-protected `scripts/release-notarized.sh` flow. It does not create,
+  print, or store Keychain credentials.
+- `scripts/check-notary-profile.sh` is an optional history-based Keychain
+  diagnostic. It is not a release gate: the actual `notarytool submit`
+  operation used by the release flow is the authoritative profile check, and
+  a Codex runner may reject the separate `history` operation even when the
+  submit path can read the profile. A profile that works in a normal Terminal
+  session may still have different visibility for other Keychain operations;
+  that is an execution-context limitation, not evidence that an already
+  accepted DMG is invalid.
 - `scripts/validate-notarized-release.sh` validates an existing release's
   Developer ID signatures, stapled tickets, and Gatekeeper assessment without
-  submitting, signing, or replacing any artifact. Set
+  submitting, signing, or replacing any artifact. It also extracts and
+  compares each `.app.zip` with its validated app bundle, rejects extra archive
+  payloads, then validates the extracted stapled app. DMG payload checks use the
+  manifest embedded in each DMG rather than mutable checkout files. The release
+  audit also asserts a universal `arm64+x86_64` Host and an `arm64` Viewer. Set
   `MACREMOTEAPP_CI_NOTARIZED_RELEASE_ROOT` to use this direct validation path
   from `.codex/ci.sh`.
 - `get-task-allow` and dynamic-loader development entitlements are rejected by
   the release audit.
 - Private identity files are generated outside the repository and are rejected
-  if found inside a release artifact.
+  if found inside a release artifact. The audit covers `.p12`, `.p8`, `.key`,
+  and `.pem` files plus PEM/credential markers in tracked and untracked release
+  inputs.
+- App installation stages and verifies the replacement before moving it into
+  place, retaining a same-directory backup until the new app is installed
+  successfully and restoring it if the final move fails. A per-destination
+  kernel-backed `lockf` installer lock prevents concurrent recovery/cleanup; an
+  interrupted process releases the advisory lock automatically, and a later
+  installer run deterministically recovers an exact interrupted-install backup
+  before accepting another replacement. Unexpected directory or symlink lock
+  paths fail closed.
 - Clipboard text, raw input values, private keys, pairing secrets, pixels, and
   arbitrary underlying error strings are not release diagnostics.
-- Trust records remain in Keychain-backed `SecurityCore`; no file-based secret
-  store is added.
+- Trust records and locally generated TLS identity material remain in
+  Keychain-backed `SecurityCore`; no file-based secret store is added. The
+  repository cleanup path removes the default generated local identity along
+  with testing trust records, while normal uninstall leaves Keychain state for
+  an explicit clean/re-pair decision.
 
 ## Residual risks and owners
 

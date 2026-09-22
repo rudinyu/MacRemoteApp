@@ -259,10 +259,13 @@ artifacts. Physical acceptance remains an explicit gate; synthetic benchmark
 results and loopback tests do not establish Intel/Apple Silicon
 interoperability.
 
-The M10 runtime still requires each endpoint's own private identity to be
-provisioned in its local Keychain. It does not require copying the other
-endpoint's public certificate for normal pairing, and it never copies a
-private key between devices.
+The M10 runtime enrolls each endpoint's own private identity locally in its
+login Keychain on first use. `SecurityCore` generates a non-exportable P-256
+private key and a matching self-signed TLS certificate, then supplies the
+resulting `SecIdentity` to Network.framework. Normal pairing does not require
+an operator to import `host.p12`/`viewer.p12` or copy the other endpoint's
+certificate; peer trust is stored only after the existing two-sided pairing
+consent completes. A private key is never copied between devices.
 
 ## Security non-goals and residual risks
 
@@ -297,12 +300,14 @@ requires pairing again. Reconnect clears session authorization, window scope,
 capability scope, and channel sequence state.
 
 The local device key is retained by Keychain-backed `SecurityCore`; the TLS
-adapter receives a platform `SecIdentity` loaded from Keychain or imported
-from a PKCS#12 provisioning bundle. P-256 certificate and Network.framework
-peer-key representations are canonicalized before fingerprint comparison.
-Certificate enrollment policy, key-to-certificate continuity,
-reinstall/rotation behavior, locked-Keychain failure, and access-control
-configuration remain deployment-specific. The M5 environment has now passed
+adapter receives a platform `SecIdentity` loaded from Keychain or assembled
+from the locally generated Keychain key and certificate. PKCS#12 import is
+restricted to the explicit debug physical-smoke path. P-256 certificate and
+Network.framework peer-key representations are canonicalized before
+fingerprint comparison. Generated key/certificate continuity is fail-closed;
+missing or mismatched material is reported instead of silently rotating a
+trusted identity. Reinstall/rotation behavior, locked-Keychain failure, and
+access-control configuration remain deployment-specific. The M5 environment has now passed
 real loopback mutual-TLS/session startup with temporary identities; that is not
 evidence of physical Intel Host to Apple Silicon Viewer Bonjour/TLS
 interoperability, which remains an environment validation item. M6
