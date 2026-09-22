@@ -60,12 +60,15 @@ replacing it.
   advisory lock when the process ends, so an interrupted run cannot leave a
   PID/reclaim race; unexpected directory or symlink lock paths fail closed.
 - `scripts/create-device-dmgs.sh` creates one DMG per role, includes the
-  signed app and role-specific install/uninstall command files, and signs the
-  DMG with the same identity. It also includes the User Guide, debugging guide,
-  and debug-log collection guide, plus a SHA-256 payload manifest. The shell
-  scripts are not standalone code signing objects; their copies and guides are
-  covered by the signed DMG and are checked against the embedded manifest before
-  release.
+  signed app, a standard `Applications` alias, and minimal role-specific
+  install/uninstall command files, and signs the DMG with the same identity. It
+  also includes the User Guide, debugging guide, and debug-log collection guide,
+  plus a SHA-256 payload manifest. The DMG command files are double-click-only
+  user helpers; they do not expose CI, testing, ad-hoc, arbitrary-path, or
+  repository-cleanup controls. The repository-only scripts retain those
+  development functions. The shell scripts are not standalone code signing
+  objects; their copies and guides are covered by the signed DMG and are checked
+  against the embedded manifest before release.
 - `scripts/install-device-apps.sh` verifies the source and final installed app
   with `codesign` and Gatekeeper before copying a notarized app atomically into
   `~/Applications` by default. It does not require Xcode or Command Line Tools
@@ -73,7 +76,13 @@ replacing it.
   It refuses to replace an existing app non-interactively unless `--replace`
   is supplied.
   Ad-hoc testing output requires the explicit `--allow-ad-hoc` opt-in and is
-  never accepted by the DMG install path by default.
+  never accepted by the DMG install path. The DMG helper has no equivalent
+  option.
+- The DMG uninstall helper uses the same per-role lifecycle lock as the
+  installer, verifies the exact bundle identity, cryptographic signature,
+  pinned MacRemoteApp Developer ID publisher, and Gatekeeper acceptance before
+  moving the per-user app to `~/.Trash`. It rejects symlinked Applications or
+  Trash paths and never removes Keychain, TCC, or repository test state.
 - `scripts/uninstall-device-apps.sh` removes only the exact selected app
   bundle paths and requires confirmation for non-interactive removal. Its
   explicit `--clean-testing --yes` mode also removes `build/testing/`, `.build`,

@@ -225,7 +225,7 @@ enum M2PhysicalHostSmoke {
             }
         }
 
-        listener.start()
+        try await listener.startAndWaitForReadiness()
         print(
             "M\(clipboardOptIn ? 7 : 2) physical host listening as \(configuration.serviceName) " +
                 "on _macremote._tcp; waiting for a trusted Viewer"

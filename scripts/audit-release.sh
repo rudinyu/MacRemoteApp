@@ -20,6 +20,8 @@ verify_dmg_payload() {
     local manifest_path="${mount_point}/${manifest_name}"
     local expected_manifest="${audit_tmp_dir}/${app_name}.expected.sha256"
     local extra_entry
+    local applications_alias="${mount_point}/Applications"
+    local applications_alias_target
     local payload_status=0
 
     mkdir -p -- "${mount_point}"
@@ -40,10 +42,22 @@ verify_dmg_payload() {
         ! -name "MacRemoteApp-User-Guide.txt" \
         ! -name "MacRemoteApp-How-to-Debug.txt" \
         ! -name "MacRemoteApp-How-to-Collect-Debug-Logs.txt" \
+        ! -name "Applications" \
         ! -name "${manifest_name}" \
         -print -quit)"
     if [[ -n "${extra_entry}" ]]; then
         echo "Release audit failed: unexpected top-level payload ${extra_entry} in ${dmg_path}" >&2
+        payload_status=1
+    fi
+
+    if [[ -e "${applications_alias}" || -L "${applications_alias}" ]]; then
+        applications_alias_target="$(readlink "${applications_alias}" 2>/dev/null || true)"
+        if [[ ! -L "${applications_alias}" || "${applications_alias_target}" != "/Applications" ]]; then
+            echo "Release audit failed: Applications entry must be a symlink to /Applications in ${dmg_path}" >&2
+            payload_status=1
+        fi
+    else
+        echo "Release audit failed: standard Applications alias is missing from ${dmg_path}" >&2
         payload_status=1
     fi
 

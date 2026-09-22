@@ -105,6 +105,67 @@ case "${role}" in
         ;;
 esac
 
+bundle_identifier_for_app() {
+    case "$1" in
+        MacRemoteApp-Host)
+            printf '%s\n' 'com.rudinyu.MacRemoteApp.Host'
+            ;;
+        MacRemoteApp-Viewer)
+            printf '%s\n' 'com.rudinyu.MacRemoteApp.Viewer'
+            ;;
+        *)
+            echo "Unsupported MacRemoteApp role: $1" >&2
+            return 2
+            ;;
+    esac
+}
+
+validate_app_bundle() {
+    local app_path="$1"
+    local app_name="$2"
+    local info_plist="${app_path}/Contents/Info.plist"
+    local executable_path="${app_path}/Contents/MacOS/${app_name}"
+    local expected_bundle_identifier
+    local bundle_identifier
+    local bundle_executable
+
+    expected_bundle_identifier="$(bundle_identifier_for_app "${app_name}")"
+    if [[ -L "${info_plist}" || ! -f "${info_plist}" ||
+          -L "${executable_path}" || ! -f "${executable_path}" ]]; then
+        echo "Refusing to remove an incomplete ${app_name}.app bundle: ${app_path}" >&2
+        return 1
+    fi
+    bundle_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${info_plist}" 2>/dev/null || true)"
+    bundle_executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${info_plist}" 2>/dev/null || true)"
+    if [[ "${bundle_identifier}" != "${expected_bundle_identifier}" ||
+          "${bundle_executable}" != "${app_name}" ]]; then
+        echo "Refusing to remove a bundle with unexpected identity: ${app_path}" >&2
+        return 1
+    fi
+}
+
+terminate_running_app() {
+    local app_name="$1"
+    local bundle_identifier="$2"
+    local attempt
+
+    if ! pgrep -x "${app_name}" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "Requesting ${app_name} to quit before removal..."
+    osascript -e "tell application id \"${bundle_identifier}\" to quit" >/dev/null 2>&1 || true
+    for attempt in {1..50}; do
+        if ! pgrep -x "${app_name}" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    echo "${app_name} is still running; quit it and rerun the uninstall command." >&2
+    return 1
+}
+
 if [[ -n "${identity_dir}" && "${clean_testing}" -ne 1 ]]; then
     echo "--identities requires --clean-testing." >&2
     exit 2
@@ -179,6 +240,7 @@ for app_name in "${app_names[@]}"; do
         exit 1
     fi
     if [[ -d "${app_path}" ]]; then
+        validate_app_bundle "${app_path}" "${app_name}"
         targets+=("${app_path}")
     fi
 done
@@ -226,7 +288,9 @@ if (( ! confirm )); then
         fi
     else
         echo "Refusing non-interactive removal without --yes:" >&2
-        printf '  %s\n' "${targets[@]}" >&2
+        if (( ${#targets[@]} > 0 )); then
+            printf '  %s\n' "${targets[@]}" >&2
+        fi
         (( clean_testing )) && echo "  plus repository testing state: ${repo_root}" >&2
         exit 2
     fi
@@ -269,6 +333,14 @@ remove_generated_identity_files() {
         return 0
     fi
 
+    remaining="$(find "${directory}" -mindepth 1 -maxdepth 1 \
+        ! \( -name host.p12 -o -name host.cer -o -name viewer.p12 -o -name viewer.cer \) \
+        -print -quit)"
+    if [[ -n "${remaining}" ]]; then
+        echo "Refusing to remove non-generated contents from external M2 identities: ${remaining}" >&2
+        return 1
+    fi
+
     for file_name in host.p12 host.cer viewer.p12 viewer.cer; do
         file_path="${directory}/${file_name}"
         if [[ -L "${file_path}" ]]; then
@@ -288,11 +360,6 @@ remove_generated_identity_files() {
         fi
     done
 
-    remaining="$(find "${directory}" -mindepth 1 -maxdepth 1 -print -quit)"
-    if [[ -n "${remaining}" ]]; then
-        echo "Refusing to remove non-generated contents from external M2 identities: ${remaining}" >&2
-        return 1
-    fi
     if ! rmdir -- "${directory}"; then
         echo "Failed to remove empty external M2 identities directory: ${directory}" >&2
         return 1
@@ -300,10 +367,22 @@ remove_generated_identity_files() {
     echo "Removed external M2 identities directory: ${directory}"
 }
 
-for app_path in "${targets[@]}"; do
-    rm -rf -- "${app_path}"
-    echo "Removed ${app_path}"
-done
+if (( ${#targets[@]} > 0 )); then
+    for app_path in "${targets[@]}"; do
+        app_name="$(basename -- "${app_path}" .app)"
+        validate_app_bundle "${app_path}" "${app_name}"
+        terminate_running_app "${app_name}" "$(bundle_identifier_for_app "${app_name}")"
+        # Recheck after the quit wait so a replacement cannot turn the
+        # validated path into an unrelated directory before deletion.
+        validate_app_bundle "${app_path}" "${app_name}"
+        rm -rf -- "${app_path}"
+        if [[ -e "${app_path}" || -L "${app_path}" ]]; then
+            echo "Failed to remove ${app_path}" >&2
+            exit 1
+        fi
+        echo "Removed ${app_path}"
+    done
+fi
 
 if (( clean_testing )); then
     cleanup_failure=0

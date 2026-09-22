@@ -51,8 +51,8 @@ fi
     exit 1
 }
 
-install_script="${script_dir}/install-device-apps.sh"
-uninstall_script="${script_dir}/uninstall-device-apps.sh"
+install_script="${script_dir}/dmg-install.sh"
+uninstall_script="${script_dir}/dmg-uninstall.sh"
 user_guide="${repo_root}/docs/USER_GUIDE.md"
 debug_guide="${repo_root}/docs/DEBUGGING.md"
 log_guide="${repo_root}/docs/DEBUG_LOG_COLLECTION.md"
@@ -122,6 +122,7 @@ create_dmg() {
     rm -f -- "${dmg_path}"
     mkdir -p -- "${staging_dir}"
     ditto -- "${app_path}" "${staging_dir}/${app_name}.app"
+    ln -s /Applications "${staging_dir}/Applications"
     cp -- "${install_script}" "${staging_dir}/Install-MacRemoteApp-${role_name}.command"
     cp -- "${uninstall_script}" "${staging_dir}/Uninstall-MacRemoteApp-${role_name}.command"
     cp -- "${user_guide}" "${staging_dir}/MacRemoteApp-User-Guide.txt"

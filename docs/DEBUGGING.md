@@ -19,7 +19,8 @@ on the Viewer. A valid release app should be reported as accepted by
 Gatekeeper and should have a Developer ID signature. If `spctl` reports
 `rejected`, the installed bundle is normally an old ad-hoc/testing build or
 an app that was changed after signing. Reinstall from the latest notarized DMG
-with its role-specific Install command and `--replace`; the installer now
+using the standard `Applications` drag-and-drop flow, or use its role-specific
+Install command and confirm the interactive replacement prompt. The DMG helper
 rejects an ad-hoc or non-Gatekeeper-approved bundle before it can replace the
 installed app. Stapled-ticket validation is performed by the release validation
 script, not by the target Mac installer.
@@ -31,12 +32,13 @@ test.
 
 ## Check permissions and network
 
-The production Host requests Screen Recording through the signed app bundle
-and enrolls/reuses its local Keychain TLS identity before starting its Bonjour
-listener. Accessibility/post-event input access is requested only after a
-Viewer negotiates input and the operator selects a window. The Viewer
-enrolls/reuses its local identity before its Bonjour browser starts. Local
-Network access is therefore requested only after local identity setup succeeds.
+The production Host enrolls/reuses its local Keychain TLS identity, starts its
+signed Bonjour listener so macOS can request Local Network access, and then
+requests Screen Recording through the same app bundle. Accessibility/post-event
+input access is requested only after a Viewer negotiates input and the operator
+selects a window. The Viewer enrolls/reuses its local identity before its
+Bonjour browser starts. Local Network access is therefore requested only after
+local identity setup succeeds.
 Launch the bundles themselves:
 
 ```sh

@@ -88,10 +88,14 @@ After `scripts/release-notarized.sh`, use the files in the repository-local
 - Apple Silicon Mac: `MacRemoteApp-Viewer.app`, its zip, or
   `MacRemoteApp-Viewer.dmg`.
 
-The DMG contains the role-specific `Install-MacRemoteApp-*.command` and
-`Uninstall-MacRemoteApp-*.command` files. From a release directory, the same
-workflow is available with `scripts/install-device-apps.sh`; it installs into
-`~/Applications` by default and requires a stapled, Developer ID-signed app
+The DMG follows the standard drag-and-drop layout with an `Applications` alias
+and also contains optional role-specific `Install-MacRemoteApp-*.command` and
+`Uninstall-MacRemoteApp-*.command` helpers. The helpers are double-click-only
+user actions with no CI or testing options. The DMG installer and uninstaller
+accept only exact-identity apps from the MacRemoteApp Developer ID publisher
+that pass Gatekeeper checks. From a release directory, the
+repository-only workflow is available with `scripts/install-device-apps.sh`; it
+installs into `~/Applications` by default and requires a stapled, Developer ID-signed app
 that Gatekeeper accepts before and after installation. This prevents an old
 ad-hoc/testing bundle from being installed accidentally. For an explicitly
 local ad-hoc test only, add `--allow-ad-hoc`; do not use that option for the

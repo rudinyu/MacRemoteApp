@@ -366,8 +366,7 @@ done
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    original_args=("$@")
-    parse_args "${original_args[@]}"
+    parse_args "$@"
     normalize_destination
 
     install_lock="${destination}/.MacRemoteApp.install.lock"
@@ -387,7 +386,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
         shift
         source "${worker_script}"
         main "$@"
-    ' "${worker_invocation}" "${install_script}" "${original_args[@]}"
+    ' "${worker_invocation}" "${install_script}" "$@"
     then
         exit 0
     else

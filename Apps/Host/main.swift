@@ -158,9 +158,17 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
         installStatusItem()
+        // Host is an accessory app, but permission consent belongs to the
+        // signed application bundle rather than a shell or its terminal. Make
+        // the bundle active before the runtime reaches the TCC APIs so macOS
+        // can present Local Network and Screen Recording consent normally.
+        NSApplication.shared.activate(ignoringOtherApps: true)
         runtimeTask = Task { [runtime] in
             do {
                 try await runtime.run()
+            } catch is CancellationError {
+                await runtime.stop()
+                NSApplication.shared.stop(nil)
             } catch {
                 presentHostStartupFailure(error)
                 macRemoteAppStartupLogger.error(
@@ -227,24 +235,38 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 private func presentHostStartupFailure(_ error: Error) {
     let isPermissionFailure: Bool
+    let permissionSettingsURL: URL?
     let message: String
     if let runtimeError = error as? HostRuntimeError {
         switch runtimeError {
         case .permission:
             isPermissionFailure = true
+            permissionSettingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
             message = "Screen Recording permission is required. Open Privacy & Security > Screen Recording, enable MacRemoteApp Host, then relaunch the Host."
+        case .localNetwork:
+            isPermissionFailure = true
+            permissionSettingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork")
+            message = "Local Network access is required. Open Privacy & Security > Local Network, enable MacRemoteApp Host, then relaunch the Host."
+        case let .listener(listenerMessage):
+            isPermissionFailure = false
+            permissionSettingsURL = nil
+            message = listenerMessage
         case .configuration:
             isPermissionFailure = false
+            permissionSettingsURL = nil
             message = "The Host configuration is invalid. Check the documented configuration and relaunch the app."
         default:
             isPermissionFailure = false
+            permissionSettingsURL = nil
             message = "The Host could not start. Check the debug guide for a safe recovery path."
         }
     } else if error is SecurityCoreError {
         isPermissionFailure = false
+        permissionSettingsURL = nil
         message = "The Host could not enroll its local Keychain identity. Check Keychain access and relaunch the app."
     } else {
         isPermissionFailure = false
+        permissionSettingsURL = nil
         message = "The Host could not start. Check the debug guide for a safe recovery path."
     }
 
@@ -258,7 +280,7 @@ private func presentHostStartupFailure(_ error: Error) {
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Quit")
         if alert.runModal() == .alertFirstButtonReturn,
-           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+           let url = permissionSettingsURL {
             NSWorkspace.shared.open(url)
         }
     } else {
@@ -272,6 +294,8 @@ private func hostStartupErrorCode(_ error: Error) -> String {
         switch runtimeError {
         case .configuration: return "configuration"
         case .permission: return "permission"
+        case .localNetwork: return "local-network"
+        case .listener: return "listener"
         case .sessionEnded: return "session-ended"
         case .sessionTimedOut: return "session-timeout"
         case .pairingTimedOut: return "pairing-timeout"

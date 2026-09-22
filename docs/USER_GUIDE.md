@@ -15,17 +15,21 @@ the capability for the current paired session.
 
 1. Use `MacRemoteApp-Host.dmg` on the Intel Mac and
    `MacRemoteApp-Viewer.dmg` on the Apple Silicon Mac.
-2. Open the DMG and double-click the role-specific
-   `Install-MacRemoteApp-*.command` file.
-3. Open the installed app bundle from `~/Applications`. On first launch, the
-   app creates or reuses a local P-256 TLS identity in that Mac's login
+2. Open the DMG. The standard Apple workflow is to drag the role app onto the
+   `Applications` alias in the DMG, then launch it from `/Applications`.
+   Alternatively, double-click the role-specific
+   `Install-MacRemoteApp-*.command` helper; it performs an interactive,
+   signature-checked per-user install in `~/Applications`. The DMG helper has
+   no command-line options and is not a CI or testing tool.
+3. Open the installed app bundle. On first launch, the app creates or reuses a
+   local P-256 TLS identity in that Mac's login
    Keychain. The private key never leaves the Mac and no `.p12` file is needed.
-4. On the Host, the first launch requests Screen Recording before it starts
-   Bonjour. Accessibility/post-event input access is requested from the signed
-   Host bundle only after a Viewer has negotiated input and the operator selects
-   a window. Allow the requested access for `MacRemoteApp-Host` in System
-   Settings > Privacy & Security. If input permission is missing, the Viewer
-   remains view-only.
+4. On the Host, the first launch starts its Bonjour service and requests Local
+   Network access, then asks for Screen Recording. Accessibility/post-event
+   input access is requested from the signed Host bundle only after a Viewer has
+   negotiated input and the operator selects a window. Allow the requested
+   access for `MacRemoteApp-Host` in System Settings > Privacy & Security. If
+   input permission is missing, the Viewer remains view-only.
 5. On the Viewer, the first Bonjour discovery requests Local Network access;
    allow it when macOS asks.
 
@@ -34,14 +38,15 @@ executable inside `Contents/MacOS` when testing app permissions. macOS records
 these decisions against the signed app bundle identity, not against an
 unrelated Terminal process.
 
-The installer rejects ad-hoc or non-Gatekeeper-approved bundles by default.
-It uses only macOS signing and Gatekeeper checks on the target Mac; the
-notarization/stapling checks run during release validation. If an older app was
-already installed, run the installer again with `--replace` from the latest
-notarized DMG, then verify it with `codesign --verify --deep --strict` and
-`spctl --assess --type exec --verbose=4`. The `--allow-ad-hoc` option is for
-disposable local testing only and is not suitable for permission or Gatekeeper
-validation.
+The DMG helper rejects ad-hoc or non-Gatekeeper-approved bundles. If an older
+per-user app is already installed, run the helper again and confirm its
+interactive replacement prompt. The install and uninstall helpers use only
+macOS signing and Gatekeeper checks on the target Mac; notarization/stapling
+checks run during release validation. The uninstall helper also refuses an
+ad-hoc, modified, or differently published same-identity bundle, so use Finder
+or the repository's development cleanup workflow for disposable testing
+artifacts. The repository's separate development installer has testing-only
+options, but those options are intentionally not present in the DMG.
 
 Use the notarized DMG for the physical test. Do not copy a private key, a
 PKCS#12 file, a pairing secret, or the repository to the other Mac.
@@ -86,10 +91,16 @@ the Host permission and select the window again before reconnecting.
 
 ## Stop or uninstall
 
-Quit both apps to end the session. To remove only the installed app, open the
-DMG and run the role-specific `Uninstall-MacRemoteApp-*.command` file. It
-removes the exact app bundle from `~/Applications`; it does not remove other
-applications or Keychain records by default.
+Quit both apps to end the session. For an app installed by dragging to
+`/Applications`, use Finder's normal Move to Trash action. For an app installed
+by the optional DMG helper, open the DMG and double-click the role-specific
+`Uninstall-MacRemoteApp-*.command` file. It asks that role to quit first, then
+moves only the exact per-user app from `~/Applications` to `~/.Trash`; it does
+not remove other applications, Keychain records, TCC permissions, or test
+artifacts. If the app is still running after the quit request, the script stops
+and asks you to quit it before retrying. Moving to the Trash keeps the normal
+macOS recovery path; empty the Trash separately if permanent deletion is
+intended.
 
 The Host is an accessory app and should not need a persistent Dock icon. If an
 older icon remains pinned, quit the old app first, then choose Options > Remove

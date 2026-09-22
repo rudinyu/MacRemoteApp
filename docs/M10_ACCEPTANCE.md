@@ -8,7 +8,8 @@ application whose content contains no private data.
 
 The repository now contains a production runtime composition in
 `Apps/Host/HostRuntime.swift` and `Apps/Viewer/ViewerRuntime.swift`. A Host
-launches the Bonjour listener, advertises eligible windows, validates the
+starts Bonjour to trigger Local Network consent, requests Screen Recording,
+advertises eligible windows, validates the
 selected generation, captures and encodes it, and forwards authorized
 input/clipboard messages. A Viewer discovers the Host, presents an explicit
 picker for the eligible advertised windows, decodes and presents H.264 frames
@@ -84,18 +85,21 @@ build/test output must not be used as a substitute.
    `scripts/release-notarized.sh` for the complete clean-channel CI-gated
    release flow.
 
-2. On the Intel Host, grant Screen Recording permission to the installed Host
-   app (or the exact terminal used for the debug physical smoke). After a
+2. On the Intel Host, grant Local Network and Screen Recording permission to
+   the installed Host app (or the exact terminal used for the debug physical
+   smoke). The Host starts Bonjour first so Local Network consent can appear.
+   After a
    Viewer negotiates input and the operator selects a window, the signed Host
    requests Accessibility/post-event access from the Host bundle. Until those
    input permissions are authorized, the Host remains view-only and does not
    authorize mouse/keyboard capabilities.
    The capability may still appear in the negotiation offer; authorization is
    the security gate that reflects the current permission state.
-   Install the role-specific app with
-   `scripts/install-device-apps.sh` or the
-   `Install-MacRemoteApp-*.command` file in its DMG. On the Apple Silicon
-   Viewer, grant Local Network access.
+   Install the role-specific app with the DMG's standard `Applications` alias,
+   or use its optional `Install-MacRemoteApp-*.command` helper. The DMG helper
+   is double-click-only and has no CI or testing options. The repository-only
+   `scripts/install-device-apps.sh` is reserved for debug/release workflows.
+   On the Apple Silicon Viewer, grant Local Network access.
 3. No production identity file is required. On first launch, each app creates
    or reuses its own P-256 TLS identity in that Mac's login Keychain. Never
    copy a private key or PKCS#12 file into the repository or to the other Mac.
@@ -122,6 +126,7 @@ from the production bundle's first-pairing flow.
 | Step | Acceptance evidence | State |
 | --- | --- | --- |
 | Fresh install | Host/Viewer app bundles launch and signatures verify | ☐ |
+| Startup permissions | Host Local Network and Screen Recording, plus Viewer Local Network, are granted to the signed app bundles | ☐ |
 | User documentation | Each DMG contains the User Guide, debugging guide, and debug-log collection guide | ☐ |
 | Pairing | Host displays a code, Viewer enters the matching code, both operators consent, and trust records are stored | ☐ |
 | Window selection | Exactly one eligible foreground window is selected | ☐ |
@@ -129,7 +134,7 @@ from the production bundle's first-pairing flow.
 | Performance | 30-second report has clock probes, valid samples, p50/p95, fps and resource data | ☐ |
 | Input | Each authorized input capability works only while authorized; mouse-only or keyboard-only authorization keeps the other local controls disabled | ☐ |
 | Clipboard | Text-only opt-in works; opt-out and echo prevention work | ☐ |
-| Permission recovery | Screen Recording/Accessibility denial or revocation disables the affected path | ☐ |
+| Permission recovery | Local Network, Screen Recording, or Accessibility denial/revocation disables the affected path and gives a recoverable instruction | ☐ |
 | Window recovery | Close/change/focus loss disables input and reports a recoverable state | ☐ |
 | LAN recovery | Disconnect shows reconnecting; reauthorization is required before input resumes | ☐ |
 | Stale trust | Revocation or identity mismatch requires explicit re-pairing | ☐ |

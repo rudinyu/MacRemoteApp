@@ -77,22 +77,11 @@ actor HostRuntime {
     }
 
     func run() async throws {
-        let currentPermission = await captureSession.permissionState()
-        let permission: CapturePermissionState
-        if currentPermission == .authorized {
-            permission = currentPermission
-        } else {
-            // A preflight check is read-only and never presents the macOS
-            // consent UI. Ask through the app bundle before failing closed so
-            // a first launch can actually reach the Screen Recording prompt.
-            permission = await captureSession.requestPermission()
-        }
-        guard permission == .authorized else {
-            throw HostRuntimeError.permission(
-                "Screen Recording permission is not authorized; enable MacRemoteApp Host in System Settings > Privacy & Security > Screen Recording, then relaunch the app"
-            )
-        }
-
+        // Enroll the signed Host identity before opening the Bonjour listener.
+        // The listener must start before the Screen Recording gate: starting a
+        // Bonjour service is what gives macOS an opportunity to ask for Local
+        // Network access. If the capture gate runs first, a denied or missing
+        // Screen Recording grant prevents the Local Network request entirely.
         let localIdentity = try await loadLocalIdentity()
         self.localIdentity = localIdentity
         let authenticationMode: TLSAuthenticationMode
@@ -119,8 +108,34 @@ actor HostRuntime {
             }
         }
         self.listener = listener
-        listener.start()
+        do {
+            try await listener.startAndWaitForReadiness()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let startupError as BonjourListenerStartupError {
+            throw HostRuntimeError.listener(startupError.description)
+        } catch {
+            throw HostRuntimeError.listener(
+                "Bonjour listener could not start. Check Local Network access and whether another service is using the configured port, then relaunch the Host"
+            )
+        }
         print("MacRemoteApp Host listening for one paired Viewer")
+
+        let currentPermission = await captureSession.permissionState()
+        let permission: CapturePermissionState
+        if currentPermission == .authorized {
+            permission = currentPermission
+        } else {
+            // A preflight check is read-only and never presents the macOS
+            // consent UI. Ask through the signed app bundle before failing
+            // closed so a first launch can reach the Screen Recording prompt.
+            permission = await captureSession.requestPermission()
+        }
+        guard permission == .authorized else {
+            throw HostRuntimeError.permission(
+                "Screen Recording permission is not authorized; enable MacRemoteApp Host in System Settings > Privacy & Security > Screen Recording, then relaunch the app"
+            )
+        }
 
         do {
             while !Task.isCancelled {
@@ -698,6 +713,8 @@ actor HostRuntime {
 enum HostRuntimeError: Error, CustomStringConvertible, Sendable {
     case configuration(String)
     case permission(String)
+    case localNetwork(String)
+    case listener(String)
     case sessionEnded
     case sessionTimedOut
     case pairingTimedOut
@@ -705,7 +722,7 @@ enum HostRuntimeError: Error, CustomStringConvertible, Sendable {
 
     var description: String {
         switch self {
-        case let .configuration(message), let .permission(message): return message
+        case let .configuration(message), let .permission(message), let .localNetwork(message), let .listener(message): return message
         case .sessionEnded: return "Host session ended before the Viewer was ready"
         case .sessionTimedOut: return "Host session capability negotiation timed out"
         case .pairingTimedOut: return "Host pairing confirmation timed out"
