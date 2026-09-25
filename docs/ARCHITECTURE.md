@@ -179,8 +179,10 @@ Additional rules:
   selected-window provider; the admission barrier remains held until the
   replacement is published. The loop has a polling
   backstop and closes the session if a missed transition cannot safely release
-  the old target. Unknown secure-input or console state remains fail-closed,
-  and controller-owned state releases retain a restricted target-bound path
+  the old target. A detected secure-input or unknown console state remains
+  fail-closed; an unavailable optional AX secure-input signal does not replace
+  the independent foreground/window checks, and controller-owned state
+  releases retain a restricted target-bound path
   after authorization loss or a known focus loss. A local selection
   transition should be announced before the provider changes; if it is missed,
   the provider must still be able to identify the old target for a safe release
@@ -203,13 +205,31 @@ Additional rules:
   Viewer input surface, pairing prompts, and clipboard bridge. The normal
   pilot uses TLS bootstrap plus a `SecurityCore.PairingCoordinator` backed by
   the Keychain trust store; the Host owns the consent alert and the Viewer
-  owns the one-time code-entry prompt. `MACREMOTEAPP_PEER_CERT` remains an
+  owns a code-comparison consent prompt with explicit Accept/Deny actions.
+  `MACREMOTEAPP_PEER_CERT` remains an
   optional pinned-peer migration/diagnostic input, not a new-installation
   requirement. The Host remains authoritative by validating eligibility and
-  generation before authorization. The Host remains resident when TCC or
+  generation before authorization. During an active session it refreshes the
+  eligible-window catalog so the Viewer can replace the selected app without
+  reconnecting. A direct Viewer selection may foreground that regular app on
+  the Host; this only expresses the user's explicit target choice and does not
+  bypass InputCore's per-event permission/focus/identity checks. The Viewer
+  shows explicit Connecting, Connected, and Reconnecting states and disables
+  duplicate Connect actions while a session is active. Host and Viewer send
+  their bounded short hostnames in the optional `Hello.deviceName` display
+  field; a Host rename is reflected in that field, and it never affects trust.
+  The Host remains resident when TCC or
   Bonjour setup is denied: `HostRuntimeStatus` is projected into the status
   menu and an explicit Retry action re-runs setup. Physical cross-hardware
   evidence remains the open M10 acceptance gate.
+- M10 also exposes trust recovery in the app layer without moving trust
+  storage out of `SecurityCore`: the Host status menu and Viewer window can
+  explicitly forget all saved peer records. The app stops the active session
+  before asking the Keychain-backed `TrustStore` to revoke those records; the
+  local device identity, permissions, and capture settings remain intact. The
+  Host status menu also edits a bounded, UserDefaults-backed Bonjour instance
+  name. That name is discovery metadata visible on the LAN, never a TLS or
+  pairing identity, and changing it restarts only the listener.
 - M10 startup ordering is intentional: `Apps/Host` enrolls the local
   Keychain-backed identity and completes the Screen Recording setup before it
   waits for Bonjour listener readiness. Starting Bonjour is the Local Network
@@ -219,8 +239,9 @@ Additional rules:
   `Apps/Viewer` enrolls its own identity before starting discovery, reports
   discovery error categories, and requires the operator to choose a Host
   before connecting. Neither app treats a permission grant as pairing: the
-  first connection still requires Host consent and Viewer code confirmation,
-  and only both consents commit the peer trust records.
+  first connection still requires Host consent and explicit Viewer acceptance
+  after comparing the independently derived code; only both consents commit
+  the peer trust records.
 - Authorization enforcement is deliberately split by responsibility:
   `SecurityCore` owns identity, trust records, pairing consent, and peer
   identity validation; `TransportCore.SessionCoordinator` owns the
@@ -238,6 +259,18 @@ Additional rules:
   path remains for physical smoke diagnostics. No peer private key is
   exchanged; the optional public-certificate path is retained only for pinned
   migration and diagnostics.
+- The M10 production composition uses separate Keychain namespaces for the
+  two roles: Host identity label `MacRemoteApp.host` and trust service
+  `com.rudinyu.MacRemoteApp.Host.trust`; Viewer identity label
+  `MacRemoteApp.viewer` and trust service
+  `com.rudinyu.MacRemoteApp.Viewer.trust`. The legacy
+  `MACREMOTEAPP_LOCAL_IDENTITY_LABEL` diagnostic value is treated as a base and
+  receives a role suffix, so setting the same base for both apps cannot make
+  them load one private key. This also permits same-Mac GUI testing without
+  cross-app access to either role's generated identity or peer-trust records.
+  Existing pre-isolation trust records are not imported; both endpoints must
+  complete pairing once after upgrading. The update leaves legacy Keychain
+  records untouched rather than attempting cross-role deletion.
 - Cross-cutting diagnostics use a narrow structured logging interface. They do
   not pass raw clipboard text, secrets, or full captured frames.
 
@@ -246,7 +279,8 @@ Additional rules:
 ### Host UI and lifecycle
 
 The Host owns the permission education flow, pairing confirmation, session
-status, selected-window state, and stop/disconnect actions. The Host remains
+status, saved-pairing revocation, editable discovery name, selected-window
+state, and stop/disconnect actions. The Host remains
 resident while first-run permissions are incomplete and exposes a retry action
 from its status menu. The Viewer presents explicit Host and eligible-window
 pickers, but the Host remains the only component allowed to accept a selection,
@@ -364,8 +398,9 @@ selected-window identity, and permission state.
   integration target of an Intel Host.
 - H.264 is the V1 interoperability baseline. HEVC or other codecs are not
   added as speculative features.
-- Screen Recording and Accessibility permissions are Host capabilities and are
-  surfaced by the Host UI; packages must return structured permission states.
+- Screen Recording and PostEvent permissions are Host capabilities and are
+  surfaced by the Host UI; Accessibility is an optional AX/secure-input
+  enhancement. Packages must return structured permission states.
 - The exact macOS deployment target is an M0 decision and must be tested on
   both target architectures where possible.
 - All platform-specific APIs live behind package adapters so protocol and

@@ -81,12 +81,15 @@ replacing it.
 - The DMG uninstall helper uses the same per-role lifecycle lock as the
   installer, verifies the exact bundle identity, cryptographic signature,
   pinned MacRemoteApp Developer ID publisher, and Gatekeeper acceptance before
-  moving the per-user app to `~/.Trash`. It rejects symlinked Applications or
-  Trash paths and never removes Keychain, TCC, or repository test state.
+  clearing both roles' exact app data, shared MacRemoteApp trust/generated
+  identity, and moving the selected per-user app to `~/.Trash`. It rejects
+  symlinked Applications or Trash paths, does not touch unrelated Keychain
+  records, and leaves macOS TCC grants for System Settings or the
+  repository-only development cleanup script.
 - `scripts/uninstall-device-apps.sh` removes only the exact selected app
   bundle paths and requires confirmation for non-interactive removal. Its
   explicit `--clean-testing --yes` mode also removes `build/testing/`, `.build`,
-  the Host Screen Recording/Accessibility and Host/Viewer Local Network TCC
+  the Host Screen Recording/PostEvent and Host/Viewer Local Network TCC
   grants, MacRemoteApp trust/device-identity Keychain items, and
   only the imported M2 identities whose fingerprints match generated identity
   material present in an explicitly named M2 identity directory; beta, RC, and
@@ -138,8 +141,8 @@ replacing it.
 - Trust records and locally generated TLS identity material remain in
   Keychain-backed `SecurityCore`; no file-based secret store is added. The
   repository cleanup path removes the default generated local identity along
-  with testing trust records, while normal uninstall leaves Keychain state for
-  an explicit clean/re-pair decision.
+  with testing trust records. In-app pairing reset preserves the local
+  identity; the DMG uninstall is the explicit full MacRemoteApp data reset.
 
 ## Residual risks and owners
 
@@ -147,7 +150,7 @@ replacing it.
 | --- | --- | --- | --- |
 | Physical Intel-to-Apple-Silicon acceptance not run in this workspace | P1 release gate | Operator; run `docs/M10_ACCEPTANCE.md` on both Macs | Open |
 | Developer ID notarization profile is host-specific | P2 release process | Release operator; run `scripts/notarize-device-apps.sh` and inspect logs | Open |
-| Real macOS Accessibility event posting needs a disposable foreground app | P1 acceptance gate | Operator; run M6 safe-app test with permission evidence | Open |
+| Real macOS PostEvent injection needs a disposable foreground app | P1 acceptance gate | Operator; run M6 safe-app test with permission evidence | Open |
 | Interactive pairing UI and Keychain trust reuse are newly composed in M10 but still need physical Intel/Apple-Silicon evidence | P1 product acceptance | Run the first-pairing, repeat-connection, revoke, and identity-mismatch checks in `docs/M10_ACCEPTANCE.md` | Open — physical validation |
 | V1 does not defend a compromised local administrator or approved rogue peer | Known non-goal | Documented in `docs/SECURITY.md` | Accepted non-goal |
 

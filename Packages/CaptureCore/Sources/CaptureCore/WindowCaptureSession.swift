@@ -69,7 +69,12 @@ public actor WindowCaptureSession {
 
     public func start(windowIdentifier: UInt64) async throws {
         if case let .failed(failure) = state {
-            throw CaptureCoreError.sessionFailed(failure)
+            // A capture/provider failure invalidates the current selection,
+            // but it must not permanently close the shared frame stream. The
+            // Host reuses this actor after a permission recovery, window
+            // replacement, or reconnect, so a later start must be allowed to
+            // establish a fresh generation on the same stream.
+            state = .stopped(failure)
         }
         permission = await windowProvider.permissionState()
         guard permission == .authorized else {
@@ -319,7 +324,11 @@ public actor WindowCaptureSession {
         engine = nil
         state = .failed(failure)
         await activeEngine?.stop()
-        frameContinuation.finish(throwing: failure)
+        selectedWindow = nil
+        // `frames` is a reusable Host pipeline stream. Finishing it here
+        // would strand a long-lived Host after a recoverable permission,
+        // provider, or capture-engine failure; deinit is the only terminal
+        // owner shutdown that finishes the stream.
     }
 }
 

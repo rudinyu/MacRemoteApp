@@ -8,8 +8,7 @@ import SecurityCore
 import TransportCore
 
 private enum ViewerPairingPromptOutcome: Sendable {
-    case confirmation(String)
-    case declined
+    case consent(accepted: Bool)
     case sessionEnded
 }
 
@@ -19,6 +18,9 @@ private enum ViewerPairingPromptOutcome: Sendable {
 @MainActor
 final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     struct Configuration: Sendable {
+        static let defaultIdentityLabel = "MacRemoteApp.viewer"
+        static let defaultTrustStoreService = "com.rudinyu.MacRemoteApp.Viewer.trust"
+
         let hostName: String?
         let peerCertificateURL: URL?
         let identityLabel: String
@@ -26,10 +28,12 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         static func load(environment: [String: String] = ProcessInfo.processInfo.environment) throws -> Configuration {
             let peerCertificateURL = environment["MACREMOTEAPP_PEER_CERT"]
                 .flatMap { path in path.isEmpty ? nil : URL(fileURLWithPath: path) }
+            let identityLabel = environment["MACREMOTEAPP_LOCAL_IDENTITY_LABEL"]
+                .map { "\($0).viewer" } ?? defaultIdentityLabel
             return Configuration(
                 hostName: environment["MACREMOTEAPP_HOST_NAME"],
                 peerCertificateURL: peerCertificateURL,
-                identityLabel: environment["MACREMOTEAPP_LOCAL_IDENTITY_LABEL"] ?? KeychainIdentityProvider.defaultLabel
+                identityLabel: identityLabel
             )
         }
     }
@@ -49,6 +53,21 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         .textClipboard
     ]
 
+    private static var localDeviceName: String {
+        let shortName = ProcessInfo.processInfo.hostName
+            .split(separator: ".", omittingEmptySubsequences: true)
+            .first
+            .map(String.init) ?? ""
+        guard !shortName.isEmpty,
+              shortName.utf8.count <= HelloMessage.maximumDeviceNameUTF8Bytes,
+              shortName.unicodeScalars.allSatisfy({
+                  !CharacterSet.controlCharacters.contains($0)
+              }) else {
+            return "MacRemoteApp Viewer"
+        }
+        return shortName
+    }
+
     private let configuration: Configuration
     private let discovery = NetworkBonjourDiscovery()
     private let decoder = H264Decoder()
@@ -60,6 +79,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var discoveredServices: [DiscoveredService] = []
     private var lastDiscoveredService: DiscoveredService?
     private var selectedServiceIdentifier: String?
+    private var pairingRetryRequired = false
     private var inputSendTail: Task<Void, Never>?
     private var session: SessionCoordinator?
     private var messageLoop: ViewerSessionMessageLoop?
@@ -74,7 +94,16 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var streamDimensions: CGSize = .zero
     private var windowSelectionInFlight = false
     private var presentedFrameCount = 0
-    private var latestPresentationSample: (captureTimestamp: UInt64, presentedTimestamp: UInt64)?
+    private var presentedFrameTimes: [TimeInterval] = []
+    private var lastPresentedFrameTime: TimeInterval?
+    private var presentedFPSIsIdle = false
+    private var reportedVideoFailureGeneration: UInt64?
+    private var performanceCollector = BoundedPresentationSampleCollector()
+    private var latestPerformanceSnapshot: PresentationSampleSnapshot?
+    private var latestClockSyncEstimate: ClockSyncEstimate?
+    private var hostInputPermission: PermissionState = .unknown
+    private var hostInputFocusEligible = false
+    private var hostInputStatusGeneration: UInt64?
     private var isShuttingDown = false
 
     init(configuration: Configuration) {
@@ -179,6 +208,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
                 self.lastDiscoveredService = service
                 guard self.session == nil, self.reconnectTask == nil else { continue }
+                guard !self.pairingRetryRequired else { continue }
                 // A previously selected Host may reappear after a network
                 // interruption. Initial connection is always explicit; only a
                 // previously selected Host is eligible for reconnect.
@@ -204,11 +234,18 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         content.onHostSelection = { [weak self] index in
             self?.selectHost(at: index)
         }
-        content.onWindowSelection = { [weak self] windowIdentifier, generation in
-            self?.selectWindow(windowIdentifier, generation: generation)
+        content.onWindowSelection = { [weak self] windowIdentifier, generation, catalogGeneration in
+            self?.selectWindow(
+                windowIdentifier,
+                generation: generation,
+                catalogGeneration: catalogGeneration
+            )
         }
         content.onPairingRetry = { [weak self] in
             self?.retryPairing()
+        }
+        content.onForgetPairings = { [weak self] in
+            self?.forgetSavedPairings()
         }
         content.onClipboardToggle = { [weak self] in
             self?.toggleClipboard()
@@ -233,9 +270,23 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(content.surface)
 
-        renderer = MetalVideoRenderer(view: content.videoView)
-        renderer?.onFramePresented = { [weak self] captureTimestamp, presentedTimestamp in
-            self?.recordPresentation(captureTimestamp: captureTimestamp, presentedTimestamp: presentedTimestamp)
+        if let renderer = MetalVideoRenderer(view: content.videoView) {
+            self.renderer = renderer
+            renderer.onFramePresented = { [weak self] generation, captureTimestamp, presentedTimestamp, presentationUptime in
+                guard let self,
+                      self.selectedGeneration == generation,
+                      self.streamGenerationGate.accepts(generation) else { return }
+                self.recordPresentation(
+                    captureTimestamp: captureTimestamp,
+                    presentedTimestamp: presentedTimestamp,
+                    presentationUptime: presentationUptime
+                )
+                self.contentView?.markFramePresented()
+            }
+        } else {
+            macRemoteAppStartupLogger.error(
+                "MacRemoteApp Viewer could not create a Metal device or command queue"
+            )
         }
         content.updateStream(size: .zero, readiness: .awaitingAuthentication)
     }
@@ -248,7 +299,11 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let service = discoveredServices[index]
         selectedServiceIdentifier = service.identifier
         lastDiscoveredService = service
+        // Choosing a Host is an explicit operator action and is therefore
+        // allowed to retry a previously denied pairing challenge.
+        pairingRetryRequired = false
         contentView?.setHostSelectionEnabled(false)
+        contentView?.setConnectionState(.connecting)
         Task { @MainActor [weak self] in
             guard let self else { return }
             switch await connect(to: service) {
@@ -262,8 +317,12 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    private func connect(to service: DiscoveredService) async -> ConnectResult {
+    private func connect(
+        to service: DiscoveredService,
+        reconnecting: Bool = false
+    ) async -> ConnectResult {
         guard session == nil, !isShuttingDown else { return .retryableFailure }
+        contentView?.setConnectionState(reconnecting ? .reconnecting : .connecting)
         contentView?.setPairingRetryVisible(false)
         do {
             let localIdentity = try await loadLocalIdentity()
@@ -271,7 +330,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if let peerCertificateURL = configuration.peerCertificateURL {
                 let peerIdentity = try PublicCertificateIdentity.load(from: peerCertificateURL)
                 authenticationMode = .trusted(
-                    TrustedPeer(identity: peerIdentity, displayName: "MacRemoteApp Host")
+                    TrustedPeer(identity: peerIdentity, displayName: service.name)
                 )
             } else {
                 authenticationMode = .pairingBootstrap(expectedPeer: nil)
@@ -286,12 +345,13 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             )
             let pairingCoordinator = PairingCoordinator(
                 localIdentity: localIdentity.peerIdentity,
-                trustStore: KeychainTrustStore()
+                trustStore: KeychainTrustStore(service: Configuration.defaultTrustStoreService)
             )
             let session = SessionCoordinator(
                 configuration: SessionConfiguration(
                     role: .viewer,
                     implementationIdentifier: "MacRemoteApp-Viewer-M10",
+                    deviceName: Self.localDeviceName,
                     capabilities: Self.capabilities,
                     mandatoryCapabilities: [.pingPong],
                     maxVideoWidth: 1920,
@@ -319,12 +379,14 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             sessionMonitorTask = Task { @MainActor [weak self] in
                 await self?.monitorSession(session)
             }
+            contentView?.setConnectionState(.connected)
             setStatus("Connected; waiting for a selected window")
             contentView?.setPairingRetryVisible(false)
             await refreshInputSurface()
             return .connected
         } catch let error as SessionError {
             if error == .pairingDenied {
+                pairingRetryRequired = true
                 setStatus("Pairing was denied; click Retry pairing to try again")
                 contentView?.setPairingRetryVisible(true)
             } else {
@@ -332,11 +394,19 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 contentView?.setPairingRetryVisible(false)
             }
             await resetSession()
+            if reconnecting, error != .pairingDenied {
+                contentView?.setConnectionState(.reconnecting)
+                contentView?.setHostSelectionEnabled(false)
+            }
             return error == .pairingDenied ? .pairingDenied : .retryableFailure
         } catch {
             setStatus("Connection unavailable; check trusted identities and Local Network permission")
             contentView?.setPairingRetryVisible(false)
             await resetSession()
+            if reconnecting {
+                contentView?.setConnectionState(.reconnecting)
+                contentView?.setHostSelectionEnabled(false)
+            }
             return .retryableFailure
         }
     }
@@ -351,6 +421,11 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             guard session === observedSession else { return }
             let current = await observedSession.snapshot()
+            refreshPresentedFPS(now: ProcessInfo.processInfo.systemUptime)
+            latestClockSyncEstimate = await observedSession.clockSyncEstimate()
+            latestPerformanceSnapshot = performanceCollector.snapshot(
+                clockSync: latestClockSyncEstimate
+            )
             if current.authorizationGeneration != previous.authorizationGeneration ||
                 current.authorized != previous.authorized ||
                 current.authorizedWindowGeneration != previous.authorizedWindowGeneration ||
@@ -371,12 +446,15 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func scheduleReconnect(immediate: Bool = false) {
         guard reconnectTask == nil, !isShuttingDown else { return }
+        guard !pairingRetryRequired else { return }
         guard let service = lastDiscoveredService else {
             setStatus("Connection lost; rediscover the Host to reconnect")
             return
         }
 
         setStatus("Connection lost; reconnecting…")
+        contentView?.setConnectionState(.reconnecting)
+        contentView?.setHostSelectionEnabled(false)
         reconnectTask = Task { @MainActor [weak self] in
             let delays: [UInt64] = immediate ? [0, 1, 2, 3, 4] : [1, 2, 3, 4, 5]
             for delay in delays {
@@ -388,7 +466,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     }
                 }
                 guard let self, self.session == nil else { return }
-                switch await self.connect(to: service) {
+                switch await self.connect(to: service, reconnecting: true) {
                 case .connected:
                     self.reconnectTask = nil
                     return
@@ -401,6 +479,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             guard let self, self.session == nil else { return }
             self.reconnectTask = nil
+            self.contentView?.setConnectionState(.disconnected)
+            self.contentView?.setHostSelectionEnabled(true)
             self.setStatus("Host unavailable; start the Viewer to retry")
         }
     }
@@ -418,6 +498,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             case .pairingRequired:
                 setStatus("Confirm pairing on both Macs")
                 if let challenge = await pairingCoordinator.pendingChallenge(),
+                   challenge.isVerificationReady,
                    promptedChallengeID != challenge.challengeID {
                     let consent = await pairingCoordinator.consentState()
                     guard consent?.localConsent != true else {
@@ -428,14 +509,13 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let parentWindow = window
                     let outcome = await withTaskGroup(of: ViewerPairingPromptOutcome.self) { group in
                         group.addTask {
-                            if let enteredCode = await ViewerPairingPrompt.requestConfirmation(
+                            let accepted = await ViewerPairingPrompt.requestConsent(
                                 confirmationCode: challenge.confirmationCode,
+                                peerName: (await session.snapshot()).peerDeviceName,
                                 parentWindow: parentWindow,
                                 expiresAt: challenge.expiresAt
-                            ) {
-                                return .confirmation(enteredCode)
-                            }
-                            return .declined
+                            )
+                            return .consent(accepted: accepted)
                         }
                         group.addTask {
                             while !Task.isCancelled {
@@ -457,17 +537,15 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     }
                     guard !Task.isCancelled else { throw CancellationError() }
                     switch outcome {
-                    case let .confirmation(enteredCode):
+                    case .consent(accepted: true):
                         try await session.confirmPairing(
-                            confirmationCode: enteredCode,
-                            accepted: true,
-                            displayName: "MacRemoteApp Host"
+                            confirmationCode: challenge.confirmationCode,
+                            accepted: true
                         )
-                    case .declined:
+                    case .consent(accepted: false):
                         try await session.confirmPairing(
                             confirmationCode: "",
-                            accepted: false,
-                            displayName: "MacRemoteApp Host"
+                            accepted: false
                         )
                     case .sessionEnded:
                         throw await session.failureReason() ?? .pairingFailed
@@ -514,14 +592,15 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             contentView?.setWindowOptions(
                 eligibleWindows,
                 generation: generation,
+                catalogGeneration: windowList.catalogGeneration,
                 selectedIdentifier: selectedWindowIdentifier
             )
             if eligibleWindows.isEmpty {
-                setStatus("Host has no eligible windows")
+                setStatus("Connected — Host has no eligible windows")
             } else if selectedWindowIdentifier != nil {
-                setStatus("Window selected; starting video")
+                setStatus("Connected — window selected; starting video")
             } else {
-                setStatus("Select a Host window to start video")
+                setStatus("Connected — select a Host window to start video")
             }
             await refreshInputSurface()
 
@@ -533,6 +612,10 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             selectedGeneration = config.generation
             streamGenerationGate.advance(to: config.generation)
             streamDimensions = CGSize(width: CGFloat(config.width), height: CGFloat(config.height))
+            reportedVideoFailureGeneration = nil
+            resetPresentedFPS()
+            performanceCollector.reset()
+            latestPerformanceSnapshot = nil
             decoder.reset()
             contentView?.updateStream(size: streamDimensions, readiness: .awaitingAuthorization)
             contentView?.setWindowSelectionEnabled(true)
@@ -561,14 +644,60 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     keyframe: frame.keyframe,
                     accessUnit: frame.accessUnit
                 )
+                let decodeGeneration = encoded.generation
                 try decoder.decode(encoded) { [weak self] result in
                     Task { @MainActor [weak self] in
-                        self?.present(result)
+                        guard let self,
+                              self.selectedGeneration == decodeGeneration,
+                              self.streamGenerationGate.accepts(decodeGeneration) else {
+                            return
+                        }
+                        self.present(result)
                     }
                 }
-            } catch {
+            } catch let error as CodecError {
                 // A non-keyframe before decoder configuration is expected to
                 // be dropped; the bounded media path waits for the next keyframe.
+                if error != .missingDecoderConfiguration && error != .cancelled {
+                    reportVideoDecodeFailure(error)
+                }
+            } catch {
+                setStatus("Video frame could not be decoded")
+            }
+
+        case let .sessionState(message):
+            guard let session else {
+                hostInputPermission = .unknown
+                hostInputFocusEligible = false
+                hostInputStatusGeneration = nil
+                await refreshInputSurface()
+                return
+            }
+            let snapshot = await session.snapshot()
+            if message.state == .failed || message.state == .stopping {
+                hostInputPermission = .unknown
+                hostInputFocusEligible = false
+                hostInputStatusGeneration = nil
+            } else if let generation = message.windowGeneration,
+                      snapshot.authorized,
+                      snapshot.authorizedWindowGeneration == generation {
+                hostInputPermission = message.permission
+                hostInputFocusEligible = message.focusEligible
+                hostInputStatusGeneration = generation
+            } else {
+                // A status for an old selection or an unauthorizing session
+                // cannot make the current surface ready.
+                hostInputPermission = .unknown
+                hostInputFocusEligible = false
+                hostInputStatusGeneration = nil
+            }
+            await refreshInputSurface()
+            if hostInputPermission == .missing || hostInputPermission == .revoked {
+                setStatus("Connected — enable PostEvent permission for MacRemoteApp Host")
+            } else if hostInputPermission == .unknown {
+                setStatus("Connected — waiting for Host input status")
+            } else if !hostInputFocusEligible {
+                setStatus("Connected — the selected app must be foreground on the Host")
             }
 
         case .close:
@@ -587,7 +716,11 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    private func selectWindow(_ windowIdentifier: UInt64, generation: UInt64) {
+    private func selectWindow(
+        _ windowIdentifier: UInt64,
+        generation: UInt64,
+        catalogGeneration: UInt64
+    ) {
         guard !windowSelectionInFlight, let session else { return }
         guard selectedWindowIdentifier != windowIdentifier else { return }
         Task { @MainActor [weak self] in
@@ -597,15 +730,23 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 setStatus("Window list expired; waiting for Host")
                 return
             }
+            guard contentView?.windowSelectionCatalogGeneration == catalogGeneration else {
+                setStatus("Window catalog expired; waiting for Host")
+                return
+            }
             guard windowOptionsContain(windowIdentifier) else {
                 setStatus("Window is no longer available")
                 return
             }
             windowSelectionInFlight = true
+            resetPresentedFPS()
             selectedGeneration = nil
             streamGenerationGate.revoke()
             decoder.reset()
             streamDimensions = .zero
+            hostInputPermission = .unknown
+            hostInputFocusEligible = false
+            hostInputStatusGeneration = nil
             contentView?.updateStream(size: .zero, readiness: .awaitingAuthorization)
             contentView?.setWindowSelectionEnabled(false)
             await refreshInputSurface()
@@ -614,7 +755,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     .windowSelection(
                         WindowSelectionMessage(
                             windowIdentifier: windowIdentifier,
-                            windowGeneration: generation
+                            windowGeneration: generation,
+                            catalogGeneration: catalogGeneration
                         )
                     )
                 )
@@ -636,22 +778,97 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func present(_ result: Result<DecodedH264Frame, CodecError>) {
-        guard case let .success(frame) = result,
-              frame.generation == selectedGeneration else { return }
-        renderer?.submit(
+        guard case let .success(frame) = result else {
+            if case let .failure(error) = result,
+               error != .cancelled,
+               error != .missingDecoderConfiguration {
+                reportVideoDecodeFailure(error)
+            }
+            return
+        }
+        guard frame.generation == selectedGeneration else { return }
+        guard let renderer else {
+            setStatus("Video decoded, but Metal rendering is unavailable")
+            return
+        }
+        guard renderer.submit(
             pixelBuffer: frame.pixelBuffer,
-            captureTimestamp: frame.captureTimestamp
-        )
-        contentView?.markFramePresented()
+            captureTimestamp: frame.captureTimestamp,
+            streamGeneration: frame.generation
+        ) else {
+            setStatus("Video decoded, but the Metal view is unavailable")
+            return
+        }
     }
 
-    private func recordPresentation(captureTimestamp: UInt64, presentedTimestamp: UInt64) {
+    private func reportVideoDecodeFailure(_ error: CodecError) {
+        guard let generation = selectedGeneration,
+              reportedVideoFailureGeneration != generation else { return }
+        reportedVideoFailureGeneration = generation
+        macRemoteAppStartupLogger.error(
+            "MacRemoteApp Viewer H.264 decode failed: \(error.description, privacy: .public)"
+        )
+        setStatus("Video decoding failed; check Viewer logs")
+    }
+
+    private func recordPresentation(
+        captureTimestamp: UInt64,
+        presentedTimestamp: UInt64?,
+        presentationUptime: TimeInterval
+    ) {
         presentedFrameCount += 1
-        latestPresentationSample = (captureTimestamp, presentedTimestamp)
-        // The renderer callback is the authoritative display boundary. Keep
-        // the raw pair in the in-process M8 collector boundary; conversion to
-        // one-way latency is only valid after the authenticated clock-sync
-        // estimate is available, so this path does not emit misleading values.
+        if let presentedTimestamp {
+            // The renderer callback is the authoritative display boundary.
+            // Raw pairs stay inside a bounded collector and are converted only
+            // with the authenticated clock estimate.
+            performanceCollector.append(
+                captureTimestampNanoseconds: captureTimestamp,
+                presentedTimestampNanoseconds: presentedTimestamp
+            )
+        }
+        recordPresentedFrame(at: presentationUptime)
+    }
+
+    private func recordPresentedFrame(at uptime: TimeInterval) {
+        guard uptime.isFinite, uptime > 0 else { return }
+        presentedFPSIsIdle = false
+        presentedFrameTimes.append(uptime)
+        presentedFrameTimes.sort()
+        lastPresentedFrameTime = max(lastPresentedFrameTime ?? uptime, uptime)
+        refreshPresentedFPS(now: lastPresentedFrameTime ?? uptime)
+    }
+
+    private func refreshPresentedFPS(now: TimeInterval) {
+        guard let lastPresentedFrameTime else {
+            contentView?.updatePresentedFPS(presentedFPSIsIdle ? "FPS: idle" : "FPS: —")
+            return
+        }
+        guard now - lastPresentedFrameTime <= 1 else {
+            presentedFrameTimes.removeAll(keepingCapacity: true)
+            self.lastPresentedFrameTime = nil
+            presentedFPSIsIdle = true
+            contentView?.updatePresentedFPS("FPS: idle")
+            return
+        }
+
+        let cutoff = now - 1
+        presentedFrameTimes.removeAll { $0 < cutoff }
+        guard let first = presentedFrameTimes.first,
+              let last = presentedFrameTimes.last,
+              presentedFrameTimes.count > 1,
+              last - first >= 0.5 else {
+            contentView?.updatePresentedFPS("FPS: warming…")
+            return
+        }
+        let framesPerSecond = Double(presentedFrameTimes.count - 1) / (last - first)
+        contentView?.updatePresentedFPS("FPS: \(Int(framesPerSecond.rounded()))")
+    }
+
+    private func resetPresentedFPS() {
+        presentedFrameTimes.removeAll(keepingCapacity: true)
+        lastPresentedFrameTime = nil
+        presentedFPSIsIdle = false
+        contentView?.updatePresentedFPS("FPS: —")
     }
 
     private func enqueueInput(_ record: InputEventRecord) {
@@ -670,39 +887,57 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         let snapshot = await session.snapshot()
-        let readiness: InputReadiness
-        let inputCapabilities: ViewerInputCapabilities
+        var readiness: InputReadiness = .awaitingAuthorization
+        var inputCapabilities = ViewerInputCapabilities.none
         if snapshot.state == .connecting || snapshot.state == .reconnecting {
             readiness = .awaitingAuthentication
-            inputCapabilities = .none
         } else if snapshot.authorizedWindowGeneration == nil || selectedGeneration == nil {
             readiness = .awaitingAuthorization
-            inputCapabilities = .none
-        } else if let generation = selectedGeneration,
-                  SessionCapabilityProjection.inputAvailability(
-                      for: snapshot,
-                      selectedWindowGeneration: snapshot.authorizedWindowGeneration,
-                      selectedStreamGeneration: generation
-                  ).anyInputEnabled {
+        } else if let generation = selectedGeneration {
             let availability = SessionCapabilityProjection.inputAvailability(
                 for: snapshot,
                 selectedWindowGeneration: snapshot.authorizedWindowGeneration,
                 selectedStreamGeneration: generation
             )
-            readiness = .ready(windowGeneration: generation)
-            inputCapabilities = ViewerInputCapabilities(
-                mouseInputEnabled: availability.mouseInputEnabled,
-                keyboardInputEnabled: availability.keyboardInputEnabled
-            )
-        } else {
-            readiness = .awaitingAuthorization
-            inputCapabilities = .none
+            if hostInputStatusGeneration != snapshot.authorizedWindowGeneration {
+                readiness = .hostStateUnavailable
+            } else if hostInputPermission != .granted {
+                readiness = .hostPermissionUnavailable
+            } else if !hostInputFocusEligible {
+                readiness = .hostFocusUnavailable
+            } else if !availability.anyInputEnabled {
+                readiness = .awaitingAuthorization
+            } else {
+                readiness = .ready(windowGeneration: generation)
+                inputCapabilities = ViewerInputCapabilities(
+                    mouseInputEnabled: availability.mouseInputEnabled,
+                    keyboardInputEnabled: availability.keyboardInputEnabled
+                )
+            }
         }
         contentView?.updateStream(
             size: streamDimensions,
             readiness: readiness,
             capabilities: inputCapabilities
         )
+        switch readiness {
+        case .ready:
+            setStatus("Connected — input ready")
+        case .hostPermissionUnavailable:
+            setStatus("Connected — enable PostEvent permission for MacRemoteApp Host")
+        case .hostFocusUnavailable:
+            setStatus("Connected — the selected app must be foreground on the Host")
+        case .hostStateUnavailable:
+            setStatus("Connected — waiting for Host input status")
+        case .awaitingAuthorization:
+            if selectedWindowIdentifier == nil {
+                setStatus("Connected — select a Host window to start video")
+            } else if streamDimensions == .zero {
+                setStatus("Connected — authorizing the selected Host window")
+            }
+        case .awaitingAuthentication, .surfaceUnavailable:
+            break
+        }
         let clipboardAvailable = SessionCapabilityProjection.clipboardAvailable(for: snapshot)
         contentView?.updateClipboard(
             status: messageLoop?.clipboardStatus,
@@ -738,8 +973,45 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             setStatus("No Host is currently discovered")
             return
         }
+        pairingRetryRequired = false
         contentView?.setPairingRetryVisible(false)
         scheduleReconnect(immediate: true)
+    }
+
+    private func forgetSavedPairings() {
+        guard !isShuttingDown else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Forget all saved pairings?"
+        alert.informativeText =
+            "This removes saved Host trust records from this Mac and stops the active session. The Viewer identity and Local Network permission remain unchanged. The next connection must be paired again."
+        alert.addButton(withTitle: "Forget Pairings")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        // Clear the selected service before stopping the session so the
+        // discovery stream cannot immediately reconnect to the Host while its
+        // old trust record is being removed.
+        selectedServiceIdentifier = nil
+        lastDiscoveredService = nil
+        pairingRetryRequired = false
+        contentView?.clearHostSelection()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                await resetSession()
+                let trustStore = KeychainTrustStore(service: Configuration.defaultTrustStoreService)
+                let count = try await trustStore.removeAllPairings()
+                contentView?.setHostSelectionEnabled(true)
+                setStatus(
+                    count == 0
+                    ? "No saved pairings"
+                    : "Saved pairings cleared; choose a Host to pair again"
+                )
+            } catch {
+                setStatus("Saved pairings could not be cleared; check Keychain access")
+            }
+        }
     }
 
     private func disconnect() async {
@@ -780,13 +1052,20 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         selectedWindowIdentifier = nil
         windowSelectionInFlight = false
         presentedFrameCount = 0
-        latestPresentationSample = nil
+        resetPresentedFPS()
+        performanceCollector.reset()
+        latestPerformanceSnapshot = nil
+        latestClockSyncEstimate = nil
+        hostInputPermission = .unknown
+        hostInputFocusEligible = false
+        hostInputStatusGeneration = nil
         streamGenerationGate.revoke()
         decoder.reset()
         streamDimensions = .zero
         contentView?.clearWindowOptions()
         contentView?.updateStream(size: .zero, readiness: .awaitingAuthentication)
         contentView?.updateClipboard(status: nil, available: false)
+        contentView?.setConnectionState(.disconnected)
         contentView?.setHostSelectionEnabled(true)
     }
 }
@@ -797,6 +1076,22 @@ enum ViewerRuntimeError: Error, CustomStringConvertible, Sendable {
     var description: String {
         switch self {
         case let .configuration(message): return message
+        }
+    }
+}
+
+private enum ViewerConnectionState: Equatable {
+    case disconnected
+    case connecting
+    case connected
+    case reconnecting
+
+    var buttonTitle: String {
+        switch self {
+        case .disconnected: return "Connect"
+        case .connecting: return "Connecting…"
+        case .connected: return "Connected"
+        case .reconnecting: return "Reconnecting…"
         }
     }
 }
@@ -812,24 +1107,29 @@ private final class ViewerContentView: NSView {
         didSet { surface.onInputRejected = onInputRejected }
     }
     var onHostSelection: (@MainActor (Int) -> Void)?
-    var onWindowSelection: (@MainActor (UInt64, UInt64) -> Void)?
+    var onWindowSelection: (@MainActor (UInt64, UInt64, UInt64) -> Void)?
     var onPairingRetry: (@MainActor () -> Void)?
+    var onForgetPairings: (@MainActor () -> Void)?
     var onClipboardToggle: (@MainActor () -> Void)?
     var status: String = "Starting…" {
         didSet { statusLabel.stringValue = status }
     }
 
     private let statusLabel = NSTextField(labelWithString: "Starting…")
+    private let fpsLabel = NSTextField(labelWithString: "FPS: —")
     private let hostPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let connectHostButton = NSButton(title: "Connect", target: nil, action: nil)
+    private let forgetPairingsButton = NSButton(title: "Forget saved pairings…", target: nil, action: nil)
     private let windowPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let selectWindowButton = NSButton(title: "Select", target: nil, action: nil)
     private let clipboardButton = NSButton(title: "Text clipboard unavailable", target: nil, action: nil)
     private let retryPairingButton = NSButton(title: "Retry pairing", target: nil, action: nil)
     private var windowOptions: [WindowDescriptor] = []
     private var windowSelectionGeneration: UInt64?
+    private(set) var windowSelectionCatalogGeneration: UInt64?
     private var hostOptionIdentifiers: [String] = []
     private var hostSelectionEnabled = true
+    private var connectionState: ViewerConnectionState = .disconnected
     private var streamSize: CGSize = .zero
     private var readiness: InputReadiness = .awaitingAuthentication
     private var inputCapabilities: ViewerInputCapabilities = .none
@@ -854,14 +1154,23 @@ private final class ViewerContentView: NSView {
         statusLabel.isBordered = false
         statusLabel.alignment = .left
         statusLabel.lineBreakMode = .byTruncatingTail
+        fpsLabel.textColor = .secondaryLabelColor
+        fpsLabel.backgroundColor = .clear
+        fpsLabel.isBordered = false
+        fpsLabel.alignment = .right
         hostPicker.controlSize = .small
         hostPicker.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         hostPicker.addItem(withTitle: "Choose MacRemoteApp Host")
         hostPicker.isEnabled = false
+        hostPicker.target = self
+        hostPicker.action = #selector(hostSelectionChanged(_:))
         connectHostButton.target = self
         connectHostButton.action = #selector(connectHost(_:))
         connectHostButton.controlSize = .small
         connectHostButton.isEnabled = false
+        forgetPairingsButton.target = self
+        forgetPairingsButton.action = #selector(forgetPairings(_:))
+        forgetPairingsButton.controlSize = .small
         windowPicker.controlSize = .small
         windowPicker.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         windowPicker.addItem(withTitle: "Choose Host window")
@@ -881,8 +1190,10 @@ private final class ViewerContentView: NSView {
         addSubview(videoView)
         addSubview(surface)
         addSubview(statusLabel)
+        addSubview(fpsLabel)
         addSubview(hostPicker)
         addSubview(connectHostButton)
+        addSubview(forgetPairingsButton)
         addSubview(windowPicker)
         addSubview(selectWindowButton)
         addSubview(clipboardButton)
@@ -930,44 +1241,74 @@ private final class ViewerContentView: NSView {
 
     func setHostOptions(_ services: [DiscoveredService]) {
         let previousIdentifier = hostPicker.indexOfSelectedItem >= 0 &&
-            hostPicker.indexOfSelectedItem < hostOptionIdentifiers.count
-            ? hostOptionIdentifiers[hostPicker.indexOfSelectedItem]
+            hostPicker.indexOfSelectedItem > 0 &&
+            hostPicker.indexOfSelectedItem - 1 < hostOptionIdentifiers.count
+            ? hostOptionIdentifiers[hostPicker.indexOfSelectedItem - 1]
             : nil
         hostOptionIdentifiers = services.map(\.identifier)
         hostPicker.removeAllItems()
         if services.isEmpty {
             hostPicker.addItem(withTitle: "No MacRemoteApp Host found")
-            hostPicker.isEnabled = false
-            connectHostButton.isEnabled = false
+            updateHostControls()
             return
         }
+        hostPicker.addItem(withTitle: "Choose MacRemoteApp Host")
         for service in services {
             let name = service.name.isEmpty ? "Unnamed Host" : service.name
             hostPicker.addItem(withTitle: name)
         }
         if let previousIdentifier,
            let index = hostOptionIdentifiers.firstIndex(of: previousIdentifier) {
-            hostPicker.selectItem(at: index)
+            hostPicker.selectItem(at: index + 1)
         } else {
             hostPicker.selectItem(at: 0)
         }
-        hostPicker.isEnabled = hostSelectionEnabled
-        connectHostButton.isEnabled = hostSelectionEnabled
+        updateHostControls()
     }
 
     func setHostSelectionEnabled(_ enabled: Bool) {
         hostSelectionEnabled = enabled
-        hostPicker.isEnabled = enabled && !hostOptionIdentifiers.isEmpty
-        connectHostButton.isEnabled = enabled && !hostOptionIdentifiers.isEmpty
+        updateHostControls()
+    }
+
+    func setConnectionState(_ state: ViewerConnectionState) {
+        connectionState = state
+        updateHostControls()
+    }
+
+    func clearHostSelection() {
+        hostPicker.selectItem(at: 0)
+        hostSelectionEnabled = true
+        updateHostControls()
+    }
+
+    @objc private func hostSelectionChanged(_ sender: NSPopUpButton) {
+        _ = sender
+        let selectedIndex = hostPicker.indexOfSelectedItem - 1
+        let hasHostSelection = selectedIndex >= 0 && selectedIndex < hostOptionIdentifiers.count
+        connectHostButton.isEnabled = connectionState == .disconnected &&
+            hostSelectionEnabled && hasHostSelection
+    }
+
+    private func updateHostControls() {
+        let isDisconnected = connectionState == .disconnected
+        hostPicker.isEnabled = isDisconnected && hostSelectionEnabled && !hostOptionIdentifiers.isEmpty
+        connectHostButton.title = connectionState.buttonTitle
+        connectHostButton.isEnabled = isDisconnected &&
+            hostSelectionEnabled &&
+            hostPicker.indexOfSelectedItem > 0 &&
+            hostPicker.indexOfSelectedItem - 1 < hostOptionIdentifiers.count
     }
 
     func setWindowOptions(
         _ windows: [WindowDescriptor],
         generation: UInt64,
+        catalogGeneration: UInt64,
         selectedIdentifier: UInt64? = nil
     ) {
         windowOptions = windows
         windowSelectionGeneration = generation
+        windowSelectionCatalogGeneration = catalogGeneration
         windowPicker.removeAllItems()
         if windows.isEmpty {
             windowPicker.addItem(withTitle: "No eligible Host windows")
@@ -1007,6 +1348,7 @@ private final class ViewerContentView: NSView {
     func clearWindowOptions() {
         windowOptions.removeAll(keepingCapacity: false)
         windowSelectionGeneration = nil
+        windowSelectionCatalogGeneration = nil
         windowPicker.removeAllItems()
         windowPicker.addItem(withTitle: "Choose Host window")
         windowPicker.isEnabled = false
@@ -1019,17 +1361,26 @@ private final class ViewerContentView: NSView {
         }
     }
 
+    func updatePresentedFPS(_ value: String) {
+        fpsLabel.stringValue = value
+    }
+
     override func layout() {
         super.layout()
         videoView.frame = bounds
         surface.frame = bounds
-        let retryWidth: CGFloat = retryPairingButton.isHidden ? 0 : 108
+        let fpsWidth: CGFloat = 80
+        let fpsRight = retryPairingButton.isHidden
+            ? bounds.width - 12
+            : bounds.width - 116 - 8
+        let fpsX = fpsRight - fpsWidth
         statusLabel.frame = NSRect(
             x: 12,
             y: 8,
-            width: max(1, bounds.width - 24 - retryWidth),
+            width: max(1, fpsX - 8 - 12),
             height: 20
         )
+        fpsLabel.frame = NSRect(x: fpsX, y: 8, width: fpsWidth, height: 20)
         retryPairingButton.frame = NSRect(
             x: max(12, bounds.width - 116),
             y: 6,
@@ -1037,16 +1388,29 @@ private final class ViewerContentView: NSView {
             height: 24
         )
         let hostControlY: CGFloat = 34
+        let connectWidth: CGFloat = 112
+        let forgetWidth: CGFloat = 168
+        let horizontalGap: CGFloat = 8
+        let hostPickerWidth = min(
+            420,
+            max(180, bounds.width - 24 - connectWidth - forgetWidth - horizontalGap * 2)
+        )
         hostPicker.frame = NSRect(
             x: 12,
             y: hostControlY,
-            width: min(420, max(220, bounds.width - 220)),
+            width: hostPickerWidth,
             height: 24
         )
         connectHostButton.frame = NSRect(
-            x: hostPicker.frame.maxX + 8,
+            x: hostPicker.frame.maxX + horizontalGap,
             y: hostControlY,
-            width: 76,
+            width: connectWidth,
+            height: 24
+        )
+        forgetPairingsButton.frame = NSRect(
+            x: connectHostButton.frame.maxX + horizontalGap,
+            y: hostControlY,
+            width: forgetWidth,
             height: 24
         )
         let controlY = max(34, bounds.height - 36)
@@ -1090,15 +1454,26 @@ private final class ViewerContentView: NSView {
         _ = sender
         guard windowPicker.indexOfSelectedItem >= 0,
               windowPicker.indexOfSelectedItem < windowOptions.count,
-              let generation = windowSelectionGeneration else { return }
-        onWindowSelection?(windowOptions[windowPicker.indexOfSelectedItem].identifier, generation)
+              let generation = windowSelectionGeneration,
+              let catalogGeneration = windowSelectionCatalogGeneration else { return }
+        onWindowSelection?(
+            windowOptions[windowPicker.indexOfSelectedItem].identifier,
+            generation,
+            catalogGeneration
+        )
     }
 
     @objc private func connectHost(_ sender: NSButton) {
         _ = sender
-        guard hostPicker.indexOfSelectedItem >= 0,
-              hostPicker.indexOfSelectedItem < hostOptionIdentifiers.count else { return }
-        onHostSelection?(hostPicker.indexOfSelectedItem)
+        let selectedIndex = hostPicker.indexOfSelectedItem - 1
+        guard selectedIndex >= 0,
+              selectedIndex < hostOptionIdentifiers.count else { return }
+        onHostSelection?(selectedIndex)
+    }
+
+    @objc private func forgetPairings(_ sender: NSButton) {
+        _ = sender
+        onForgetPairings?()
     }
 
     @objc private func retryPairing(_ sender: NSButton) {

@@ -4,13 +4,18 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd)"
 build_root="${repo_root}/.build/public-validation"
+build_parent="${repo_root}/.build"
 
-if [[ -L "${repo_root}/.build" || ( -e "${repo_root}/.build" && ! -d "${repo_root}/.build" ) ]]; then
-    echo "Refusing to clean an unexpected .build path: ${repo_root}/.build" >&2
+if [[ -L "${build_parent}" || ( -e "${build_parent}" && ! -d "${build_parent}" ) ]]; then
+    echo "Refusing to use an unexpected build parent path: ${build_parent}" >&2
     exit 2
 fi
-echo "Removing previous validation build cache before starting validation"
-rm -rf -- "${repo_root}/.build"
+if [[ -L "${build_root}" || ( -e "${build_root}" && ! -d "${build_root}" ) ]]; then
+    echo "Refusing to clean an unexpected validation cache path: ${build_root}" >&2
+    exit 2
+fi
+echo "Removing only the previous validation build cache: ${build_root}"
+rm -rf -- "${build_root}"
 
 mkdir -p "${build_root}/clang-module-cache" "${build_root}/swift-module-cache"
 export TMPDIR="${build_root}/tmp"
@@ -35,6 +40,15 @@ bash -n \
     scripts/notarize-device-apps.sh \
     scripts/release-notarized.sh \
     scripts/uninstall-device-apps.sh
+if ! grep -q -- '--remove-all-data' Apps/Host/main.swift ||
+   ! grep -q -- '--remove-all-data' Apps/Viewer/main.swift ||
+   ! grep -q -- 'clear_user_data' scripts/dmg-uninstall.sh ||
+   ! grep -q -- 'HostRuntime.Configuration.defaultTrustStoreService' Apps/Host/main.swift ||
+   ! grep -q -- 'ViewerRuntime.Configuration.defaultTrustStoreService' Apps/Viewer/main.swift ||
+   ! grep -q -- 'opposite_app_path' scripts/dmg-uninstall.sh; then
+    echo "Validation failed: DMG uninstall does not clear app-owned data through the signed app" >&2
+    exit 1
+fi
 if ! bash scripts/install-device-apps.sh --help | grep -Eq -- '--allow-ad-hoc'; then
     echo "Validation failed: installer does not expose explicit ad-hoc opt-in" >&2
     exit 1
@@ -438,7 +452,7 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :NSScreenCaptureUsageDescription' "${v
 test "$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "${validation_release_root}/MacRemoteApp-Viewer.app/Contents/Info.plist" 2>/dev/null)" != ""
 
 echo "Public validation passed"
-if [[ -d "${repo_root}/.build" && ! -L "${repo_root}/.build" ]]; then
-    rm -rf -- "${repo_root}/.build"
-    echo "Cleared successful validation build cache: ${repo_root}/.build"
+if [[ -d "${build_root}" && ! -L "${build_root}" ]]; then
+    rm -rf -- "${build_root}"
+    echo "Cleared successful validation build cache: ${build_root}"
 fi

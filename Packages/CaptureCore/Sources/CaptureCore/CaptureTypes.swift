@@ -166,8 +166,10 @@ public struct CapturedFrame: @unchecked Sendable {
 }
 
 /// A reusable capture-session stream. The underlying stream remains alive when
-/// a selection stops, while the generation gate discards frames buffered by a
-/// previous selection before they reach the next consumer.
+/// a selection stops or a recoverable capture failure occurs, while the
+/// generation gate discards frames buffered by a previous selection before
+/// they reach the next consumer. The stream finishes only when its owning
+/// WindowCaptureSession is deallocated.
 public struct CapturedFrameStream: AsyncSequence, Sendable {
     public typealias Element = CapturedFrame
     public typealias Failure = Error
@@ -250,6 +252,8 @@ public struct CaptureConfiguration: Equatable, Sendable {
 
     public let maximumWidth: UInt32
     public let maximumHeight: UInt32
+    public let minimumWindowWidth: UInt32
+    public let minimumWindowHeight: UInt32
     public let frameRate: UInt16
     public let queueDepth: Int
     public let monitorIntervalNanoseconds: UInt64
@@ -258,6 +262,8 @@ public struct CaptureConfiguration: Equatable, Sendable {
     public init(
         maximumWidth: UInt32 = 1920,
         maximumHeight: UInt32 = 1080,
+        minimumWindowWidth: UInt32 = 160,
+        minimumWindowHeight: UInt32 = 80,
         frameRate: UInt16 = 60,
         queueDepth: Int = 3,
         monitorIntervalNanoseconds: UInt64 = 1_000_000_000,
@@ -265,10 +271,19 @@ public struct CaptureConfiguration: Equatable, Sendable {
     ) {
         self.maximumWidth = maximumWidth
         self.maximumHeight = maximumHeight
+        self.minimumWindowWidth = minimumWindowWidth
+        self.minimumWindowHeight = minimumWindowHeight
         self.frameRate = frameRate
         self.queueDepth = queueDepth
         self.monitorIntervalNanoseconds = monitorIntervalNanoseconds
         self.outputBufferCount = outputBufferCount
+    }
+
+    /// Reject macOS helper/service surfaces that are technically on-screen
+    /// but too small to be a useful user-facing application window.
+    public func acceptsWindowSize(_ bounds: WindowBounds) -> Bool {
+        bounds.width >= Double(minimumWindowWidth) &&
+            bounds.height >= Double(minimumWindowHeight)
     }
 
     public func outputDimensions(for bounds: WindowBounds) -> (width: UInt32, height: UInt32) {

@@ -100,6 +100,7 @@ final actor HostInputSessionRuntime {
         onNonInputMessage: @escaping @Sendable (MessagePayload) async -> Void,
         onSessionLifecycleChange: @escaping @Sendable (Bool) async -> Void = { _ in },
         onSessionLifecycleReset: @escaping @Sendable () async -> Void = {},
+        onInputStatusChange: @escaping @Sendable (HostInputStatus) async -> Void = { _ in },
         setClipboardEnabled: @escaping @Sendable (Bool) async throws -> Void = { _ in },
         clipboardStatus: @escaping @Sendable () async -> ClipboardSyncStatus? = { nil }
     ) {
@@ -119,7 +120,8 @@ final actor HostInputSessionRuntime {
             handler: handler,
             cleanupLease: cleanupLease,
             onNonInputMessage: onNonInputMessage,
-            onSessionLifecycleReset: onSessionLifecycleReset
+            onSessionLifecycleReset: onSessionLifecycleReset,
+            onInputStatusChange: onInputStatusChange
         )
     }
 
@@ -301,6 +303,6 @@ final actor HostInputSessionRuntime {
         // The registry normally retains this runtime until cleanup completes.
         // Do not cancel the unstructured cleanup task here: it owns the
         // target-bound loop strongly and must outlive this actor if teardown
-        // races with a temporary Accessibility or focus outage.
+        // races with a temporary PostEvent/AX or focus outage.
     }
 }

@@ -257,6 +257,17 @@ public actor KeychainIdentityProvider {
             guard try loadGeneratedKeyReference() == nil else {
                 throw SecurityCoreError.identityEnrollmentFailed
             }
+            let status = SecItemDelete(
+                scoped([
+                    kSecClass: kSecClassKey,
+                    kSecAttrKeyClass: kSecAttrKeyClassPrivate,
+                    kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+                    kSecAttrApplicationTag: applicationTag
+                ]) as CFDictionary
+            )
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw SecurityCoreError.keychain(status)
+            }
             return
         }
         let expectedIdentity = try certificateIdentity(from: certificateData)

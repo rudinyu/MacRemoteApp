@@ -115,7 +115,7 @@ Use `--dry-run` first to inspect the exact cleanup plan without changing the
 system.
 
 That command removes `build/testing/`, `.build`, the installed Host/Viewer
-bundles, the Host Screen Recording/Accessibility and Host/Viewer Local Network
+bundles, the Host Screen Recording/PostEvent and Host/Viewer Local Network
 grants, MacRemoteApp trust and generated local TLS/device-identity Keychain
 items, plus only the
 imported M2 identities whose fingerprints match the explicitly named generated

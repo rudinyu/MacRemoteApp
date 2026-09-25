@@ -32,13 +32,15 @@ test.
 
 ## Check permissions and network
 
-The production Host enrolls/reuses its local Keychain TLS identity, requests
-Screen Recording through the signed app bundle before waiting for Bonjour
-readiness, and then starts its listener so macOS can request Local Network
-access. Accessibility/post-event input access is requested only after a Viewer
-negotiates input and the operator selects a window. The Viewer enrolls/reuses
-its local identity before its Bonjour browser starts. Local Network access is
-therefore requested only after local identity setup succeeds.
+The production Host requests Screen Recording through the signed app bundle,
+then performs a short Bonjour readiness probe so macOS can request Local
+Network access before Keychain identity enrollment. This keeps a Keychain
+problem from hiding the Host's Local Network permission state. The Host then
+enrolls/reuses its local TLS identity and starts the authenticated listener.
+PostEvent input access is requested only after a Viewer negotiates input and
+the operator selects a window. Accessibility is optional for AX/secure-input
+inspection. The Viewer enrolls/reuses
+its local identity before its Bonjour browser starts.
 Launch the bundles themselves:
 
 ```sh
@@ -53,7 +55,8 @@ process context on some macOS versions.
 On the Host, verify:
 
 - Screen Recording is enabled for `MacRemoteApp-Host`.
-- Accessibility is enabled for `MacRemoteApp-Host` when input is tested.
+- PostEvent access is enabled for `MacRemoteApp-Host` when input is tested;
+  Accessibility is optional for AX/secure-input inspection.
 - Local Network access is allowed.
 
 On the Viewer, verify Local Network access. Confirm both Macs are on the same
@@ -61,7 +64,7 @@ trusted LAN and that the Host is running before the Viewer starts discovery.
 If a permission was just changed, quit and relaunch the affected app.
 If a previous denial must be tested again, run the uninstall command with
 `--clean-testing`; it resets the MacRemoteApp Host Screen Recording and
-Accessibility entries plus the Host and Viewer Local Network TCC entries before
+PostEvent entries plus the Host and Viewer Local Network TCC entries before
 the next launch.
 
 If the Host icon is still pinned in the Dock, quit it before choosing Options >
@@ -74,11 +77,26 @@ intentionally require a persistent Dock icon.
 - A normal production install does not require `host.p12`, `viewer.p12`, or
   manual Keychain import. If identity setup fails, inspect the app's Keychain
   access and relaunch; do not substitute a Developer ID signing certificate.
-- Confirm the code shown by the Host is entered on the Viewer.
-- Approve the connection on both Macs.
-- If one side has stale trust or the peer identity changed, stop both apps and
-  complete a fresh explicit pairing flow. Do not delete unrelated Keychain
-  records.
+- Open the Host status-menu item and confirm that `Pairing code: 000000`
+  (a six-digit value) is visible; compare it with the value displayed in the
+  Viewer prompt. A Host with an existing trust
+  record may skip the Allow/Deny dialog, but it must still expose the code in
+  the status menu while the Viewer decides. Select Allow on the Host and Accept
+  on the Viewer only after verifying that the values match.
+- If one side has stale trust or the peer identity changed, use `Forget saved
+  pairings…` on the Host status menu and on the Viewer, then select the Host
+  again and complete a fresh explicit pairing flow. This removes only peer
+  trust records; it does not delete the local TLS identity or permissions. Do
+  not delete unrelated Keychain records.
+- If a complete reset is required, double-click the role-specific
+  `Uninstall-MacRemoteApp-*.command` in the notarized DMG. It removes that role's
+  both roles' app data plus the shared MacRemoteApp trust and generated
+  identity. It intentionally does not reset macOS TCC grants; remove the exact
+  entries in System Settings when a fresh privacy decision is required.
+  Reinstalling either role after this reset requires fresh pairing.
+- To change the discovery name, choose `Rename Host…` from the Host status
+  menu. The name is local-network metadata, not a certificate identity; the
+  listener briefly restarts after it is saved.
 
 The debug physical smoke uses a different, explicitly provisioned PKCS#12 and
 certificate flow. Follow the repository's M2 physical smoke runbook for that
@@ -90,8 +108,9 @@ path and never copy a `.p12` file to the other Mac.
 - Select one eligible window in the Viewer picker.
 - If the window closes, changes identity, loses focus, or the Host permission
   is revoked, select it again after the Host returns to a ready state.
-- If pointer or keyboard input is unavailable, check Accessibility and ensure
-  the selected window is still the authorized generation.
+- If pointer or keyboard input is unavailable, check PostEvent permission and
+  ensure the selected window is still the authorized generation. Accessibility
+  may be enabled for the optional AX/secure-input enhancement.
 - Clipboard is text-only and opt-in; confirm it is enabled on both endpoints
   and do not use it as a binary/file-transfer channel.
 

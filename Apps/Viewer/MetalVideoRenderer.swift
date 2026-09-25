@@ -14,7 +14,8 @@ final class MetalVideoRenderer: NSObject, MTKViewDelegate {
     private let ciContext: CIContext
     private var latestPixelBuffer: CVPixelBuffer?
     private var latestCaptureTimestampValue: UInt64 = 0
-    var onFramePresented: (@MainActor (UInt64, UInt64) -> Void)?
+    private var latestStreamGenerationValue: UInt64 = 0
+    var onFramePresented: (@MainActor (UInt64, UInt64, UInt64?, TimeInterval) -> Void)?
 
     init?(view: MTKView) {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -32,14 +33,20 @@ final class MetalVideoRenderer: NSObject, MTKViewDelegate {
         view.isPaused = true
     }
 
-    func submit(pixelBuffer: CVPixelBuffer, captureTimestamp: UInt64) {
+    @discardableResult
+    func submit(
+        pixelBuffer: CVPixelBuffer,
+        captureTimestamp: UInt64,
+        streamGeneration: UInt64
+    ) -> Bool {
+        guard let view else { return false }
         lock.withLock {
             latestPixelBuffer = pixelBuffer
             latestCaptureTimestampValue = captureTimestamp
+            latestStreamGenerationValue = streamGeneration
         }
-        if let view {
-            view.setNeedsDisplay(view.bounds)
-        }
+        view.setNeedsDisplay(view.bounds)
+        return true
     }
 
     func latestCaptureTimestamp() -> UInt64 {
@@ -47,14 +54,31 @@ final class MetalVideoRenderer: NSObject, MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
-        let pixelBuffer = lock.withLock { latestPixelBuffer }
-        guard let pixelBuffer,
+        let submittedFrame = lock.withLock {
+            (
+                pixelBuffer: latestPixelBuffer,
+                captureTimestamp: latestCaptureTimestampValue,
+                streamGeneration: latestStreamGenerationValue
+            )
+        }
+        guard let pixelBuffer = submittedFrame.pixelBuffer,
               let drawable = view.currentDrawable,
               let commandBuffer = commandQueue.makeCommandBuffer() else {
             return
         }
         let image = CIImage(cvPixelBuffer: pixelBuffer)
-        let bounds = CGRect(origin: .zero, size: drawableSize(for: view))
+        let drawableSize = drawableSize(for: view)
+        guard image.extent.width.isFinite,
+              image.extent.height.isFinite,
+              image.extent.width > 0,
+              image.extent.height > 0,
+              drawableSize.width.isFinite,
+              drawableSize.height.isFinite,
+              drawableSize.width > 0,
+              drawableSize.height > 0 else {
+            return
+        }
+        let bounds = CGRect(origin: .zero, size: drawableSize)
         let targetRect = VideoContentLayout.aspectFitRect(
             contentWidth: image.extent.width,
             contentHeight: image.extent.height,
@@ -84,16 +108,26 @@ final class MetalVideoRenderer: NSObject, MTKViewDelegate {
             bounds: bounds,
             colorSpace: CGColorSpaceCreateDeviceRGB()
         )
-        let sourceTimestamp = lock.withLock { latestCaptureTimestampValue }
+        let sourceTimestamp = submittedFrame.captureTimestamp
+        let streamGeneration = submittedFrame.streamGeneration
         drawable.addPresentedHandler { [weak self] drawable in
             let presentedTime = drawable.presentedTime
-            guard presentedTime.isFinite, presentedTime > 0,
-                  presentedTime <= Double(UInt64.max) / 1_000_000_000 else {
-                return
+            let presentedTimestamp: UInt64?
+            if presentedTime.isFinite,
+               presentedTime > 0,
+               presentedTime <= Double(UInt64.max) / 1_000_000_000 {
+                presentedTimestamp = UInt64(presentedTime * 1_000_000_000)
+            } else {
+                presentedTimestamp = nil
             }
-            let presentedTimestamp = UInt64(presentedTime * 1_000_000_000)
+            let presentationUptime = ProcessInfo.processInfo.systemUptime
             Task { @MainActor [weak self] in
-                self?.onFramePresented?(sourceTimestamp, presentedTimestamp)
+                self?.onFramePresented?(
+                    streamGeneration,
+                    sourceTimestamp,
+                    presentedTimestamp,
+                    presentationUptime
+                )
             }
         }
         commandBuffer.present(drawable)

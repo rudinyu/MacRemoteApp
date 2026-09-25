@@ -33,6 +33,9 @@ public enum InputReadiness: Equatable, Sendable {
     case awaitingAuthentication
     case awaitingAuthorization
     case surfaceUnavailable
+    case hostPermissionUnavailable
+    case hostFocusUnavailable
+    case hostStateUnavailable
     case ready(windowGeneration: UInt64)
 
     public var isReady: Bool {
@@ -48,6 +51,12 @@ public enum InputReadiness: Equatable, Sendable {
             return "Input disabled: authorization required"
         case .surfaceUnavailable:
             return "Input disabled: remote content unavailable"
+        case .hostPermissionUnavailable:
+            return "Input disabled: Host PostEvent permission unavailable"
+        case .hostFocusUnavailable:
+            return "Input disabled: Host window is not foreground-eligible"
+        case .hostStateUnavailable:
+            return "Input disabled: Host input status unavailable"
         case .ready:
             return "Input ready"
         }

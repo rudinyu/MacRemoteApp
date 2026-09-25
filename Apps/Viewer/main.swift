@@ -25,6 +25,16 @@ struct ViewerApp {
     }
 
     static func main() async {
+        if CommandLine.arguments.contains("--remove-all-data") {
+            do {
+                try await removeAllLocalData()
+            } catch {
+                fputs("MacRemoteApp Viewer data cleanup failed: \(error)\n", stderr)
+                exit(EXIT_FAILURE)
+            }
+            return
+        }
+
 #if DEBUG
         if CommandLine.arguments.contains("--m5-input-surface") {
             let demo = ViewerInputDemo()
@@ -64,6 +74,17 @@ struct ViewerApp {
             exit(EXIT_FAILURE)
         }
     }
+}
+
+private func removeAllLocalData() async throws {
+    try await KeychainTrustStore(
+        service: ViewerRuntime.Configuration.defaultTrustStoreService
+    ).removeAll()
+    try await KeychainIdentityProvider(
+        label: ViewerRuntime.Configuration.defaultIdentityLabel
+    ).removeGeneratedIdentity()
+    UserDefaults.standard.removePersistentDomain(forName: "com.rudinyu.MacRemoteApp.Viewer")
+    UserDefaults.standard.synchronize()
 }
 
 func viewerStartupErrorCode(_ error: Error) -> String {

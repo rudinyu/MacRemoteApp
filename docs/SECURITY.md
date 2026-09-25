@@ -52,7 +52,7 @@ Those assumptions must be stated rather than implied.
 | Malformed peer | Oversized or adversarial frames | Incremental bounded parsing, rate limits, safe teardown, no unbounded allocation |
 | Stale input after reconnect | Buffered events reach a new session/window | Stop input on disconnect; bind events to session/window generation and reauthorize |
 | Clipboard leakage | Text is logged or synced without consent | Opt-in state, bounded text-only contract, redacted diagnostics, explicit teardown |
-| Permission abuse | App injects input while not authorized | Check Accessibility permission, focus/foreground eligibility, and session authorization at use time |
+| Permission abuse | App injects input while not authorized | Check PostEvent permission, focus/foreground eligibility, and session authorization at use time |
 | UI confusion | Operator thinks input is disabled when it is active | Visible states for pairing, authorization, focus, permissions, and input readiness |
 | Local process compromise | Another local process reads app memory | Document as out of V1 protection scope; minimize retention and avoid unnecessary copies |
 
@@ -70,9 +70,13 @@ the authenticated pairing flow.
 1. Discovery provides only an endpoint and non-sensitive display metadata.
 2. The Viewer connects and authenticates the transport enough to establish the
    peer identity exchange.
-3. The Host displays a short, human-comparable confirmation value derived from
-   the pairing transcript. The Viewer verifies the value locally and displays
-   the same value with a one-time code-entry field.
+3. The Host commits to a fresh random contribution. The Viewer commits to its
+   own fresh random value, after which the Host reveals its committed value.
+   The Viewer verifies that reveal and then reveals its committed value. Both
+   endpoints independently derive a short, human-comparable confirmation value
+   from the challenge ID, both public identities, and both contributions. The
+   Viewer displays the same value with explicit **Accept** and **Deny**
+   actions; no code is typed or treated as a credential.
 4. The local operator on each endpoint explicitly consents after checking that
    the values match. A remote `PairingConfirmation` is evidence of remote
    consent, not local consent.
@@ -107,6 +111,29 @@ identity and the session policy permits it. A trust mismatch requires an
 explicit re-pair or trust revocation flow; silently accepting a changed key is
 not allowed.
 
+### User-initiated trust reset
+
+The Host status menu and Viewer window provide an explicit `Forget saved
+pairings…` action. The action stops the active session first, then deletes only
+the saved peer `TrustedPeer` records from that app role's Keychain service. It
+does not delete the endpoint's own TLS identity, the other role's trust
+records, permissions, or unrelated Keychain items. The next connection
+therefore returns to the two-sided pairing flow and requires a new confirmation
+code. The operation is all-peer for the current role by design so an operator
+cannot leave an unknown stale peer record behind for that app.
+
+The Host's editable Bonjour instance name is local-network discovery metadata.
+It is bounded, may be visible to untrusted LAN browsers, and must never be
+used as an identity, authorization signal, or secret. Changing it does not
+change the TLS key or peer trust records.
+
+The optional `Hello.deviceName` is also untrusted, bounded display metadata.
+The Host defaults its advertised/device display name to the macOS short
+hostname, and the Viewer sends its own short hostname. A Host rename is
+reflected in its Hello display name but does not change the certificate,
+pairing identity, or authorization. Receivers validate and sanitize this value
+before showing it and never use it to select a trust record.
+
 ## Authorization model
 
 Authorization is the intersection of all of the following:
@@ -126,11 +153,18 @@ input injection operation or bounded batch. The Viewer must disable its input
 surface when the state is not ready. A UI label such as "connected" must not
 be treated as equivalent to "authorized to control".
 
+An explicit Viewer selection may ask the Host to foreground an eligible
+regular application so it can be operated. This is not background control:
+Host-side input remains rejected unless the selected target is confirmed
+foreground-eligible, authorized, and permitted at the time of each event.
+
 ## macOS permission boundaries
 
 - Screen Recording is required for Host-side ScreenCaptureKit capture.
-- Accessibility is required for Host-side CoreGraphics/Accessibility input
-  injection where macOS requires it.
+- PostEvent permission is required for Host-side Quartz keyboard, pointer, and
+  scroll injection. Accessibility is optional for the best-effort AX
+  secure-input/focused-text enhancement and is never treated as a substitute
+  for PostEvent permission.
 - Permission prompts are initiated by the owning app at a user-understandable
   point; a remote peer cannot approve them.
 - The implementation must detect permission revocation and stop the affected
@@ -164,7 +198,7 @@ be treated as equivalent to "authorized to control".
   `CGEvent` objects.
 - Validate event type, coordinate range, modifier state, sequence, rate, and
   selected-window generation.
-- Disable or reject input if the Host loses Accessibility permission, the
+- Disable or reject input if the Host loses PostEvent permission, the
   selected window closes/changes, the window is no longer foreground-eligible,
   or the session state becomes uncertain.
 - Never send or log passwords, secure-input contents, or authentication-dialog
@@ -175,15 +209,16 @@ be treated as equivalent to "authorized to control".
 M6 enforcement is split explicitly: `TransportCore` admits the authenticated
   message, `Apps/Host` supplies the current session and selected-window facts,
   and `InputCore.HostInputController` performs the final per-event check.
-  `CoreGraphicsAccessibilityContextProvider` rechecks Accessibility/post-event
-  permission, current bounds, on-screen window identity, foreground ordering,
+  `CoreGraphicsAccessibilityContextProvider` rechecks PostEvent permission,
+  optional AX secure-input state, current bounds, on-screen window identity, foreground ordering,
   and lock state; each typed command carries the target window, owning
   application identifier, process, and generation, and
   `CoreGraphicsAccessibilityInputAdapter` repeats the complete target/focus/
   permission check immediately before posting. The adapter never activates a
-  background window. Unknown secure-input or console state is rejected because
-  macOS does not provide a reliable general public status API; no private API
-  or bypass is used. Host reset attempts safe release of admitted pressed
+  background window. A known secure-input field is rejected; when the optional
+  Accessibility signal is unavailable, the independent foreground/window
+  checks still protect the base PostEvent path. No private API or bypass is
+  used. Host reset attempts safe release of admitted pressed
   state before clearing it and uses a reserved state-ending rate lane. If
   session authorization has already been revoked, that cleanup path may only
   release controller-admitted state while the same window identity,
@@ -265,7 +300,14 @@ private key and a matching self-signed TLS certificate, then supplies the
 resulting `SecIdentity` to Network.framework. Normal pairing does not require
 an operator to import `host.p12`/`viewer.p12` or copy the other endpoint's
 certificate; peer trust is stored only after the existing two-sided pairing
-consent completes. A private key is never copied between devices.
+consent completes. The M10 Host and Viewer use distinct Keychain identity
+labels and peer-trust services, including when both apps run under one macOS
+account. A legacy `MACREMOTEAPP_LOCAL_IDENTITY_LABEL` diagnostic value is
+role-suffixed before use. The apps therefore do not read or sign with each
+other's generated private key. Trust records and local identities from the
+older shared namespace are not migrated or deleted during upgrade; new code
+does not consult those old trust records, so the operator must pair once again.
+A private key is never copied between devices.
 
 ## Security non-goals and residual risks
 
@@ -289,15 +331,17 @@ an unknown but presented identity may enter the protected bootstrap flow but
 cannot send or receive protected session content until pairing and Host
 authorization complete.
 
-The Host initiates pairing. The challenge identifier deterministically binds the
-pairing nonce, and both peers independently derive the confirmation value from
-that nonce and the two presented public identities; the Viewer rejects a value
-that does not match its local derivation. Each endpoint records an explicit
+The Host initiates pairing with a commitment to a fresh random contribution.
+The Viewer commits its own fresh contribution, the Host reveals its committed
+value, and the Viewer verifies and reveals its contribution. `SecurityCore`
+derives the confirmation value from the challenge ID, both presented public
+identities, and both contributions; either endpoint rejects a reveal that does
+not match the corresponding commitment. Each endpoint records an explicit
 local consent event, and a remote confirmation is accepted only as the other
-side's consent for the same challenge. Both sides persist the peer identity only
-after the two-sided state is complete. Revocation deletes the trust record and
-requires pairing again. Reconnect clears session authorization, window scope,
-capability scope, and channel sequence state.
+side's consent for the same challenge. Both sides persist the peer identity
+only after the two-sided state is complete. Revocation deletes
+the trust record and requires pairing again. Reconnect clears session
+authorization, window scope, capability scope, and channel sequence state.
 
 The local device key is retained by Keychain-backed `SecurityCore`; the TLS
 adapter receives a platform `SecIdentity` loaded from Keychain or assembled

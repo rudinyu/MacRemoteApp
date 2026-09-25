@@ -33,16 +33,19 @@ rotated. The transport fails closed when local enrollment cannot complete.
 
 ## Pairing flow
 
-1. The Host connects with a bootstrap TLS policy and creates a random challenge
-   identifier. The session pairing nonce is deterministically derived from that
-   identifier, so both peers can independently recompute the confirmation value.
-2. `SecurityCore` derives a short confirmation value from both peer public-key
-   identities and that nonce. The Host sends the displayable value over the
-   protected bootstrap session; the Viewer verifies it locally before adopting
-   the challenge.
-3. The Viewer adopts the Host challenge and presents the same value to the
-   local operator. The operator records local consent only after checking the
-   value on the intended devices.
+1. The Host connects with a bootstrap TLS policy, creates a random challenge
+   identifier, and commits to a fresh random contribution. The commitment is
+   sent before the Viewer commitment is known.
+2. The Viewer verifies the challenge shape, creates its own fresh contribution,
+   and sends its commitment in `PairingResponse`. The Host reveals its committed
+   contribution in `PairingVerification`; the Viewer verifies that reveal and
+   then sends its contribution in `PairingReveal`.
+3. `SecurityCore` independently derives a six-digit confirmation value from
+   the challenge ID, both public-key identities, and both contributions. The
+   Host and Viewer display the same value. Each operator compares the displayed
+   values; the Viewer explicitly accepts or denies rather than entering a code.
+   This is a one-time comparison value, not a shared password or authorization
+   credential.
 4. The Viewer sends `PairingConfirmation` as remote-consent evidence. Neither
    peer writes a permanent trust record until its own local consent and the
    matching remote consent for the same challenge/identity are both present.
@@ -58,7 +61,10 @@ consent flow; a successful exchange repairs both Keychain records.
 
 Pairing codes are confirmation data, not long-term credentials. They are not
 written to diagnostics. Revocation deletes the peer record and returns future
-connections to `pairingRequired`.
+connections to `pairingRequired`. M10 exposes this as `Forget saved
+pairings…` on both app surfaces; it stops the active session first and leaves
+the local device identity intact. The Host's editable Bonjour instance name
+is discovery metadata only and has no effect on trust or TLS identity.
 
 The production pairing challenge expires after five minutes. `TransportCore`
 uses the challenge expiry as an independent teardown deadline, so a modal
@@ -131,6 +137,15 @@ two-machine pass is still an environment evidence item until it is run on the
 Intel Host and recorded. The typed consent API is exercised by the pairing
 tests; product UI remains outside M2 and belongs to the later session UX
 milestone.
+
+The M10 production app composition assigns role-specific Keychain namespaces:
+Host uses identity label `MacRemoteApp.host` and trust service
+`com.rudinyu.MacRemoteApp.Host.trust`; Viewer uses
+`MacRemoteApp.viewer` and `com.rudinyu.MacRemoteApp.Viewer.trust`. This is an
+app-composition decision, not a change to the M2 wire contract. It prevents
+same-Mac Host/Viewer testing from reusing one local TLS private key. Existing
+shared-namespace trust records are not migrated; upgraded endpoints must pair
+again once.
 
 ## M2 boundary
 

@@ -1,7 +1,10 @@
 import Foundation
 
-/// The Host-side permission fact used by the final input admission check.
-/// `unknown` is intentionally not treated as authorized.
+/// The Host-side PostEvent permission fact used by the final input admission
+/// check. Accessibility is a separate optional enhancement for local AX
+/// inspection and focused-text operations; it is not represented by this
+/// base event-posting state. `unknown` is intentionally not treated as
+/// authorized.
 public enum HostInputPermissionState: Equatable, Sendable {
     case authorized
     case missing
@@ -230,7 +233,7 @@ public enum HostInputError: Error, Equatable, Sendable, CustomStringConvertible 
         case .windowUnavailable:
             return "Host selected window is unavailable"
         case .permissionUnavailable:
-            return "Host Accessibility permission is unavailable"
+            return "Host PostEvent permission is unavailable"
         case let .focusUnavailable(state):
             return "Host input focus is unavailable: \(state.label)"
         case let .capabilityUnavailable(capability):
@@ -376,7 +379,7 @@ public enum HostInputAdapterError: Error, Equatable, Sendable, CustomStringConve
     public var description: String {
         switch self {
         case .permissionUnavailable:
-            return "Host Accessibility permission is unavailable"
+            return "Host PostEvent permission is unavailable"
         case .targetUnavailable:
             return "Host input target changed before the event was posted"
         case .eventCreationFailed:

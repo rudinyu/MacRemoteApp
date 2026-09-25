@@ -4,7 +4,11 @@ public struct ProtocolVersion: Equatable, Hashable, Sendable {
     public let major: UInt8
     public let minor: UInt8
 
-    public static let current = ProtocolVersion(major: 1, minor: 0)
+    /// M10 changes the pairing challenge from the legacy confirmation-code
+    /// exchange to a mandatory commit/reveal flow. Keep that wire break
+    /// explicit so a 1.x peer is rejected before any pairing payload is
+    /// interpreted.
+    public static let current = ProtocolVersion(major: 2, minor: 0)
 
     public init(major: UInt8, minor: UInt8) {
         self.major = major
@@ -50,6 +54,9 @@ public enum MessageType: Equatable, Hashable, Sendable {
     case capabilities
     case pairingChallenge
     case pairingConfirmation
+    case pairingResponse
+    case pairingVerification
+    case pairingReveal
     case sessionAuthorize
     case windowList
     case windowSelection
@@ -73,6 +80,9 @@ public enum MessageType: Equatable, Hashable, Sendable {
         case 0x0002: self = .capabilities
         case 0x0003: self = .pairingChallenge
         case 0x0004: self = .pairingConfirmation
+        case 0x0014: self = .pairingResponse
+        case 0x0015: self = .pairingVerification
+        case 0x0016: self = .pairingReveal
         case 0x0005: self = .sessionAuthorize
         case 0x0006: self = .windowList
         case 0x0007: self = .windowSelection
@@ -98,6 +108,9 @@ public enum MessageType: Equatable, Hashable, Sendable {
         case .capabilities: return 0x0002
         case .pairingChallenge: return 0x0003
         case .pairingConfirmation: return 0x0004
+        case .pairingResponse: return 0x0014
+        case .pairingVerification: return 0x0015
+        case .pairingReveal: return 0x0016
         case .sessionAuthorize: return 0x0005
         case .windowList: return 0x0006
         case .windowSelection: return 0x0007

@@ -7,6 +7,108 @@ final class RemoteProtocolTests: XCTestCase {
         XCTAssertEqual(RemoteProtocolModule.name, "RemoteProtocol")
     }
 
+    func testPairingCommitRevealMessagesRoundTripAndBoundContributions() throws {
+        let contribution = Data(repeating: 0xAB, count: 32)
+        let challenge = PairingChallengeMessage(
+            challengeID: 7,
+            commitment: Data(repeating: 0xCD, count: 32)
+        )
+        let response = PairingResponseMessage(challengeID: 7, commitment: contribution)
+        let verification = PairingVerificationMessage(challengeID: 7, contribution: contribution)
+        let reveal = PairingRevealMessage(challengeID: 7, contribution: contribution)
+
+        XCTAssertEqual(
+            try MessagePayload.decode(
+                messageType: .pairingChallenge,
+                data: try challenge.encoded()
+            ),
+            .pairingChallenge(challenge)
+        )
+        XCTAssertEqual(
+            try MessagePayload.decode(
+                messageType: .pairingResponse,
+                data: try response.encoded()
+            ),
+            .pairingResponse(response)
+        )
+        XCTAssertEqual(
+            try MessagePayload.decode(
+                messageType: .pairingVerification,
+                data: try verification.encoded()
+            ),
+            .pairingVerification(verification)
+        )
+        XCTAssertEqual(
+            try MessagePayload.decode(
+                messageType: .pairingReveal,
+                data: try reveal.encoded()
+            ),
+            .pairingReveal(reveal)
+        )
+        XCTAssertThrowsError(try PairingResponseMessage(challengeID: 7, commitment: Data([1])).encoded())
+        XCTAssertThrowsError(try PairingVerificationMessage(challengeID: 7, contribution: Data([1])).encoded())
+        XCTAssertThrowsError(try PairingRevealMessage(challengeID: 7, contribution: Data([1])).encoded())
+    }
+
+    func testWindowCatalogGenerationBindsListAndSelection() throws {
+        let list = WindowListMessage(windows: [], catalogGeneration: 7)
+        let selection = WindowSelectionMessage(
+            windowIdentifier: 42,
+            windowGeneration: 9,
+            catalogGeneration: 7
+        )
+
+        XCTAssertEqual(
+            try WindowListMessage.decode(try list.encoded()),
+            list
+        )
+        XCTAssertEqual(
+            try WindowSelectionMessage.decode(try selection.encoded()),
+            selection
+        )
+        XCTAssertThrowsError(
+            try WindowListMessage(windows: [], catalogGeneration: 0).encoded()
+        )
+        XCTAssertThrowsError(
+            try WindowSelectionMessage(
+                windowIdentifier: 42,
+                windowGeneration: 9,
+                catalogGeneration: 0
+            ).encoded()
+        )
+    }
+
+    func testHelloDeviceNameIsOptionalBoundedDisplayMetadata() throws {
+        let namedHello = HelloMessage(
+            protocolVersion: .current,
+            role: .viewer,
+            implementationIdentifier: "MacRemoteApp-Viewer-M10",
+            limits: .default,
+            deviceName: "Apple-Silicon-Viewer"
+        )
+        let decodedNamedHello = try HelloMessage.decode(try namedHello.encoded())
+        XCTAssertEqual(decodedNamedHello, namedHello)
+
+        let legacyHello = HelloMessage(
+            protocolVersion: .current,
+            role: .host,
+            implementationIdentifier: "MacRemoteApp-Host-M10",
+            limits: .default
+        )
+        XCTAssertNil(try HelloMessage.decode(legacyHello.encoded()).deviceName)
+
+        for invalidName in ["", "  ", String(repeating: "x", count: 64), "bad\nname"] {
+            let hello = HelloMessage(
+                protocolVersion: .current,
+                role: .viewer,
+                implementationIdentifier: "MacRemoteApp-Viewer-M10",
+                limits: .default,
+                deviceName: invalidName
+            )
+            XCTAssertThrowsError(try hello.encoded(), "accepted invalid device name: \(invalidName)")
+        }
+    }
+
     func testEnvelopeGoldenVectorAndRoundTrip() throws {
         let envelope = try Envelope(
             channel: .control,
@@ -20,7 +122,7 @@ final class RemoteProtocolTests: XCTestCase {
 
         XCTAssertEqual(
             encoded.hexString,
-            "4D525031010000000100020000000200000000000000010000000000000002DEAD"
+            "4D525031020000000100020000000200000000000000010000000000000002DEAD"
         )
         XCTAssertEqual(try Envelope.decode(encoded), envelope)
     }
@@ -148,8 +250,8 @@ final class RemoteProtocolTests: XCTestCase {
         }
 
         var unsupportedVersion = valid
-        unsupportedVersion[4] = 2
-        assertProtocolError(.unsupportedVersion(major: 2, minor: 0)) {
+        unsupportedVersion[4] = 3
+        assertProtocolError(.unsupportedVersion(major: 3, minor: 0)) {
             _ = try Envelope.decode(unsupportedVersion)
         }
 
@@ -291,13 +393,13 @@ final class RemoteProtocolTests: XCTestCase {
         ]
 
         let goldenVectors: [MessageType: String] = [
-            .hello: "0101010000000201000201000000010103010000000F4D616352656D6F74654170702D4D3104010000000400100000050100000004000100000601000000040000FFEB",
+            .hello: "0101010000000202000201000000010103010000000F4D616352656D6F74654170702D4D3104010000000400100000050100000004000100000601000000040000FFEB",
             .capabilities: "010101000000060002000100060200000000040000078003000000000400000438040000000002003C",
             .pairingChallenge: "010101000000080102030405060708020100000006313233343536",
             .pairingConfirmation: "01010100000008010203040506070802010000000101030000000006313233343536",
             .sessionAuthorize: "01010100000001010200000000080000000000000009030100000006000200010002",
-            .windowList: "0101010000005600010000005001010100000008000000000000002A020100000012636F6D2E6578616D706C652E456469746F72030000000008446F63756D656E7404010000000400000500050100000004000002D006010000000101",
-            .windowSelection: "01010100000008000000000000002A0201000000080000000000000009",
+            .windowList: "0101010000005600010000005001010100000008000000000000002A020100000012636F6D2E6578616D706C652E456469746F72030000000008446F63756D656E7404010000000400000500050100000004000002D0060100000001010201000000080000000000000001",
+            .windowSelection: "01010100000008000000000000002A02010000000800000000000000090301000000080000000000000001",
             .streamConfig: "010101000000040000078002010000000400000438030100000002003C04010000000200010501000000080000000000000009",
             .videoConfig: "010101000000080000000000000009020100000003010203",
             .videoFrame: "010101000000080000000000000009020100000008000000000000006403010000000800000000000000650401000000040000078005010000000400000438060100000001010701000000050000000165",
@@ -340,6 +442,21 @@ final class RemoteProtocolTests: XCTestCase {
         assertProtocolError(.unknownMandatoryField(message: .ping, fieldID: 250)) {
             _ = try PingMessage.decode(mandatoryUnknown)
         }
+    }
+
+    func testPongOptionalReceiverTimestampRoundTripsAndLegacyDefaultsToNil() throws {
+        let timestamped = PongMessage(
+            nonce: 7,
+            receiverTimestampNanoseconds: 42
+        )
+        XCTAssertEqual(
+            try PongMessage.decode(timestamped.encoded()),
+            timestamped
+        )
+        XCTAssertNil(
+            try PongMessage.decode(PongMessage(nonce: 7).encoded())
+                .receiverTimestampNanoseconds
+        )
     }
 
     func testMessageMalformedFieldsAndBoundsFailPredictably() throws {
@@ -394,9 +511,9 @@ final class RemoteProtocolTests: XCTestCase {
     func testProtocolVersionCapabilityAndLimitsRules() throws {
         XCTAssertEqual(ProtocolLimits.default.maxControlPayloadLength, 65_536)
         XCTAssertEqual(ProtocolLimits.default.maxClipboardTextBytes, 65_515)
-        XCTAssertTrue(ProtocolVersion(major: 1, minor: 0).isCompatible())
-        XCTAssertFalse(ProtocolVersion(major: 2, minor: 0).isCompatible())
-        XCTAssertFalse(ProtocolVersion(major: 1, minor: 1).isCompatible())
+        XCTAssertTrue(ProtocolVersion(major: 2, minor: 0).isCompatible())
+        XCTAssertFalse(ProtocolVersion(major: 1, minor: 0).isCompatible())
+        XCTAssertFalse(ProtocolVersion(major: 2, minor: 1).isCompatible())
         XCTAssertEqual(MessageType(rawValue: 0x7FFF), .unknown(0x7FFF))
         XCTAssertEqual(Capability(rawValue: 0x7FFF), .unknown(0x7FFF))
 

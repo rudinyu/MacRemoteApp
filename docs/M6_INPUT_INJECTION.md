@@ -5,7 +5,7 @@
 M6 adds the Host-side input boundary for the typed M5 event model. The
 implementation is complete for deterministic package and composition tests.
 Actual OS event posting remains an explicit manual evidence step because it
-requires a local Accessibility grant and can affect the selected test
+requires local PostEvent access and can affect the selected test
 application. No M7 clipboard behavior is included.
 
 ## Ownership
@@ -60,7 +60,7 @@ Every event is checked immediately before adapter invocation:
 authenticated and authorized session
   AND authorized selected-window generation matches
   AND selected window identity, owning application, and process still match
-  AND Accessibility/post-event permission is authorized
+  AND PostEvent permission is authorized
   AND selected window is the eligible foreground window
   AND input capability is enabled
   AND event shape, modifier mask, sequence, and rate are valid
@@ -100,16 +100,20 @@ scroll, keyboard, modifier, and focus-intent commands reach the adapter; mouse
 buttons are limited to left, right, and center. Focus intent is an eligibility
 signal and never activates a background window.
 
-The real context provider checks Accessibility/post-event permission, the
-current on-screen window identity, front-to-back window ordering, and console
-lock state. The adapter repeats the complete target/focus/permission check
+The real context provider checks PostEvent permission, optional local
+Accessibility secure-input state, the current on-screen window identity,
+front-to-back window ordering, and console lock state. The adapter repeats the
+complete target/focus/permission check
 immediately before posting a `CGEvent`, then uses target-bound process posting
 so a focus change cannot redirect the event to another frontmost application.
 
 macOS does not expose a general public secure-input status query. The provider
-therefore defaults to `unknown`, which is rejected, and accepts an explicit
-local `inactive`/`active` signal only from a Host-owned provider. It never
-infers secure-input safety from the Viewer or from received event data.
+therefore reports `unknown` when optional Accessibility inspection is
+unavailable; the independent foreground/window checks still protect the base
+PostEvent path. A detected secure field remains rejected, and an explicit
+local `inactive`/`active` signal is accepted only from a Host-owned provider.
+It never infers secure-input safety from the Viewer or from received event
+data.
 
 ## Verification
 
@@ -127,7 +131,9 @@ infers secure-input safety from the Viewer or from received event data.
   admission also enforces the configured encoded-payload bound.
 
 The real adapter is not invoked by automated tests. Manual OS verification
-must use a disposable foreground test application, grant Accessibility to the
-signed Host bundle, confirm pointer/scroll/key behavior, then revoke or remove
-the grant and verify that subsequent events are rejected. Do not use a
+must use a disposable foreground test application, grant PostEvent access to
+the signed Host bundle, confirm pointer/scroll/key behavior, then revoke or
+remove the grant and verify that subsequent events are rejected. Accessibility
+may be granted separately to exercise the optional AX/secure-input enhancement.
+Do not use a
 password field, login window, authentication dialog, or a production app.

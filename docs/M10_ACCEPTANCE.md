@@ -8,24 +8,36 @@ application whose content contains no private data.
 
 The repository now contains a production runtime composition in
 `Apps/Host/HostRuntime.swift` and `Apps/Viewer/ViewerRuntime.swift`. On first
-launch, the Host enrolls its local identity, requests Screen Recording before
-waiting for Bonjour readiness, then starts Bonjour to trigger Local Network
-consent. It advertises eligible windows, validates the
+launch, the Host requests Screen Recording, performs a short Bonjour readiness
+probe to trigger Local Network consent, then enrolls its local identity and
+starts the authenticated listener. It advertises eligible windows, validates the
 selected generation, captures and encodes it, and forwards authorized
 input/clipboard messages. A Viewer discovers available Hosts and requires an
 explicit Host choice, presents a picker for the eligible advertised windows,
 decodes and presents H.264 frames through Metal, and forwards mouse/keyboard
 events from the same aspect-fit surface. The Viewer can request a safe
-same-session window replacement. The Host remains resident when Screen
+same-session window replacement; the Host refreshes the window catalog while
+connected and may foreground the explicitly selected regular application.
+Input is still accepted only after Host-side foreground and PostEvent
+checks pass. The Viewer visibly distinguishes Connecting, Connected, and
+Reconnecting, and disables Connect while active. The Host's default Bonjour
+name is its short macOS hostname, while the Viewer sends its hostname as
+display-only pairing metadata. The Host remains resident when Screen
 Recording or Local Network setup is incomplete and exposes a status-menu Retry
 action. The production path now uses TLS bootstrap plus Keychain-backed
-two-sided pairing: a first connection shows a Host consent prompt and a Viewer
-code-entry prompt, while a later connection silently exchanges the same
-challenge when both trust records match and reuses them without prompting. If
+two-sided pairing: a first connection uses Host and Viewer commitments, then
+the Host reveal and Viewer reveal before both endpoints independently derive the
+same six-digit code; a fresh pairing shows a Host consent prompt and a Viewer
+consent prompt that displays the code for comparison and requires explicit
+acceptance. A later connection silently exchanges the same challenge when both
+trust records match and reuses them without prompting. If
 only one endpoint has a record, the other endpoint still receives the consent
 flow and the completed exchange repairs both records. Each endpoint
 automatically enrolls its own local P-256 identity in the login Keychain. The
-physical evidence below remains required; deterministic
+Host status menu can rename the Bonjour display name and forget all saved peer
+pairings; the Viewer exposes the same explicit trust reset action. Forgetting
+pairings stops the active session but preserves the local device identity and
+macOS permissions. The physical evidence below remains required; deterministic
 build/test output must not be used as a substitute.
 
 ## Prerequisites
@@ -90,15 +102,16 @@ build/test output must not be used as a substitute.
    release flow.
 
 2. On the Intel Host, complete the first-run setup shown by the signed Host
-   app. Screen Recording is requested before the Host waits for Bonjour
-   readiness; starting Bonjour then gives macOS an opportunity to present Local
-   Network consent. The Host remains running if either permission is denied;
+   app. Screen Recording is requested first; a short Bonjour readiness probe
+   then gives macOS an opportunity to present Local Network consent before the
+   Host enrolls its local identity. The Host remains running if either permission is denied;
    use the status-menu `Retry setup` item after changing System Settings.
    After a
    Viewer negotiates input and the operator selects a window, the signed Host
-   requests Accessibility/post-event access from the Host bundle. Until those
-   input permissions are authorized, the Host remains view-only and does not
-   authorize mouse/keyboard capabilities.
+   requests PostEvent access from the Host bundle. Accessibility may also be
+   requested as an optional AX/secure-input enhancement. Until PostEvent is
+   authorized, the Host remains view-only and does not authorize mouse/keyboard
+   capabilities.
    The capability may still appear in the negotiation offer; authorization is
    the security gate that reflects the current permission state.
    Install the role-specific app by dragging it onto the DMG's per-user
@@ -114,11 +127,20 @@ build/test output must not be used as a substitute.
    Generate fresh M2 identities outside the repository only when running the
    explicit debug physical-smoke commands below.
 
+The production Host and Viewer use separate Keychain identity labels and
+peer-trust services, so both roles can run on one Mac without attempting to
+use the same private key. If upgrading from a build that used the former
+shared namespace, pair once after upgrading: old shared trust is not imported
+and remains untouched by the upgrade. The diagnostic
+`MACREMOTEAPP_LOCAL_IDENTITY_LABEL` value is a base; the app appends `.host` or
+`.viewer` before using it.
+
 When launching the installed production bundles below, do not set
 `MACREMOTEAPP_PEER_CERT` for the normal AirPlay-like first-pairing flow: the
 Host and Viewer enroll their local TLS identities, establish the presented
-peer identities, show the same one-time code, require local consent on both
-endpoints, and then save the peer records in the Keychain.
+peer identities, complete commit/reveal, independently derive and compare the
+same six-digit code, require local consent on both endpoints, and then save
+the peer records in the Keychain.
 `MACREMOTEAPP_PEER_CERT` remains an optional pinned-peer migration/diagnostic
 path. `MACREMOTEAPP_LOCAL_IDENTITY_LABEL` remains a controlled diagnostic
 override for the generated identity label.
@@ -136,13 +158,19 @@ from the production bundle's first-pairing flow.
 | Fresh install | Host/Viewer app bundles launch and signatures verify | ☐ |
 | Startup permissions | Host Local Network and Screen Recording, plus Viewer Local Network, are granted to the signed app bundles | ☐ |
 | User documentation | Each DMG contains the User Guide, debugging guide, and debug-log collection guide | ☐ |
-| Pairing | Host displays a code, Viewer enters the matching code, both operators consent, and trust records are stored | ☐ |
+| Pairing | Host and Viewer complete commit/reveal, display the same independently derived six-digit code, operators compare it, Host allows and Viewer explicitly accepts, and trust records are stored | ☐ |
+| Pairing recovery | Host and Viewer can explicitly forget their own role's saved peer pairings; the next connection requires a new code and local identity records remain intact | ☐ |
+| Full uninstall reset | The DMG helper clears both roles' per-user app-state paths and invokes each installed role's signed binary to clear its own trust and generated identity; it does not touch unrelated Keychain records or macOS TCC grants | ☐ |
+| Host display name | Host `Rename Host…` changes the Bonjour discovery name and the listener restarts without changing the TLS identity | ☐ |
+| Default/display device names | Host defaults to its macOS short hostname; Viewer pairing UI and trust metadata use the Viewer hostname; names never affect authentication | ☐ |
 | Window selection | Exactly one eligible foreground window is selected | ☐ |
+| Same-session app switching | Start streaming one app, select another eligible app without reconnecting, then verify the new app is foreground on Host and receives mouse/keyboard only while focus and PostEvent checks pass | ☐ |
+| Viewer connection state | Connect changes to disabled `Connected`; disconnect shows `Reconnecting…` during retry and re-enables Connect only when disconnected | ☐ |
 | Capture/display | Viewer renders the selected window with aspect preservation | ☐ |
 | Performance | 30-second report has clock probes, valid samples, p50/p95, fps and resource data | ☐ |
 | Input | Each authorized input capability works only while authorized; mouse-only or keyboard-only authorization keeps the other local controls disabled | ☐ |
 | Clipboard | Text-only opt-in works; opt-out and echo prevention work | ☐ |
-| Permission recovery | Local Network, Screen Recording, or Accessibility denial/revocation disables the affected path and gives a recoverable instruction | ☐ |
+| Permission recovery | Local Network, Screen Recording, or PostEvent denial/revocation disables the affected path and gives a recoverable instruction; optional Accessibility loss only disables its AX enhancement | ☐ |
 | Window recovery | Close/change/focus loss disables input and reports a recoverable state | ☐ |
 | LAN recovery | Disconnect shows reconnecting; reauthorization is required before input resumes | ☐ |
 | Stale trust | Revocation or identity mismatch requires explicit re-pairing | ☐ |

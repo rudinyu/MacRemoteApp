@@ -257,26 +257,38 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertEqual(snapshot.state, .failed(.windowUnavailable))
     }
 
-    func testFailedCaptureSessionCannotRestartOnFinishedOutputStream() async throws {
+    func testRecoverableCaptureFailureCanRestartTheReusableOutputStream() async throws {
         let window = makeWindow(identifier: 11)
         let provider = FakeWindowProvider(windows: [window], permission: .authorized)
-        let engine = FakeCaptureEngine()
+        let firstEngine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        let secondEngine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
         let session = WindowCaptureSession(
             windowProvider: provider,
-            engineFactory: FakeCaptureEngineFactory(engine: engine),
+            engineFactory: SequencedCaptureEngineFactory(engines: [firstEngine, secondEngine]),
             configuration: CaptureConfiguration(monitorIntervalNanoseconds: 0)
         )
         try await session.start(windowIdentifier: window.identifier)
         await provider.setWindows([])
         await session.refreshSelection()
+        let failedSnapshot = await session.snapshot()
+        XCTAssertEqual(failedSnapshot.state, .failed(.windowUnavailable))
 
         await provider.setWindows([window])
-        do {
-            try await session.start(windowIdentifier: window.identifier)
-            XCTFail("a failed session must not restart its finished frame stream")
-        } catch CaptureCoreError.sessionFailed(.windowUnavailable) {
-            // Expected.
+        try await session.start(windowIdentifier: window.identifier)
+        let restartedSnapshot = await session.snapshot()
+        XCTAssertEqual(
+            restartedSnapshot.state,
+            .capturing(windowIdentifier: window.identifier, generation: 2)
+        )
+
+        let receiveTask = Task { () -> CapturedFrame? in
+            var iterator = session.frames.makeAsyncIterator()
+            return try? await iterator.next()
         }
+        secondEngine.emit(try makeFrame(windowIdentifier: window.identifier, generation: 2))
+        let received = await receiveTask.value
+        XCTAssertEqual(received?.generation, 2)
+        XCTAssertEqual(received?.windowIdentifier, window.identifier)
     }
 
     func testInvalidWindowNeverStartsCapture() async throws {
@@ -302,6 +314,25 @@ final class CaptureCoreTests: XCTestCase {
             // Expected.
         }
         XCTAssertFalse(engine.wasStarted())
+    }
+
+    func testCaptureConfigurationRejectsTinyHelperWindows() {
+        let configuration = CaptureConfiguration()
+        XCTAssertFalse(
+            configuration.acceptsWindowSize(
+                WindowBounds(x: 0, y: 0, width: 1, height: 33)
+            )
+        )
+        XCTAssertFalse(
+            configuration.acceptsWindowSize(
+                WindowBounds(x: 0, y: 0, width: 159, height: 80)
+            )
+        )
+        XCTAssertTrue(
+            configuration.acceptsWindowSize(
+                WindowBounds(x: 0, y: 0, width: 160, height: 80)
+            )
+        )
     }
 
     func testM3SystemCaptureSmokeWhenOptedIn() async throws {
@@ -567,6 +598,10 @@ private final class GatedCaptureEngine: WindowCaptureEngine, @unchecked Sendable
 
     func failFrames(_ error: Error) {
         continuation.finish(throwing: error)
+    }
+
+    func emit(_ frame: CapturedFrame) {
+        _ = continuation.yield(frame)
     }
 
     func finishFrames() {

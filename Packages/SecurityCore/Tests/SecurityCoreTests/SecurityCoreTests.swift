@@ -29,6 +29,35 @@ final class SecurityCoreTests: XCTestCase {
         }
     }
 
+    func testRoleSpecificIdentityLabelsKeepHostAndViewerIdentitiesSeparate() async throws {
+        let temporaryKeychain = try TemporaryKeychain()
+        let suffix = UUID().uuidString
+        let hostProvider = KeychainIdentityProvider(
+            label: "MacRemoteApp.host.\(suffix)",
+            keychain: KeychainReference(temporaryKeychain.reference)
+        )
+        let viewerProvider = KeychainIdentityProvider(
+            label: "MacRemoteApp.viewer.\(suffix)",
+            keychain: KeychainReference(temporaryKeychain.reference)
+        )
+
+        do {
+            let hostIdentity = try await hostProvider.loadOrCreate()
+            let viewerIdentity = try await viewerProvider.loadOrCreate()
+            let reusedHostIdentity = try await hostProvider.loadOrCreate()
+            let reusedViewerIdentity = try await viewerProvider.loadOrCreate()
+            XCTAssertNotEqual(hostIdentity.peerIdentity, viewerIdentity.peerIdentity)
+            XCTAssertEqual(reusedHostIdentity.peerIdentity, hostIdentity.peerIdentity)
+            XCTAssertEqual(reusedViewerIdentity.peerIdentity, viewerIdentity.peerIdentity)
+            try await hostProvider.removeGeneratedIdentity()
+            try await viewerProvider.removeGeneratedIdentity()
+        } catch {
+            try? await hostProvider.removeGeneratedIdentity()
+            try? await viewerProvider.removeGeneratedIdentity()
+            throw error
+        }
+    }
+
     func testLocalIdentityEnrollmentAdoptsConcurrentKeychainClaim() async throws {
         let temporaryKeychain = try TemporaryKeychain()
         let tag = "com.rudinyu.MacRemoteApp.test.concurrent.\(UUID().uuidString)"
@@ -195,6 +224,77 @@ final class SecurityCoreTests: XCTestCase {
         XCTAssertNil(revokedPeer)
     }
 
+    func testKeychainTrustStoreClearsRecordsWithoutDecodingThem() async throws {
+        let temporaryKeychain = try TemporaryKeychain()
+        let service = "com.rudinyu.MacRemoteApp.test.trust.\(UUID().uuidString)"
+        let cleanupQuery: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecUseKeychain: temporaryKeychain.reference
+        ]
+        defer { _ = SecItemDelete(cleanupQuery as CFDictionary) }
+
+        for account in ["legacy", "partial"] {
+            let status = SecItemAdd(
+                [
+                    kSecClass: kSecClassGenericPassword,
+                    kSecAttrService: service,
+                    kSecAttrAccount: account,
+                    kSecValueData: Data("not-json-\(account)".utf8),
+                    kSecUseKeychain: temporaryKeychain.reference
+                ] as CFDictionary,
+                nil
+            )
+            XCTAssertEqual(status, errSecSuccess)
+        }
+
+        let store = KeychainTrustStore(
+            service: service,
+            keychain: KeychainReference(temporaryKeychain.reference)
+        )
+        let removedCount = try await store.removeAllPairings()
+        XCTAssertEqual(removedCount, 2)
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(
+            cleanupQuery.merging([
+                kSecMatchLimit: kSecMatchLimitAll,
+                kSecReturnAttributes: true
+            ]) { _, new in new } as CFDictionary,
+            &result
+        )
+        if status == errSecSuccess {
+            XCTAssertEqual((result as? [Any])?.count, 0)
+        } else {
+            XCTAssertEqual(status, errSecItemNotFound)
+        }
+    }
+
+    func testRoleSpecificTrustServicesKeepHostAndViewerPairingsSeparate() async throws {
+        let temporaryKeychain = try TemporaryKeychain()
+        let suffix = UUID().uuidString
+        let hostStore = KeychainTrustStore(
+            service: "com.rudinyu.MacRemoteApp.Host.trust.\(suffix)",
+            keychain: KeychainReference(temporaryKeychain.reference)
+        )
+        let viewerStore = KeychainTrustStore(
+            service: "com.rudinyu.MacRemoteApp.Viewer.trust.\(suffix)",
+            keychain: KeychainReference(temporaryKeychain.reference)
+        )
+        let peerIdentity = try PeerIdentity(publicKeyRepresentation: Data("paired-peer".utf8))
+        let peer = TrustedPeer(identity: peerIdentity, displayName: "Paired peer")
+
+        try await hostStore.save(peer)
+        let hostPeer = try await hostStore.trustedPeer(for: peerIdentity.identifier)
+        let viewerPeer = try await viewerStore.trustedPeer(for: peerIdentity.identifier)
+        let removedCount = try await hostStore.removeAllPairings()
+        let clearedHostPeer = try await hostStore.trustedPeer(for: peerIdentity.identifier)
+        XCTAssertEqual(hostPeer, peer)
+        XCTAssertNil(viewerPeer)
+        XCTAssertEqual(removedCount, 1)
+        XCTAssertNil(clearedHostPeer)
+        try await viewerStore.removeAll()
+    }
+
     func testPairingRequiresBothLocalAndRemoteConsentBeforeTrustAndRevocationFailsClosed() async throws {
         let local = try PeerIdentity(publicKeyRepresentation: Data("local-key".utf8))
         let remote = try PeerIdentity(publicKeyRepresentation: Data("remote-key".utf8))
@@ -285,6 +385,49 @@ final class SecurityCoreTests: XCTestCase {
         }
     }
 
+    func testMismatchedRemoteConfirmationCodeCannotPersistTrust() async throws {
+        let local = try PeerIdentity(publicKeyRepresentation: Data("local-mismatch".utf8))
+        let remote = try PeerIdentity(publicKeyRepresentation: Data("remote-mismatch".utf8))
+        let coordinator = PairingCoordinator(
+            localIdentity: local,
+            trustStore: InMemoryTrustStore()
+        )
+        let now = Date(timeIntervalSince1970: 2_500)
+        let challenge = try await coordinator.beginPairing(
+            with: remote,
+            challengeID: 70,
+            nonce: Data(repeating: 0x7A, count: 32),
+            now: now,
+            timeout: 60
+        )
+        _ = try await coordinator.confirmLocalConsent(
+            challengeID: challenge.challengeID,
+            remoteIdentity: remote,
+            confirmationCode: challenge.confirmationCode,
+            accepted: true,
+            now: now.addingTimeInterval(1)
+        )
+
+        do {
+            _ = try await coordinator.recordRemoteConsent(
+                challengeID: challenge.challengeID,
+                remoteIdentity: remote,
+                confirmationCode: "0000-0000-0000",
+                accepted: true,
+                now: now.addingTimeInterval(2)
+            )
+            XCTFail("a mismatched remote code must not complete pairing")
+        } catch SecurityCoreError.pairingCodeMismatch {
+            // Expected: the protocol still enforces equality after UI consent.
+        }
+
+        let consent = await coordinator.consentState()
+        let decision = try await coordinator.trustDecision(for: remote)
+        XCTAssertEqual(consent?.localConsent, true)
+        XCTAssertEqual(consent?.remoteConsent, false)
+        XCTAssertEqual(decision, .pairingRequired)
+    }
+
     func testRemoteChallengeCanBeAdoptedBeforeUserConfirmation() async throws {
         let local = try PeerIdentity(publicKeyRepresentation: Data("local-adopter".utf8))
         let remote = try PeerIdentity(publicKeyRepresentation: Data("remote-adopter".utf8))
@@ -297,27 +440,113 @@ final class SecurityCoreTests: XCTestCase {
             now: Date(timeIntervalSince1970: 3_000),
             timeout: 60
         )
+        XCTAssertFalse(sourceChallenge.isVerificationReady)
         let challenge = try await coordinator.adoptRemoteSessionChallenge(
             challengeID: 99,
             from: remote,
-            confirmationCode: sourceChallenge.confirmationCode,
+            commitment: try XCTUnwrap(sourceChallenge.commitment),
             now: Date(timeIntervalSince1970: 3_000),
             timeout: 60
         )
+        let response = try await coordinator.sessionResponse(
+            challengeID: challenge.challengeID,
+            remoteIdentity: remote
+        )
+        let verification = try await source.prepareSessionVerification(
+            challengeID: sourceChallenge.challengeID,
+            remoteIdentity: local,
+            remoteCommitment: response.commitment
+        )
+        let verifiedChallenge = try await coordinator.adoptRemoteSessionVerification(
+            challengeID: challenge.challengeID,
+            from: remote,
+            remoteContribution: verification.contribution
+        )
+        let reveal = try await coordinator.sessionReveal(
+            challengeID: verifiedChallenge.challengeID,
+            remoteIdentity: remote
+        )
+        let hostChallenge = try await source.adoptRemoteSessionReveal(
+            challengeID: sourceChallenge.challengeID,
+            from: local,
+            remoteContribution: reveal.contribution
+        )
         XCTAssertEqual(challenge.challengeID, 99)
         XCTAssertEqual(challenge.remoteIdentity, remote)
-        XCTAssertEqual(challenge.confirmationCode, sourceChallenge.confirmationCode)
+        XCTAssertEqual(verifiedChallenge.confirmationCode, hostChallenge.confirmationCode)
+        XCTAssertEqual(verifiedChallenge.confirmationCode.count, 6)
 
         let awaitingRemoteConsent = try await coordinator.confirmLocalConsent(
             challengeID: challenge.challengeID,
             remoteIdentity: remote,
-            confirmationCode: challenge.confirmationCode,
+            confirmationCode: verifiedChallenge.confirmationCode,
             accepted: true,
             now: Date(timeIntervalSince1970: 3_001)
         )
         XCTAssertEqual(awaitingRemoteConsent, .awaitingRemoteConsent)
         let pendingDecision = try await coordinator.trustDecision(for: remote)
         XCTAssertEqual(pendingDecision, .pairingRequired)
+    }
+
+    func testPairingCommitmentRejectsChangedHostReveal() async throws {
+        let host = try PeerIdentity(publicKeyRepresentation: Data("commit-host".utf8))
+        let viewer = try PeerIdentity(publicKeyRepresentation: Data("commit-viewer".utf8))
+        let hostCoordinator = PairingCoordinator(localIdentity: host, trustStore: InMemoryTrustStore())
+        let viewerCoordinator = PairingCoordinator(localIdentity: viewer, trustStore: InMemoryTrustStore())
+        let challenge = try await hostCoordinator.beginSessionPairing(
+            with: viewer,
+            challengeID: 104,
+            now: Date(timeIntervalSince1970: 6_000),
+            timeout: 60
+        )
+        let adopted = try await viewerCoordinator.adoptRemoteSessionChallenge(
+            challengeID: challenge.challengeID,
+            from: host,
+            commitment: try XCTUnwrap(challenge.commitment),
+            now: Date(timeIntervalSince1970: 6_000),
+            timeout: 60
+        )
+        let response = try await viewerCoordinator.sessionResponse(
+            challengeID: adopted.challengeID,
+            remoteIdentity: host
+        )
+        let verification = try await hostCoordinator.prepareSessionVerification(
+            challengeID: challenge.challengeID,
+            remoteIdentity: viewer,
+            remoteCommitment: response.commitment
+        )
+
+        do {
+            _ = try await viewerCoordinator.adoptRemoteSessionVerification(
+                challengeID: adopted.challengeID,
+                from: host,
+                remoteContribution: Data(repeating: 0xEE, count: PairingVerificationCode.contributionByteCount)
+            )
+            XCTFail("changed Host reveal should fail commitment verification")
+        } catch {
+            XCTAssertEqual(error as? SecurityCoreError, .pairingCodeMismatch)
+        }
+
+        let verifiedChallenge = try await viewerCoordinator.adoptRemoteSessionVerification(
+            challengeID: adopted.challengeID,
+            from: host,
+            remoteContribution: verification.contribution
+        )
+        let reveal = try await viewerCoordinator.sessionReveal(
+            challengeID: verifiedChallenge.challengeID,
+            remoteIdentity: host
+        )
+        do {
+            _ = try await hostCoordinator.adoptRemoteSessionReveal(
+                challengeID: challenge.challengeID,
+                from: viewer,
+                remoteContribution: Data(repeating: 0xDD, count: PairingVerificationCode.contributionByteCount)
+            )
+            XCTFail("changed Viewer reveal should fail commitment verification")
+        } catch {
+            XCTAssertEqual(error as? SecurityCoreError, .pairingCodeMismatch)
+        }
+        XCTAssertEqual(reveal.contribution.count, PairingVerificationCode.contributionByteCount)
     }
 
     func testRemoteConsentAloneRejectsTrustAndAbortClearsPendingState() async throws {

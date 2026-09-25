@@ -24,6 +24,7 @@ final class ViewerInputSurface: NSView {
     // upper-left. Keep the Viewer surface in the same top-left convention as
     // the normalized wire coordinates so Host mapping does not mirror Y.
     override var isFlipped: Bool { true }
+    override var isOpaque: Bool { false }
 
     private var trackingArea: NSTrackingArea?
     private var windowFocusObserver: NSObjectProtocol?
@@ -187,8 +188,6 @@ final class ViewerInputSurface: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.black.setFill()
-        dirtyRect.fill()
         let borderColor = inputReady ? NSColor.systemGreen : NSColor.systemOrange
         borderColor.setStroke()
         let border = bounds.insetBy(dx: 1, dy: 1)
@@ -323,7 +322,7 @@ final class ViewerInputSurface: NSView {
 
     private func configureSurface() {
         wantsLayer = true
-        layer?.backgroundColor = NSColor.black.cgColor
+        layer?.backgroundColor = NSColor.clear.cgColor
         toolTip = inputReadiness.label
         setAccessibilityLabel("Remote content")
         setAccessibilityValue(inputReadiness.label)

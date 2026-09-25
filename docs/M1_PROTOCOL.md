@@ -24,9 +24,11 @@ exactly 31 bytes followed by `payloadLength` bytes:
 | 23 | 8 | Sender monotonic timestamp |
 | 31 | N | Payload |
 
-The current version is `1.0`. A peer accepts the same major version with a
-minor version less than or equal to its supported minor version. A different
-major version or a newer minor version is rejected before payload parsing.
+The current version is `2.0`. Version `2.0` makes the M10 commit/reveal pairing
+flow and window-catalog generations explicit. A peer accepts the same major
+version with a minor version less than or equal to its supported minor version.
+The legacy `1.x` wire contract is intentionally incompatible and is rejected
+before payload parsing.
 
 Channels are fixed as:
 
@@ -160,13 +162,16 @@ capability list above.
 
 | Message | Fields in ascending field ID |
 | --- | --- |
-| `Hello` | 1 `version` (2 bytes), 2 `role` (u8), 3 `implementationIdentifier` (utf8), 4 `maxPayloadLength` (u32), 5 `maxControlPayloadLength` (u32), 6 `maxClipboardTextBytes` (u32) |
+| `Hello` | 1 `version` (2 bytes), 2 `role` (u8), 3 `implementationIdentifier` (utf8), 4 `maxPayloadLength` (u32), 5 `maxControlPayloadLength` (u32), 6 `maxClipboardTextBytes` (u32), 7 `deviceName` (utf8, optional, max 63 bytes; display-only) |
 | `Capabilities` | 1 `capabilities`, 2 `maxVideoWidth` (u32, optional), 3 `maxVideoHeight` (u32, optional), 4 `maxFrameRate` (u16, optional) |
-| `PairingChallenge` | 1 `challengeID` (u64), 2 `confirmationCode` (utf8) |
+| `PairingChallenge` | 1 `challengeID` (u64), 2 `confirmationCode` (utf8, legacy optional), 3 `commitment` (32-byte bytes, production required) |
 | `PairingConfirmation` | 1 `challengeID` (u64), 2 `accepted` (bool), 3 `confirmationCode` (utf8, optional) |
+| `PairingResponse` | 1 `challengeID` (u64), 2 `commitment` (32-byte bytes) |
+| `PairingVerification` | 1 `challengeID` (u64), 2 `contribution` (32-byte bytes) |
+| `PairingReveal` | 1 `challengeID` (u64), 2 `contribution` (32-byte bytes) |
 | `SessionAuthorize` | 1 `authorized` (bool), 2 `windowGeneration` (u64, optional), 3 `capabilities` |
-| `WindowList` | 1 `windows`: count u16 followed by length-prefixed nested window records |
-| `WindowSelection` | 1 `windowIdentifier` (u64), 2 `windowGeneration` (u64) |
+| `WindowList` | 1 `windows`: count u16 followed by length-prefixed nested window records, 2 `catalogGeneration` (u64) |
+| `WindowSelection` | 1 `windowIdentifier` (u64), 2 `windowGeneration` (u64), 3 `catalogGeneration` (u64) |
 | `StreamConfig` | 1 `width` (u32), 2 `height` (u32), 3 `frameRate` (u16), 4 `codec` (u16), 5 `generation` (u64) |
 | `VideoConfig` | 1 `generation` (u64), 2 `decoderConfiguration` (bytes) |
 | `VideoFrame` | 1 `generation` (u64), 2 `captureTimestamp` (u64), 3 `presentationTimestamp` (u64), 4 `width` (u32), 5 `height` (u32), 6 `keyframe` (bool), 7 `accessUnit` (bytes) |
@@ -183,6 +188,13 @@ capability list above.
 1 `identifier` (u64), 2 `applicationIdentifier` (utf8), 3 `title` (utf8,
 optional), 4 `width` (u32), 5 `height` (u32), and 6 `eligible` (bool).
 
+`Hello.deviceName` is an optional M10-compatible extension. Older peers may
+omit it; implementations that do not recognize optional fields ignore it. It
+is bounded and validated for display, but is untrusted metadata: it is never a
+peer identity, authorization input, or pairing secret. Host discovery may use
+an independently configured Bonjour display name; the Host defaults that name
+to its macOS short hostname. A Viewer sends its own macOS short hostname.
+
 ## Golden vectors
 
 The following vectors are the canonical payload bytes for the fixed samples in
@@ -190,13 +202,13 @@ The following vectors are the canonical payload bytes for the fixed samples in
 or clipboard data beyond the literal test string `hello`.
 
 ```text
-Hello               0101010000000201000201000000010103010000000F4D616352656D6F74654170702D4D3104010000000400100000050100000004000100000601000000040000FFEB
+Hello               0101010000000202000201000000010103010000000F4D616352656D6F74654170702D4D3104010000000400100000050100000004000100000601000000040000FFEB
 Capabilities        010101000000060002000100060200000000040000078003000000000400000438040000000002003C
 PairingChallenge    010101000000080102030405060708020100000006313233343536
 PairingConfirmation 01010100000008010203040506070802010000000101030000000006313233343536
 SessionAuthorize   01010100000001010200000000080000000000000009030100000006000200010002
-WindowList          0101010000005600010000005001010100000008000000000000002A020100000012636F6D2E6578616D706C652E456469746F72030000000008446F63756D656E7404010000000400000500050100000004000002D006010000000101
-WindowSelection     01010100000008000000000000002A0201000000080000000000000009
+WindowList          0101010000005600010000005001010100000008000000000000002A020100000012636F6D2E6578616D706C652E456469746F72030000000008446F63756D656E7404010000000400000500050100000004000002D0060100000001010201000000080000000000000001
+WindowSelection     01010100000008000000000000002A02010000000800000000000000090301000000080000000000000001
 StreamConfig        010101000000040000078002010000000400000438030100000002003C04010000000200010501000000080000000000000009
 VideoConfig         010101000000080000000000000009020100000003010203
 VideoFrame          010101000000080000000000000009020100000008000000000000006403010000000800000000000000650401000000040000078005010000000400000438060100000001010701000000050000000165

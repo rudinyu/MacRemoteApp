@@ -1122,12 +1122,22 @@ final class TransportCoreTests: XCTestCase {
 
         let capabilities: Set<Capability> = [.pingPong]
         let host = SessionCoordinator(
-            configuration: SessionConfiguration(role: .host, implementationIdentifier: "pairing-host", capabilities: capabilities),
+            configuration: SessionConfiguration(
+                role: .host,
+                implementationIdentifier: "pairing-host",
+                deviceName: "Intel-Test-Host",
+                capabilities: capabilities
+            ),
             transport: pair.first,
             pairingCoordinator: hostPairing
         )
         let viewer = SessionCoordinator(
-            configuration: SessionConfiguration(role: .viewer, implementationIdentifier: "pairing-viewer", capabilities: capabilities),
+            configuration: SessionConfiguration(
+                role: .viewer,
+                implementationIdentifier: "pairing-viewer",
+                deviceName: "Apple-Silicon-Test-Viewer",
+                capabilities: capabilities
+            ),
             transport: pair.second,
             pairingCoordinator: viewerPairing
         )
@@ -1140,14 +1150,14 @@ final class TransportCoreTests: XCTestCase {
         var viewerChallenge: PairingChallenge?
         for _ in 0 ..< 100 {
             viewerChallenge = await viewerPairing.pendingChallenge()
-            if viewerChallenge != nil { break }
+            if viewerChallenge?.isVerificationReady == true { break }
             try await Task.sleep(nanoseconds: 1_000_000)
         }
         let challenge = try XCTUnwrap(viewerChallenge)
         var hostChallenge: PairingChallenge?
         for _ in 0 ..< 100 {
             hostChallenge = await hostPairing.pendingChallenge()
-            if hostChallenge != nil { break }
+            if hostChallenge?.isVerificationReady == true { break }
             try await Task.sleep(nanoseconds: 1_000_000)
         }
         let hostChallengeValue = try XCTUnwrap(hostChallenge)
@@ -1176,8 +1186,14 @@ final class TransportCoreTests: XCTestCase {
         let viewerTrustDecision = try await viewerPairing.trustDecision(for: hostIdentity)
         XCTAssertEqual(hostSnapshot.state, .capabilitiesNegotiated)
         XCTAssertEqual(viewerSnapshot.state, .capabilitiesNegotiated)
+        XCTAssertEqual(hostSnapshot.peerDeviceName, "Apple-Silicon-Test-Viewer")
+        XCTAssertEqual(viewerSnapshot.peerDeviceName, "Intel-Test-Host")
         XCTAssertEqual(hostTrustDecision, .trusted)
         XCTAssertEqual(viewerTrustDecision, .trusted)
+        let hostTrustedPeers = try await hostTrustStore.allTrustedPeers()
+        let viewerTrustedPeers = try await viewerTrustStore.allTrustedPeers()
+        XCTAssertEqual(hostTrustedPeers.first?.displayName, "Apple-Silicon-Test-Viewer")
+        XCTAssertEqual(viewerTrustedPeers.first?.displayName, "Intel-Test-Host")
     }
 
     func testPairingBootstrapReusesMatchingTrustWithoutShowingPairingUI() async throws {
@@ -1264,7 +1280,7 @@ final class TransportCoreTests: XCTestCase {
         var viewerChallenge: PairingChallenge?
         for _ in 0 ..< 100 {
             viewerChallenge = await viewerPairing.pendingChallenge()
-            if viewerChallenge != nil { break }
+            if viewerChallenge?.isVerificationReady == true { break }
             try await Task.sleep(nanoseconds: 1_000_000)
         }
         let challenge = try XCTUnwrap(viewerChallenge)

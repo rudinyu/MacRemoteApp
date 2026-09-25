@@ -3,10 +3,12 @@
 import AppKit
 import Foundation
 
-/// The real macOS context source. It checks Accessibility and post-event
-/// permission, the current on-screen window identity, foreground ordering, and
-/// the console/lock state for every snapshot. It never attempts to activate a
-/// background window.
+/// The real macOS context source. It checks the PostEvent permission required
+/// for Quartz event posting, the current on-screen window identity, foreground
+/// ordering, and the console/lock state for every snapshot. Accessibility is
+/// an optional local signal for secure-input detection; it is not the base
+/// event-posting gate. This provider never attempts to activate a background
+/// window.
 public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider, @unchecked Sendable {
     public typealias SessionStateProvider = @Sendable () -> HostInputSessionState
     public typealias SelectionProvider = @Sendable () -> HostInputWindowSelection?
@@ -17,10 +19,10 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
     private let secureInputStateProvider: SecureInputStateProvider
 
     /// The public macOS API does not expose a general secure-input status
-    /// query. The default is therefore `.unknown`, which remains fail-closed.
-    /// A Host UI/adapter may provide a trustworthy, local safe-app signal for
-    /// the selected test application; it must never infer safety from Viewer
-    /// input or a remote message.
+    /// query. The default is therefore `.unknown`. A Host UI/adapter may
+    /// provide a trustworthy, local safe-app signal for the selected test
+    /// application; it must never infer safety from Viewer input or a remote
+    /// message.
     public init(
         sessionStateProvider: @escaping SessionStateProvider,
         selectionProvider: @escaping SelectionProvider,
@@ -33,9 +35,10 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
 
     /// Best-effort local secure-input signal. macOS does not expose a single
     /// public global secure-input flag, so the provider checks the focused
-    /// Accessibility element for the secure-text-field role and fails closed
-    /// when Accessibility cannot provide a trustworthy answer. This is a
-    /// local host fact only; it never uses Viewer input as evidence.
+    /// Accessibility element for the secure-text-field role. This is a local
+    /// host fact only; it never uses Viewer input as evidence. When the
+    /// optional Accessibility signal is unavailable, foreground and window
+    /// identity checks still protect the base PostEvent path.
     public static func detectSecureInputState() -> HostInputSecureInputState {
         guard AXIsProcessTrusted() else { return .unknown }
 
@@ -87,9 +90,11 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         permissionState()
     }
 
-    /// Requests the two local permissions required for post-event input.
-    /// The request is intentionally initiated by the signed Host bundle so
-    /// TCC records the decision against MacRemoteApp, not a launching shell.
+    /// Requests the local PostEvent permission required for event posting and
+    /// optionally asks for Accessibility so secure-input/AX enhancements can
+    /// work. The request is intentionally initiated by the signed Host bundle
+    /// so TCC records the decision against MacRemoteApp, not a launching
+    /// shell.
     @discardableResult
     public static func requestPermission() -> HostInputPermissionState {
         _ = CGRequestPostEventAccess()
@@ -170,7 +175,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
     }
 
     private static func permissionState() -> HostInputPermissionState {
-        guard CGPreflightPostEventAccess(), AXIsProcessTrusted() else {
+        guard CGPreflightPostEventAccess() else {
             return .missing
         }
         return .authorized
@@ -184,7 +189,10 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         case .active:
             return .secureInput
         case .unknown:
-            return .unknown
+            // Accessibility is optional for base Quartz event posting. Keep
+            // using the independent foreground/window checks when the
+            // best-effort secure-input signal cannot be read.
+            break
         case .inactive:
             break
         }
@@ -338,8 +346,8 @@ public enum HostInputSecureInputState: Equatable, Sendable {
 }
 
 /// Posts only the typed commands produced by `HostInputMapper`. The adapter
-/// repeats the selected-window, focus, and Accessibility checks immediately
-/// before each event is posted, then routes the event to the validated target
+/// repeats the selected-window, focus, and PostEvent checks immediately before
+/// each event is posted, then routes the event to the validated target
 /// process rather than to the global frontmost application.
 public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdapter, @unchecked Sendable {
     private let contextProvider: any HostInputContextProvider
@@ -354,7 +362,7 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
 
     /// Best-effort cleanup for a state that this controller admitted before a
     /// session authorization or selection transition. It still requires the
-    /// same live target, current bounds, Accessibility permission, and either
+    /// same live target, current bounds, PostEvent permission, and either
     /// eligible focus or the target's known-not-foreground state. It does not
     /// require the now-revoked session capability.
     public func release(_ command: HostInputCommand) throws {
@@ -382,7 +390,7 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
             allowUnauthorizedStateRelease: allowUnauthorizedStateRelease,
             allowNotForegroundStateRelease: allowNotForegroundStateRelease
         )
-        guard CGPreflightPostEventAccess(), AXIsProcessTrusted() else {
+        guard CGPreflightPostEventAccess() else {
             throw HostInputAdapterError.permissionUnavailable
         }
 

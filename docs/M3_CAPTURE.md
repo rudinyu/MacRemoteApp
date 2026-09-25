@@ -15,7 +15,10 @@ clipboard content, or introduce whole-desktop capture.
   authorization/injection adapters.
 - The system provider excludes desktop windows, requires an on-screen window
   layer of zero, requires a non-empty application bundle identifier, and
-  rejects zero-sized frames.
+  rejects zero-sized, helper, renderer, or service surfaces. The default
+  minimum selectable window is 160×80 pixels, which prevents common 1×33
+  preview/service windows while preserving normal app windows such as LINE and
+  ChatGPT.
 
 ## Permission behavior
 

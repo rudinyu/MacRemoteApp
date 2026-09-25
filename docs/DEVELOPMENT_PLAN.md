@@ -19,8 +19,9 @@ complete; its VideoToolbox encode/decode smoke is an explicit opt-in hardware
 check. M5's Viewer input transport gate and M6's Host authorization/mapping
 implementation gate are complete with deterministic tests. M6 real OS event
 posting remains an environment evidence item requiring a disposable foreground
-test application and Accessibility permission; the secure-input provider is
-fail-closed when its state is unknown. M7's implementation/test gate is
+test application and PostEvent permission; Accessibility is optional for the
+best-effort secure-input provider, and a detected secure field remains
+fail-closed. M7's implementation/test gate is
 complete, including the two app-layer pasteboard bridges; its physical
 Intel-Host/Apple-Silicon-Viewer clipboard walkthrough remains an environment
 evidence item. M8's deterministic measurement/resilience gate and M9's
@@ -30,9 +31,16 @@ same-session one-window replacement, capture, H.264/Metal presentation,
 authenticated input, and opt-in text clipboard delivery. Host
 permission/listener failures are recoverable from a resident status-menu
 action, Bonjour readiness includes service registration, and the Metal path
-reports the actual drawable presentation boundary. M10's deterministic final
+reports the actual drawable presentation boundary. M10 now also refreshes the
+eligible window catalog during active sessions, foregrounds an explicitly
+selected regular app while retaining per-event input gates, exposes truthful
+Viewer connection-button states, and exchanges short hostnames as display-only
+Hello metadata. M10's deterministic final
 gate, interactive pairing UI, Keychain trust reuse, and acceptance checklist
-are implemented, while the physical two-machine acceptance and
+are implemented, including explicit trust reset controls on both endpoints
+and editable Host discovery naming. The production roles now use separate
+Keychain identity labels and peer-trust services, with signed per-role cleanup
+for uninstall. The physical two-machine acceptance and
 clock-synchronized performance report remain unverified on this Apple Silicon
 workspace. The intentionally deferred capabilities are listed in
 `docs/POST_V1_ROADMAP.md`.
@@ -486,7 +494,8 @@ No new product feature or scope expansion under the label of hardening.
 The production Host/Viewer composition, deterministic final gate, role
 commands, sanitized evidence boundary, and operator acceptance checklist are
 implemented in `docs/M10_ACCEPTANCE.md`. The current production pilot uses a
-local Keychain identity on each endpoint, TLS bootstrap, two-sided code
+role-specific local Keychain identity and peer-trust service on each endpoint,
+TLS bootstrap, two-sided code
 confirmation, and an explicit Viewer window picker; an optional peer
 certificate remains available only for pinned migration and diagnostics. The
 actual Intel Host to Apple Silicon Viewer run cannot be claimed until it is

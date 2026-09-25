@@ -69,8 +69,9 @@ available on every macOS version.
 1. The Operator launches the Host.
 2. The Host requests Screen Recording at startup before waiting for Bonjour
    readiness, then starts its listener so macOS can request Local Network
-   access. Accessibility permission is requested only when the corresponding
-   input capability is needed.
+   access. PostEvent permission is requested only when the corresponding input
+   capability is needed; Accessibility is an optional AX/secure-input
+   enhancement.
 3. The Host advertises a non-sensitive LAN discovery record after its Local
    Network path is ready.
 4. The Viewer finds the Host and requests a connection.
@@ -80,6 +81,9 @@ available on every macOS version.
    two devices.
 6. The devices store the resulting trust record and establish an authenticated
    session.
+7. The Host name shown during discovery may be changed from the Host status
+   menu. Either endpoint can explicitly forget saved peer trust to recover
+   from a stale or one-sided pairing record.
 
 ### Select and view one window
 
@@ -90,7 +94,10 @@ available on every macOS version.
 4. The Viewer displays the remote content with a visible connection and stream
    status.
 5. The Operator may stop the session or explicitly change the selected window;
-   there is never simultaneous multi-window control.
+   the Viewer can request an eligible app switch in the same session. The Host
+   may foreground that explicitly selected regular application, but input stays
+   disabled until focus and permission checks pass. There is never simultaneous
+   multi-window control.
 
 ### Interact with the selected window
 
@@ -100,8 +107,8 @@ available on every macOS version.
    metadata through the authenticated session.
 3. The Host accepts events only for the authorized selected window while it is
    eligible for foreground control.
-4. The Host maps and injects events using the authorized CoreGraphics and
-   Accessibility path.
+4. The Host maps and injects events using the authorized CoreGraphics/PostEvent
+   path; Accessibility is optional for local AX/secure-input inspection.
 5. If permissions, focus, authorization, or session health are lost, input is
    disabled and the Viewer shows a clear state.
 
@@ -133,6 +140,9 @@ available on every macOS version.
   reject input when focus, permission, pairing, or session state is invalid.
 - **HOST-08**: Report permission loss, capture failure, stream failure, and
   authorization changes as actionable states.
+- **HOST-09**: Let the Operator change the Host's Bonjour display name and
+  explicitly forget saved peer trust without deleting the Host's local device
+  identity. Default the display name to the Host Mac's short hostname.
 
 ### Viewer requirements
 
@@ -147,9 +157,13 @@ available on every macOS version.
 - **VIEWER-05**: Send only events that belong to the active authenticated
   session and selected window.
 - **VIEWER-06**: Show connection, authorization, permission, stream, and input
-  availability states without implying that disabled input is still active.
+  availability states without implying that disabled input is still active;
+  show Connected and disable duplicate connection actions while connected.
 - **VIEWER-07**: Participate in opt-in text clipboard synchronization and
   clearly indicate when it is enabled.
+- **VIEWER-08**: Send the Viewer Mac's bounded short hostname as optional
+  display-only pairing metadata; it must never be used for authentication or
+  authorization.
 
 ### Shared requirements
 
@@ -196,8 +210,8 @@ marked verified.
 ## Permissions and consent
 
 - Screen Recording permission is required for Host window capture.
-- Accessibility permission is required only for Host-side authorized input
-  injection.
+- PostEvent permission is required only for Host-side authorized input
+  injection. Accessibility is optional for local AX/secure-input inspection.
 - Pairing is explicit and user-confirmed; LAN discovery alone never grants
   access.
 - Input is disabled until the session is authenticated, paired, authorized for
@@ -253,8 +267,9 @@ documented compatibility matrix:
   necessary after the baseline is measured — M2/M8; no WebRTC in V1.
 - Exact H.264 profile, bitrate/rate-control defaults, and decoder fallback —
   M4.
-- User-facing pairing UX and Keychain trust reuse — M10; trust-record
-  revocation UI remains a release-operations follow-up.
+- User-facing pairing UX, Keychain trust reuse, trust-record revocation UI,
+  and editable Host discovery name — implemented in M10; physical recovery
+  walkthrough remains an acceptance item.
 - Clipboard size limit, conflict policy, and text encoding edge cases — resolved
   in M7: 65,515 UTF-8 bytes, Offer/ACK/Text ordering, and deterministic
   arrival-order conflict handling.

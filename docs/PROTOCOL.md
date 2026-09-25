@@ -92,9 +92,12 @@ The exact binary field widths and serialization format are fixed by M1 in
 
 | Message | Direction | Purpose |
 | --- | --- | --- |
-| `Hello` | Both | Protocol version, device role, implementation identity, and supported limits |
+| `Hello` | Both | Protocol version, device role, implementation identity, supported limits, and optional bounded display-only device name |
 | `Capabilities` | Both | Codec, resolution, frame-rate, input, and clipboard capabilities |
-| `PairingChallenge` | Host → Viewer | Bootstrap challenge and displayable confirmation data |
+| `PairingChallenge` | Host → Viewer | Bootstrap challenge and Host commitment |
+| `PairingResponse` | Viewer → Host | Fresh Viewer commitment for the commit/reveal exchange |
+| `PairingVerification` | Host → Viewer | Host contribution reveal after both commitments are fixed |
+| `PairingReveal` | Viewer → Host | Viewer contribution reveal after verifying the Host contribution |
 | `PairingConfirmation` | Both | User-confirmed pairing result; never a substitute for authenticated transport |
 | `SessionAuthorize` | Host → Viewer / local policy | Selected session authorization state and enabled capabilities |
 | `WindowList` | Host → Viewer | Eligible application/window summaries, not pixels or secrets |
@@ -119,10 +122,12 @@ canonical encoding, and golden test vectors in `docs/M1_PROTOCOL.md`.
 1. The Viewer connects to a discovered Host endpoint.
 2. The transport authenticates the peer and validates the trust record or
    enters the explicit pairing flow. In bootstrap mode, a matching local trust
-   record auto-consents to the challenge but does not remove the two-sided
-   `PairingConfirmation` exchange.
+   record auto-consents after the commit/reveal value is ready but does not
+   remove the two-sided `PairingConfirmation` exchange.
 3. Both sides send `Hello` with role, protocol version, implementation version,
-   and bounded limits.
+   and bounded limits. They may also send a short device name for pairing and
+   status UI; it is untrusted display metadata and never affects identity or
+   authorization.
 4. Both sides send `Capabilities` and compute an intersection. Unsupported
    mandatory capabilities fail with a structured error.
 5. The Host reports whether a selected window and required permissions are
@@ -141,10 +146,15 @@ when policy permits, application identity, bounds/aspect metadata, and
 eligibility state. The identifier is not a permanent security credential.
 
 The Host is authoritative for selection. A Viewer request cannot select a
-window that the Host did not expose, and a stale identifier is rejected. When a
-window closes, changes identity, loses permission, or becomes ineligible, the
-Host sends a state change and disables input before stopping or renegotiating
-the stream.
+window that the Host did not expose, and a stale identifier is rejected. The
+Host refreshes the eligible catalog during an active session so the Viewer can
+switch applications without reconnecting. A requested eligible regular app is
+brought to the Host foreground as a direct consequence of that explicit
+selection; input remains disabled until the Host independently confirms the
+selected window is foreground-eligible. The per-event permission, focus,
+identity, and generation checks remain mandatory. When a window closes,
+changes identity, loses permission, or becomes ineligible, the Host disables
+input before stopping or renegotiating the stream.
 
 ## Video contract
 
@@ -189,7 +199,7 @@ Coordinates are normalized to the current displayed remote-content rectangle,
 not the Viewer desktop. The Host maps them to the selected window's current
 geometry and clamps/rejects values outside the authorized content. The Host
 must reject events when the selected window is not foreground-eligible, the
-Accessibility permission is unavailable, the session is not authorized, or the
+PostEvent permission is unavailable, the session is not authorized, or the
 event rate/sequence is invalid.
 
 V1 does not transfer arbitrary key logs, secure-input contents, password
@@ -225,8 +235,8 @@ prompts, or events intended for background/unfocused applications.
   fields do not provide admission authority.
 - `InputCore.HostInputController` queries Host context for every event and
   requires session authorization, matching window generation and process/
-  window identity, current window geometry, Accessibility/post-event
-  permission, eligible foreground focus, and the negotiated mouse/keyboard
+  window identity, current window geometry, PostEvent permission, optional AX
+  secure-input inspection, eligible foreground focus, and the negotiated mouse/keyboard
   capability. Commands retain the selected target identity so the OS adapter
   can repeat the check immediately before posting.
 - Normalized coordinates map to the selected window's current global screen
@@ -243,8 +253,9 @@ prompts, or events intended for background/unfocused applications.
   rather than admitting input for the replacement target. If permission is
   unavailable, cleanup remains pending and status stays unavailable until a
   safe snapshot allows a retry.
-  Unknown secure-input or console state is rejected because macOS has no
-  reliable public status query for those transitions.
+  A detected secure-input state or unknown console state is rejected. If the
+  optional Accessibility secure-input query is unavailable, the independent
+  foreground/window checks still protect the base PostEvent path.
 
 ## Clipboard contract
 
@@ -296,7 +307,11 @@ error strings.
 
 ## Liveness, shutdown, and reconnect
 
-- `Ping`/`Pong` supports liveness and controlled timing measurement.
+- `Ping`/`Pong` supports liveness and controlled timing measurement. `Pong`
+  may carry the receiver's monotonic timestamp; when present, the session
+  combines it with the envelope timestamps to form an authenticated
+  four-timestamp clock probe. Older peers may omit that optional field, in
+  which case liveness remains valid but one-way latency is not measured.
 - A missed heartbeat changes the visible session state before input is disabled
   or the connection is closed.
 - `Close` is best effort; transport teardown must still be safe if it is lost.
@@ -313,6 +328,10 @@ error strings.
 ## Compatibility and evolution
 
 - Major protocol changes require an explicit incompatible version.
+- M10 uses protocol `2.0`: the pairing challenge is now a mandatory
+  commit/reveal exchange and window selections bind to a catalog generation.
+  Protocol `1.x` peers are rejected before pairing rather than being allowed to
+  fail later in the handshake.
 - Minor changes may add optional fields/capabilities with safe defaults.
 - M1 creates golden vectors for envelopes and each stable message schema; see
   `docs/M1_PROTOCOL.md`.
