@@ -12,6 +12,29 @@ private enum ViewerPairingPromptOutcome: Sendable {
     case sessionEnded
 }
 
+private enum ViewerApplicationMetadata {
+    static let version: String = {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else {
+            return "0.2"
+        }
+        let version = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return version.isEmpty ? "0.2" : version
+    }()
+
+    static let build: String = {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String else {
+            return "1001"
+        }
+        let build = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return build.isEmpty ? "1001" : build
+    }()
+
+    static let protocolVersion = "\(ProtocolVersion.current.major).\(ProtocolVersion.current.minor)"
+
+    static var displayVersion: String { "\(version).\(build)" }
+    static var displayVersionDetails: String { "\(displayVersion) (Build \(build))" }
+}
+
 /// Minimal production Viewer composition. The UI is intentionally small, but
 /// the data path is real: Bonjour -> authenticated SessionCoordinator -> H264
 /// decoder -> Metal, with the same content rectangle used for input mapping.
@@ -261,7 +284,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "MacRemoteApp Viewer"
+        window.title = "MacRemoteApp Viewer — Version \(ViewerApplicationMetadata.displayVersionDetails)"
         window.contentView = content
         window.delegate = self
         window.isReleasedWhenClosed = false
@@ -323,6 +346,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     ) async -> ConnectResult {
         guard session == nil, !isShuttingDown else { return .retryableFailure }
         contentView?.setConnectionState(reconnecting ? .reconnecting : .connecting)
+        contentView?.setPeerName(service.name)
         contentView?.setPairingRetryVisible(false)
         do {
             let localIdentity = try await loadLocalIdentity()
@@ -376,6 +400,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             contentView?.updateStream(size: .zero, readiness: .awaitingAuthentication)
             try await session.start()
             try await waitForPairing(session, pairingCoordinator: pairingCoordinator)
+            let sessionSnapshot = await session.snapshot()
+            contentView?.setPeerName(sessionSnapshot.peerDeviceName ?? service.name)
             sessionMonitorTask = Task { @MainActor [weak self] in
                 await self?.monitorSession(session)
             }
@@ -423,6 +449,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let current = await observedSession.snapshot()
             refreshPresentedFPS(now: ProcessInfo.processInfo.systemUptime)
             latestClockSyncEstimate = await observedSession.clockSyncEstimate()
+            contentView?.setConnectionLatency(latestClockSyncEstimate)
             latestPerformanceSnapshot = performanceCollector.snapshot(
                 clockSync: latestClockSyncEstimate
             )
@@ -882,7 +909,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func refreshInputSurface() async {
         guard let session else {
-            contentView?.updateStream(size: streamDimensions, readiness: .awaitingAuthentication)
+            let readiness = InputReadiness.awaitingAuthentication
+            contentView?.updateStream(size: streamDimensions, readiness: readiness)
+            contentView?.setInputReadiness(readiness)
             contentView?.updateClipboard(status: nil, available: false)
             return
         }
@@ -920,6 +949,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             readiness: readiness,
             capabilities: inputCapabilities
         )
+        contentView?.setInputReadiness(readiness)
         switch readiness {
         case .ready:
             setStatus("Connected — input ready")
@@ -1064,6 +1094,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         streamDimensions = .zero
         contentView?.clearWindowOptions()
         contentView?.updateStream(size: .zero, readiness: .awaitingAuthentication)
+        contentView?.setPeerName(nil)
+        contentView?.setConnectionLatency(nil)
+        contentView?.setInputReadiness(.awaitingAuthentication)
         contentView?.updateClipboard(status: nil, available: false)
         contentView?.setConnectionState(.disconnected)
         contentView?.setHostSelectionEnabled(true)
@@ -1094,6 +1127,15 @@ private enum ViewerConnectionState: Equatable {
         case .reconnecting: return "Reconnecting…"
         }
     }
+
+    var statusTitle: String {
+        switch self {
+        case .disconnected: return "Disconnected"
+        case .connecting: return "Connecting"
+        case .connected: return "Connected"
+        case .reconnecting: return "Reconnecting"
+        }
+    }
 }
 
 @MainActor
@@ -1117,6 +1159,8 @@ private final class ViewerContentView: NSView {
 
     private let statusLabel = NSTextField(labelWithString: "Starting…")
     private let fpsLabel = NSTextField(labelWithString: "FPS: —")
+    private let connectionDetailsLabel = NSTextField(labelWithString: "")
+    private let connectionStatusDot = NSView(frame: .zero)
     private let hostPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let connectHostButton = NSButton(title: "Connect", target: nil, action: nil)
     private let forgetPairingsButton = NSButton(title: "Forget saved pairings…", target: nil, action: nil)
@@ -1130,6 +1174,9 @@ private final class ViewerContentView: NSView {
     private var hostOptionIdentifiers: [String] = []
     private var hostSelectionEnabled = true
     private var connectionState: ViewerConnectionState = .disconnected
+    private var peerName = "—"
+    private var connectionLatency = "—"
+    private var inputStatus = InputReadiness.awaitingAuthentication.label
     private var streamSize: CGSize = .zero
     private var readiness: InputReadiness = .awaitingAuthentication
     private var inputCapabilities: ViewerInputCapabilities = .none
@@ -1158,6 +1205,14 @@ private final class ViewerContentView: NSView {
         fpsLabel.backgroundColor = .clear
         fpsLabel.isBordered = false
         fpsLabel.alignment = .right
+        connectionDetailsLabel.textColor = .secondaryLabelColor
+        connectionDetailsLabel.backgroundColor = .clear
+        connectionDetailsLabel.isBordered = false
+        connectionDetailsLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        connectionDetailsLabel.alignment = .left
+        connectionDetailsLabel.lineBreakMode = .byTruncatingTail
+        connectionStatusDot.wantsLayer = true
+        connectionStatusDot.layer?.cornerRadius = 4
         hostPicker.controlSize = .small
         hostPicker.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         hostPicker.addItem(withTitle: "Choose MacRemoteApp Host")
@@ -1191,6 +1246,8 @@ private final class ViewerContentView: NSView {
         addSubview(surface)
         addSubview(statusLabel)
         addSubview(fpsLabel)
+        addSubview(connectionStatusDot)
+        addSubview(connectionDetailsLabel)
         addSubview(hostPicker)
         addSubview(connectHostButton)
         addSubview(forgetPairingsButton)
@@ -1200,6 +1257,7 @@ private final class ViewerContentView: NSView {
         addSubview(retryPairingButton)
         surface.onInputEvent = onInputEvent
         surface.onInputRejected = onInputRejected
+        updateConnectionDetails()
     }
 
     required init?(coder: NSCoder) {
@@ -1274,6 +1332,50 @@ private final class ViewerContentView: NSView {
     func setConnectionState(_ state: ViewerConnectionState) {
         connectionState = state
         updateHostControls()
+        updateConnectionDetails()
+    }
+
+    func setPeerName(_ name: String?) {
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        peerName = trimmed.isEmpty ? "—" : trimmed
+        updateConnectionDetails()
+    }
+
+    func setInputReadiness(_ readiness: InputReadiness) {
+        inputStatus = readiness.label
+        updateConnectionDetails()
+    }
+
+    func setConnectionLatency(_ estimate: ClockSyncEstimate?) {
+        let nextLatency: String
+        if let estimate {
+            let milliseconds = Double(estimate.minimumRoundTripNanoseconds) / 1_000_000
+            nextLatency = String(format: "%.1f ms", milliseconds)
+        } else {
+            nextLatency = "—"
+        }
+        guard nextLatency != connectionLatency else { return }
+        connectionLatency = nextLatency
+        updateConnectionDetails()
+    }
+
+    private func updateConnectionDetails() {
+        connectionDetailsLabel.stringValue =
+            "Host: \(peerName)  •  Route: LAN / TLS  •  " +
+            "Connection: \(connectionState.statusTitle)  •  RTT: \(connectionLatency)  •  " +
+            "Input: \(inputStatus)  •  Version \(ViewerApplicationMetadata.displayVersionDetails)  •  " +
+            "Protocol \(ViewerApplicationMetadata.protocolVersion)"
+
+        let statusColor: NSColor
+        switch connectionState {
+        case .disconnected:
+            statusColor = .systemGray
+        case .connecting, .reconnecting:
+            statusColor = .systemOrange
+        case .connected:
+            statusColor = .systemGreen
+        }
+        connectionStatusDot.layer?.backgroundColor = statusColor.cgColor
     }
 
     func clearHostSelection() {
@@ -1381,13 +1483,20 @@ private final class ViewerContentView: NSView {
             height: 20
         )
         fpsLabel.frame = NSRect(x: fpsX, y: 8, width: fpsWidth, height: 20)
+        connectionDetailsLabel.frame = NSRect(
+            x: 28,
+            y: 30,
+            width: max(1, bounds.width - 40),
+            height: 18
+        )
+        connectionStatusDot.frame = NSRect(x: 12, y: 35, width: 8, height: 8)
         retryPairingButton.frame = NSRect(
             x: max(12, bounds.width - 116),
             y: 6,
             width: 104,
             height: 24
         )
-        let hostControlY: CGFloat = 34
+        let hostControlY: CGFloat = 56
         let connectWidth: CGFloat = 112
         let forgetWidth: CGFloat = 168
         let horizontalGap: CGFloat = 8

@@ -14,6 +14,27 @@ let macRemoteAppStartupLogger = Logger(
     category: "startup"
 )
 
+private enum HostApplicationMetadata {
+    static let version: String = {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else {
+            return "0.2"
+        }
+        let version = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return version.isEmpty ? "0.2" : version
+    }()
+
+    static let build: String = {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String else {
+            return "1001"
+        }
+        let build = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return build.isEmpty ? "1001" : build
+    }()
+
+    static var displayVersion: String { "\(version).\(build)" }
+    static var displayVersionDetails: String { "\(displayVersion) (Build \(build))" }
+}
+
 @main
 struct HostApp {
     /// Host session composition entry point. The concrete listener/window
@@ -270,6 +291,13 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         status.isEnabled = false
         menu.addItem(status)
         statusMenuItem = status
+        let version = NSMenuItem(
+            title: "Version \(HostApplicationMetadata.displayVersionDetails)",
+            action: nil,
+            keyEquivalent: ""
+        )
+        version.isEnabled = false
+        menu.addItem(version)
         let renameItem = NSMenuItem(
             title: "Rename Host…",
             action: #selector(renameHost),
