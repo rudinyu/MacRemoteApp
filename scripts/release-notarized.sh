@@ -26,7 +26,6 @@ fi
 mkdir -p -- "${artifact_root}"
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    original_args=("$@")
     command -v lockf >/dev/null 2>&1 || {
         echo "The macOS lockf utility is required for the release lock." >&2
         exit 2
@@ -44,7 +43,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
         shift
         source "${worker_script}"
         main "$@"
-    ' "${worker_invocation}" "${release_script}" "${original_args[@]}"
+    ' "${worker_invocation}" "${release_script}" "$@"
     then
         exit 0
     else
