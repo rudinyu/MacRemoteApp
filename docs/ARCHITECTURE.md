@@ -73,6 +73,7 @@ MacRemoteApp/
 │   ├── Host/
 │   └── Viewer/
 ├── Packages/
+│   ├── AppSupport/
 │   ├── RemoteProtocol/
 │   ├── CaptureCore/
 │   ├── CodecCore/
@@ -93,6 +94,7 @@ responsibilities and dependency direction below.
 | --- | --- | --- |
 | `Apps/Host` | Host UI, lifecycle, permission education, window-selection UX, composition of Host packages | Wire framing, codec internals, generic transport policy |
 | `Apps/Viewer` | Viewer UI, discovery/session UX, stream surface, input surface, clipboard consent UI | Host capture, Accessibility injection, trust-store internals |
+| `AppSupport` | Native AppKit menu construction, reusable settings content/window presentation, bundle version/build formatting | Session ownership, permission requests, Keychain access, transport, capture, input authorization |
 | `RemoteProtocol` | Versioned wire messages, frame envelope, serialization/deserialization, capability identifiers, validation limits | Sockets, UI, ScreenCaptureKit, VideoToolbox, Keychain |
 | `CaptureCore` | Host-side application/window enumeration and ScreenCaptureKit capture orchestration, timestamps, capture state | H.264 bitstream policy, network I/O, remote input |
 | `CodecCore` | VideoToolbox compression/decompression adapters, codec configuration, frame metadata, decode output contract | Window selection, transport, user permissions |
@@ -111,7 +113,8 @@ Apps/Viewer ─────┼──> RemoteProtocol
                  ├──> SecurityCore
                  ├──> InputCore
                  ├──> CodecCore
-                 └──> CaptureCore (Host only)
+                 ├──> CaptureCore (Host only)
+                 └──> AppSupport (app-layer UI only)
 ```
 
 Additional rules:
@@ -124,6 +127,10 @@ Additional rules:
   decisions, but `SecurityCore` must not depend on an active socket.
 - App modules translate package events into UI state; package modules do not
   import app view controllers.
+- `AppSupport` is a leaf UI package used by the two app targets. It imports
+  AppKit/Foundation, not the protocol, session, or security packages. Core
+  packages do not depend on it. App-owned callbacks connect menu/settings
+  actions to existing runtime operations.
 - `SecurityCore` evaluates identity, pairing consent, trust, and capability
   policy inputs but does not own session-specific window generations or OS
   permission/focus state.
@@ -274,6 +281,30 @@ Additional rules:
 - Cross-cutting diagnostics use a narrow structured logging interface. They do
   not pass raw clipboard text, secrets, or full captured frames.
 
+## Native app shell and release identity
+
+`AppSupport.ApplicationMenu` installs the shared application, File, and Window
+menus. About and Settings use app-owned callbacks; Quit goes through
+`NSApplication.terminate` and the role's existing asynchronous shutdown
+delegate. Close, Minimize, and Zoom use the current window's responder chain.
+Services, Hide, Hide Others, Show All, Show App, and Bring All to Front remain
+local macOS operations, not remote input commands.
+
+`SettingsView` is reusable, scrollable content with read-only status fields and
+explicit action callbacks. `SettingsWindowController` is a retained modeless
+window wrapper for Host Settings and both About windows. Viewer Settings embeds
+the content directly instead of using that wrapper. About may open a separate
+information window; it is not a second Viewer session or Settings window.
+
+`ApplicationMetadata` reads `CFBundleShortVersionString` and `CFBundleVersion`
+from the app bundle. The release format is `major.minor.build`, not a semantic
+patch counter: short version `0.2` plus build `1003` displays
+`0.2.1003 (Build 1003)`. Both role plists must agree. About, Settings, the Viewer
+title/status, and Host status menu use this shared formatting. Unbundled
+executables report development metadata rather than inventing a release.
+The application release identity is separate from the negotiated wire protocol
+version; this UI change does not alter the protocol.
+
 ## Host architecture
 
 ### Host UI and lifecycle
@@ -286,6 +317,20 @@ from its status menu. The Viewer presents explicit Host and eligible-window
 pickers, but the Host remains the only component allowed to accept a selection,
 replace the selected local window in an authenticated session, and decide which
 window becomes selected, subject to the product and security rules.
+
+The Host starts as an accessory/menu-bar app. Opening About or Settings promotes
+it to regular activation so the app menu, Dock restoration, and window controls
+are available. It returns to accessory mode after both windows close, but not
+while either remains minimized. Closing Settings does not terminate the runtime;
+Quit still stops the session through the existing delegate.
+
+The app retains one Settings controller and projects `HostRuntimeStatus` and
+the configured discovery name into it. Screen Recording, PostEvent, and
+optional Accessibility checks are read-only and refresh on activation and
+status updates. Bonjour service state is not a Local Network permission
+preflight. Rename, Retry setup, Privacy & Security, and confirmed Forget saved
+pairings actions reuse the existing app operations; the settings component
+does not grant permission or mutate trust independently.
 
 ### Capture path
 
@@ -316,6 +361,30 @@ the selected window is no longer eligible or foreground-controlled.
 The Viewer owns discovery results, pairing UX, session state, stream status,
 input enablement, clipboard consent, and errors. The UI must distinguish
 "connected but input disabled" from "fully authorized and controllable".
+
+`ViewerRuntime` retains one main `NSWindow`, its `ViewerContentView`, and a
+lazily created `SettingsView`. Opening Settings swaps only the window's
+`contentView`; the session, decoder, renderer, selected Host/window, and
+clipboard bridge remain runtime-owned. Back to Remote View and Command-0
+restore the original content and input first responder. `windowShouldClose`
+handles Close/Command-W on Settings by returning to the remote view; closing
+the remote-view window terminates the Viewer. This is navigation, not a second
+connection or a disconnect/reconnect operation.
+
+Removing the input surface from the window uses its existing
+`viewWillMove(toWindow:)` release path to release held keys/buttons. Settings
+interactions are local; restoring the view does not bypass input readiness or
+Host-side authorization checks. Connected switching and safe release still
+need two-Mac evidence in [M10 acceptance](M10_ACCEPTANCE.md).
+
+Main-view status updates feed Settings through `settingsValues` and
+`onSettingsChange`; discovery state is added by the runtime. The main status
+card shows connection state, Host, LAN/TLS, RTT, input readiness, FPS, app
+release, and protocol version. Settings shows connection/discovery/input and
+clipboard state, plus read-only Host-filter, trust-mode, and reconnect policy.
+The clipboard checkbox uses the same session-only opt-in action as the remote
+view, not a persistent second preference. Disconnected input reads
+`Not connected`; unavailable peer/latency/frame data must not look current.
 
 ### Decode and presentation path
 
@@ -405,6 +474,23 @@ selected-window identity, and permission state.
   both target architectures where possible.
 - All platform-specific APIs live behind package adapters so protocol and
   session tests can run without a live capture window or Accessibility grant.
+
+## Test-state cleanup boundary
+
+After UI or installation testing, follow [UI Review and Post-test
+Cleanup](TESTING_CLEANUP.md). Resolve the exact test bundles and shared
+role-state scope first, stop them, invoke each verified app's
+`--remove-all-data`, reset only the authorized bundle-specific TCC approvals,
+and remove the test installations and dedicated review output. Preserve source,
+Git state, other checkouts, and existing release channels. Verify absence
+without relaunching the app and recreating its identity/preferences.
+
+This full test reset is distinct from Forget saved pairings, which preserves
+the local identity and permissions. Copies with the same role identifiers
+share state, so a test reset cannot silently preserve a production copy's
+settings. The production DMG uninstaller does not reset TCC; the repository's
+legacy `--clean-testing` path is a broader reset and does not replace current
+per-role data cleanup. Neither UI code nor AppSupport edits the TCC database.
 
 ## Failure and backpressure principles
 

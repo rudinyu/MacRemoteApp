@@ -18,6 +18,11 @@ OS event posting and the two-Mac clipboard/performance evidence remain
 acceptance gates. The Host remains authoritative for window eligibility,
 authorization, and replacement validation.
 
+Native app menus, single-main-window Viewer Settings, and resident Host
+Settings are implemented in the current M10 UI. Local evidence and cleanup
+are recorded in [UI Review and Post-test Cleanup](TESTING_CLEANUP.md); this
+does not mark connected two-Mac UI acceptance complete.
+
 ## Product goal
 
 Allow a user at an Apple Silicon Mac (the Viewer) to view and interact with one
@@ -121,6 +126,33 @@ available on every macOS version.
 4. Disconnecting disables synchronization and clears transient transport
    buffers.
 
+### Settings and standard macOS controls
+
+1. Both apps expose About with version/build, Settings (`Command-,`), Services,
+   Hide (`Command-H`), Hide Others, Show All, and Quit (`Command-Q`), plus File
+   Close (`Command-W`) and Window Minimize (`Command-M`), Zoom, Show App
+   (`Command-0`), and Bring All to Front. These commands operate locally.
+2. Viewer Settings replaces the remote view in the same main window. Back to
+   Remote View, Command-0, or Close on that page restores the remote view.
+   Switching pages preserves the session and releases held remote input;
+   closing the remote-view window itself quits the Viewer. About may use a
+   separate information window, but Settings must not open a second window.
+3. Viewer Settings shows current connection, Host, LAN/TLS transport, discovery,
+   RTT, input readiness, details, and clipboard state. Host filter, trust mode,
+   and reconnect policy are read-only. The clipboard action uses the existing
+   session-only opt-in; Local Network Settings and confirmed pairing reset
+   remain explicit actions.
+4. The Host status menu also opens About and Settings. The Host remains resident
+   when Settings closes. While Settings/About is open or minimized, standard
+   app menus and Dock restoration are available; after both close, it returns
+   to menu-bar operation. Host Settings shows its name, runtime state,
+   LAN/TLS, trust mode, and read-only Screen Recording/PostEvent/optional
+   Accessibility checks, with Rename, Retry, privacy settings, and pairing
+   reset actions. Permission checks refresh when the Host becomes active.
+5. Discovery/browser/service activity must not be presented as a direct
+   macOS Local Network permission check. Status is informational and never
+   substitutes for the existing permission, trust, and input authorization gates.
+
 ## Functional requirements
 
 ### Host requirements
@@ -143,6 +175,9 @@ available on every macOS version.
 - **HOST-09**: Let the Operator change the Host's Bonjour display name and
   explicitly forget saved peer trust without deleting the Host's local device
   identity. Default the display name to the Host Mac's short hostname.
+- **HOST-10**: Provide the resident Settings/About lifecycle above. Closing or
+  minimizing Settings must not stop the listener or active session; Quit must
+  perform normal session shutdown.
 
 ### Viewer requirements
 
@@ -164,6 +199,13 @@ available on every macOS version.
 - **VIEWER-08**: Send the Viewer Mac's bounded short hostname as optional
   display-only pairing metadata; it must never be used for authentication or
   authorization.
+- **VIEWER-09**: Use a single main window for remote view and Settings, preserve
+  the session during navigation, release held input on leaving the surface,
+  and keep local settings/menu interactions out of remote input delivery.
+- **VIEWER-10**: Display Connecting, Connected, Reconnecting, or Disconnected
+  independently of input readiness. Show LAN/TLS, Host, RTT, FPS, release, and
+  protocol information without stale connected data after disconnect; input
+  must read Not connected while disconnected.
 
 ### Shared requirements
 
@@ -177,6 +219,13 @@ available on every macOS version.
   raw clipboard text, or unnecessary user data.
 - **SHARED-05**: Shut down safely when either side disconnects, revokes a
   permission, or loses session authorization.
+- **SHARED-06**: Provide the native app/window commands above and expose the
+  same release identity in About, Settings, and role-specific status UI.
+- **SHARED-07**: Use `major.minor.build` for the product release identity.
+  For example, `0.2.1003` means Version `0.2` and Build `1003`; store them in
+  `CFBundleShortVersionString` and `CFBundleVersion`, respectively. The final
+  component is the build number, not a patch version. Wire protocol versioning
+  remains independent.
 
 ## Quality targets
 
@@ -258,6 +307,14 @@ documented compatibility matrix:
 - M8 performance targets are measured and reported, and any missed target is
   explicitly documented rather than hidden.
 - M9 security, privacy, and release-readiness checks pass.
+- Both roles' menus and version/build displays work. Viewer Settings stays
+  within the main window during an active session, and returning does not
+  leave held input or require another connection. Host Settings closes without
+  quitting the resident Host.
+- Test handoff includes scoped removal of test installations, settings,
+  trust/generated identities, permissions, and dedicated review output, with
+  absence verified and source/release artifacts preserved, unless retaining
+  test state was explicitly requested. Follow [the cleanup runbook](TESTING_CLEANUP.md).
 
 ## Open decisions to resolve in milestones
 

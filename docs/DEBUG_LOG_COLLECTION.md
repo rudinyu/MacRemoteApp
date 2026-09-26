@@ -60,7 +60,7 @@ Run the Host command on the Intel Host Mac. It is a blocking smoke test and
 must remain running while the Viewer connects:
 
 ```sh
-cd <repository-root>
+cd "/absolute/path/to/MacRemoteApp" # Replace with your repository path.
 bash scripts/run-m10-acceptance.sh host 2>&1 | tee "$support_dir/host-smoke.log"
 ```
 
@@ -68,7 +68,7 @@ Run the Viewer command on the Apple Silicon Viewer Mac (or in a separate
 Terminal on a machine prepared for the Viewer role):
 
 ```sh
-cd <repository-root>
+cd "/absolute/path/to/MacRemoteApp" # Replace with your repository path.
 bash scripts/run-m10-acceptance.sh viewer 2>&1 | tee "$support_dir/viewer-smoke.log"
 ```
 

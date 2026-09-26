@@ -73,6 +73,24 @@ capability, both local and peer opt-in, and no degraded state. Missing or
 revoked permission therefore remains visibly degraded and removes both ready
 indicators without pretending that the session is disconnected.
 
+## M10 app-shell integration
+
+The M7 projection and clipboard policy remain unchanged. In the production
+Viewer, the remote view and Settings are two pages of one main window.
+Connection/input/clipboard values feed both from the same app-owned state;
+Settings does not establish another session or persist a second clipboard
+preference. Its clipboard checkbox calls the existing session opt-in action
+and is unavailable when the current session cannot offer the capability.
+Both endpoints still need consent, and disconnect/reconnect resets opt-in.
+
+Settings is reached through the local native menu (Command-,). Back,
+Command-0, or Close on Settings restores the remote view and input surface.
+Page switching preserves the session but releases held input when the surface
+leaves the window. A disconnected Viewer reports input as Not connected rather
+than Authenticating. Host Settings displays permission/runtime facts without
+granting authorization. Full navigation and ownership are specified in the
+[UI architecture](ARCHITECTURE.md#native-app-shell-and-release-identity).
+
 ## Validation
 
 The deterministic tests cover:
@@ -121,3 +139,10 @@ it is not claimed by the deterministic package tests.
 6. Change text on both sides close together and verify the documented arrival-
    order policy, then disconnect/reconnect and confirm clipboard/input are
    disabled until explicit re-authorization and opt-in.
+7. In the production GUI, toggle clipboard sharing from Viewer Settings and
+   return to the remote view. Confirm both pages report the same opt-in state
+   and navigation alone neither resets nor enables sharing. Run the connected
+   navigation/input-release checks in [M10 acceptance](M10_ACCEPTANCE.md).
+8. After collecting sanitized evidence, follow
+   [UI Review and Post-test Cleanup](TESTING_CLEANUP.md). A local Settings
+   walkthrough does not replace the physical clipboard or input checks.

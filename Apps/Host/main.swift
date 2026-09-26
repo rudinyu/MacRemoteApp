@@ -1,4 +1,5 @@
 import AppKit
+import AppSupport
 import Darwin
 import CaptureCore
 import CodecCore
@@ -14,26 +15,7 @@ let macRemoteAppStartupLogger = Logger(
     category: "startup"
 )
 
-private enum HostApplicationMetadata {
-    static let version: String = {
-        guard let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else {
-            return "0.2"
-        }
-        let version = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return version.isEmpty ? "0.2" : version
-    }()
-
-    static let build: String = {
-        guard let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String else {
-            return "1001"
-        }
-        let build = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return build.isEmpty ? "1001" : build
-    }()
-
-    static var displayVersion: String { "\(version).\(build)" }
-    static var displayVersionDetails: String { "\(displayVersion) (Build \(build))" }
-}
+private let hostApplicationMetadata = ApplicationMetadata(bundle: .main)
 
 @main
 struct HostApp {
@@ -199,6 +181,10 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
     private var pairingCodeMenuItem: NSMenuItem?
     private var forgetPairingsMenuItem: NSMenuItem?
     private var retryItem: NSMenuItem?
+    private var applicationMenu: ApplicationMenu?
+    private var settingsWindow: SettingsWindowController?
+    private var latestStatus: HostRuntimeStatus = .starting
+    private var currentHostName = HostPreferences.load()
     private var terminationRequested = false
 
     init(runtime: HostRuntime) {
@@ -245,6 +231,16 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
             }
         }
         installStatusItem()
+        let menu = ApplicationMenu(
+            applicationName: "MacRemoteApp Host",
+            metadata: hostApplicationMetadata,
+            onSettings: { [weak self] in self?.showSettings() },
+            onShowWindow: { [weak self] in self?.showSettings() },
+            onActivate: { NSApplication.shared.setActivationPolicy(.regular) },
+            onAboutClose: { [weak self] in self?.restoreAccessoryWhenWindowsClose() }
+        )
+        applicationMenu = menu
+        menu.install()
         // Host is an accessory app, but permission consent belongs to the
         // signed application bundle rather than a shell or its terminal. Make
         // the bundle active before the runtime reaches the TCC APIs so macOS
@@ -287,17 +283,26 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         }
 
         let menu = NSMenu()
+        menu.autoenablesItems = false
         let status = NSMenuItem(title: "Host: Starting", action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
         statusMenuItem = status
         let version = NSMenuItem(
-            title: "Version \(HostApplicationMetadata.displayVersionDetails)",
+            title: "Version \(hostApplicationMetadata.displayVersionDetails)",
             action: nil,
             keyEquivalent: ""
         )
         version.isEnabled = false
         menu.addItem(version)
+        menu.addItem(.separator())
+        let about = NSMenuItem(title: "About MacRemoteApp Host", action: #selector(showAbout), keyEquivalent: "")
+        about.target = self
+        menu.addItem(about)
+        let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
+        menu.addItem(.separator())
         let renameItem = NSMenuItem(
             title: "Rename Host…",
             action: #selector(renameHost),
@@ -335,7 +340,7 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         let stopItem = NSMenuItem(
-            title: "Stop session and quit",
+            title: "Quit MacRemoteApp Host",
             action: #selector(stopSessionAndQuit),
             keyEquivalent: "q"
         )
@@ -346,6 +351,7 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func apply(status: HostRuntimeStatus) {
+        latestStatus = status
         statusMenuItem?.title = "Host: \(status.description)"
         if case let .pairing(code) = status {
             pairingCodeMenuItem?.title = "Pairing code: \(code)"
@@ -362,6 +368,88 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         }
         retryItem?.isEnabled = canRetry
         statusItem?.button?.toolTip = "MacRemoteApp Host — \(status.description)"
+        refreshSettings()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        refreshSettings()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showSettings()
+        return true
+    }
+
+    @objc private func showAbout() { applicationMenu?.showAbout() }
+
+    @objc private func showSettings() {
+        // A resident Host stays accessory-only until the operator opens a
+        // window. Promote it while that window is open so the standard app
+        // menu and Dock window restoration are available.
+        NSApplication.shared.setActivationPolicy(.regular)
+        if settingsWindow == nil {
+            let controller = SettingsWindowController(
+                title: "Host Settings",
+                subtitle: "Manage this Host and check its current macOS permissions.",
+                metadata: hostApplicationMetadata,
+                sections: [
+                    .init("Host", fields: [
+                        .init("name", "Host name"), .init("status", "Status"),
+                        .init("transport", "Transport", "LAN / TLS"),
+                        .init("trust", "Trust", "Viewer pairings saved in Keychain")
+                    ]),
+                    .init("Permissions", fields: [
+                        .init("screen", "Screen Recording"),
+                        .init("input", "PostEvent input"),
+                        .init("accessibility", "Accessibility"),
+                        .init("network", "Local discovery")
+                    ])
+                ]
+            )
+            controller.addNote("Permission checks refresh when you return to the Host. Local discovery reflects the service state; macOS manages Local Network permission.")
+            controller.addAction("rename", title: "Rename Host…") { [weak self] in self?.renameHost() }
+            controller.addAction("permissions", title: "Privacy & Security Settings…") {
+                guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security") else { return }
+                NSWorkspace.shared.open(url)
+            }
+            controller.addAction("retry", title: "Retry setup") { [weak self] in self?.retrySetup() }
+            controller.addAction("forget", title: "Forget saved pairings…") { [weak self] in self?.forgetSavedPairings() }
+            controller.onClose = { [weak self] in self?.restoreAccessoryWhenWindowsClose() }
+            settingsWindow = controller
+        }
+        refreshSettings()
+        settingsWindow?.present()
+    }
+
+    private func refreshSettings() {
+        guard let settingsWindow else { return }
+        settingsWindow.setValue(currentHostName, for: "name")
+        settingsWindow.setValue(latestStatus.description, for: "status")
+        settingsWindow.setValue(CGPreflightScreenCaptureAccess() ? "Granted" : "Not granted", for: "screen")
+        settingsWindow.setValue(CGPreflightPostEventAccess() ? "Granted" : "Not granted", for: "input")
+        settingsWindow.setValue(AXIsProcessTrusted() ? "Granted" : "Not granted (optional)", for: "accessibility")
+        let discovery: String
+        switch latestStatus {
+        case .listening, .pairing, .connected: discovery = "Bonjour service active"
+        case .needsLocalNetwork: discovery = "Local Network access required"
+        case .listenerFailed: discovery = "Bonjour service unavailable"
+        case .stopped: discovery = "Stopped"
+        default: discovery = "Not ready"
+        }
+        settingsWindow.setValue(discovery, for: "network")
+        settingsWindow.setAction("retry", enabled: retryItem?.isEnabled == true)
+    }
+
+    private func restoreAccessoryWhenWindowsClose() {
+        // willClose arrives before isVisible changes. Defer one run-loop turn.
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self,
+                  self.settingsWindow?.window?.isVisible != true,
+                  self.settingsWindow?.window?.isMiniaturized != true,
+                  self.applicationMenu?.isAboutVisible != true else { return }
+            NSApplication.shared.setActivationPolicy(.accessory)
+        }
     }
 
     @objc private func retrySetup() {
@@ -394,12 +482,14 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         HostPreferences.save(name)
         renameHostMenuItem?.title = "Rename Host…"
         statusItem?.button?.toolTip = "MacRemoteApp Host — \(name)"
-        Task { [runtime] in
+        Task { [weak self, runtime] in
             do {
                 try await runtime.updateServiceName(name)
+                self?.currentHostName = name
+                self?.refreshSettings()
             } catch {
                 await MainActor.run {
-                    showHostSettingsError("The Host name could not be applied. The previous advertised name remains active.")
+                    self?.showHostSettingsError("The Host name could not be applied. The previous advertised name remains active.")
                 }
             }
         }

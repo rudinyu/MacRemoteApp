@@ -1,4 +1,5 @@
 import AppKit
+import AppSupport
 import CodecCore
 import Foundation
 import InputCore
@@ -12,28 +13,8 @@ private enum ViewerPairingPromptOutcome: Sendable {
     case sessionEnded
 }
 
-private enum ViewerApplicationMetadata {
-    static let version: String = {
-        guard let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else {
-            return "0.2"
-        }
-        let version = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return version.isEmpty ? "0.2" : version
-    }()
-
-    static let build: String = {
-        guard let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String else {
-            return "1001"
-        }
-        let build = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return build.isEmpty ? "1001" : build
-    }()
-
-    static let protocolVersion = "\(ProtocolVersion.current.major).\(ProtocolVersion.current.minor)"
-
-    static var displayVersion: String { "\(version).\(build)" }
-    static var displayVersionDetails: String { "\(displayVersion) (Build \(build))" }
-}
+private let viewerApplicationMetadata = ApplicationMetadata(bundle: .main)
+private let viewerProtocolVersion = "\(ProtocolVersion.current.major).\(ProtocolVersion.current.minor)"
 
 /// Minimal production Viewer composition. The UI is intentionally small, but
 /// the data path is real: Bonjour -> authenticated SessionCoordinator -> H264
@@ -110,6 +91,12 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var contentView: ViewerContentView?
     private var renderer: MetalVideoRenderer?
     private var window: NSWindow?
+    private var applicationMenu: ApplicationMenu?
+    private var settingsView: SettingsView?
+    private var isShowingSettings = false
+    private var discoveryStatus = "Not started" {
+        didSet { refreshSettings() }
+    }
     private var localIdentity: ProvisionedIdentity?
     private var selectedGeneration: UInt64?
     private var selectedWindowIdentifier: UInt64?
@@ -139,6 +126,14 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         application.setActivationPolicy(.regular)
         application.delegate = self
         makeWindow()
+        let menu = ApplicationMenu(
+            applicationName: "MacRemoteApp Viewer",
+            metadata: viewerApplicationMetadata,
+            onSettings: { [weak self] in self?.showSettings() },
+            onShowWindow: { [weak self] in self?.showViewerWindow() }
+        )
+        applicationMenu = menu
+        menu.install()
         application.run()
     }
 
@@ -176,6 +171,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func startDiscovery() {
         guard discoveryTask == nil, discoveryStateTask == nil, !isShuttingDown else { return }
+        discoveryStatus = "Starting Bonjour discovery"
         let updates = discovery.updates
         let stateUpdates = discovery.stateUpdates
         discoveryStateTask = Task { @MainActor [weak self] in
@@ -186,15 +182,19 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 case .setup:
                     break
                 case let .waiting(code):
+                    self.discoveryStatus = "Waiting for Local Network (\(code))"
                     self.setStatus("Waiting for Local Network access (\(code))…")
                 case .ready:
+                    self.discoveryStatus = "Bonjour browser ready"
                     ViewerStartupOnboarding.markLocalNetworkReady()
                     if self.session == nil {
                         self.setStatus("Select a MacRemoteApp Host…")
                     }
                 case let .failed(code):
+                    self.discoveryStatus = "Discovery failed (\(code))"
                     self.setStatus("Local Network discovery failed (\(code)); enable MacRemoteApp Viewer in System Settings")
                 case .cancelled:
+                    self.discoveryStatus = "Stopped"
                     return
                 }
             }
@@ -248,6 +248,84 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApplication.shared.terminate(nil)
     }
 
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard isShowingSettings else { return true }
+        showViewerWindow()
+        return false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            if window?.isMiniaturized == true { window?.deminiaturize(nil) }
+            window?.makeKeyAndOrderFront(nil)
+        }
+        return true
+    }
+
+    private func showViewerWindow() {
+        isShowingSettings = false
+        window?.contentView = contentView
+        window?.title = "MacRemoteApp Viewer — Version \(viewerApplicationMetadata.displayVersionDetails)"
+        if let contentView { window?.makeFirstResponder(contentView.surface) }
+        if window?.isMiniaturized == true { window?.deminiaturize(nil) }
+        window?.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    private func showSettings() {
+        if settingsView == nil {
+            let controller = SettingsView(
+                title: "Viewer Settings",
+                subtitle: "Current connection details and controls for this Viewer.",
+                metadata: viewerApplicationMetadata,
+                sections: [
+                    .init("Connection", fields: [
+                        .init("connection", "Status"), .init("host", "Host"),
+                        .init("transport", "Transport", "LAN / TLS"),
+                        .init("discovery", "Local discovery"), .init("latency", "Round-trip time"),
+                        .init("input", "Remote input"), .init("message", "Details")
+                    ]),
+                    .init("Session settings", fields: [
+                        .init("filter", "Host filter", configuration.hostName ?? "All LAN Hosts"),
+                        .init("pairing", "Trust", configuration.peerCertificateURL == nil ? "Pairing saved in Keychain" : "Pinned certificate override"),
+                        .init("reconnect", "Reconnect", "Automatic for the selected Host"),
+                        .init("clipboard", "Text clipboard")
+                    ])
+                ]
+            )
+            controller.addAction("back", title: "← Back to Remote View", atTop: true) { [weak self] in
+                self?.showViewerWindow()
+            }
+            controller.addAction("clipboard", title: "Share text clipboard for this session", checkbox: true) { [weak self] in
+                self?.toggleClipboard()
+            }
+            controller.addNote("Clipboard sharing requires consent on both Macs and resets when the session ends. Local discovery reflects browser activity; macOS manages the permission.")
+            controller.addAction("network", title: "Local Network Settings…") {
+                ViewerStartupOnboarding.openLocalNetworkSettings()
+            }
+            controller.addAction("forget", title: "Forget saved pairings…") { [weak self] in
+                self?.forgetSavedPairings()
+            }
+            settingsView = controller
+        }
+        refreshSettings()
+        isShowingSettings = true
+        window?.contentView = settingsView
+        window?.title = "Viewer Settings — Version \(viewerApplicationMetadata.displayVersionDetails)"
+        if window?.isMiniaturized == true { window?.deminiaturize(nil) }
+        window?.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    private func refreshSettings() {
+        guard let settingsView, let contentView else { return }
+        for (key, value) in contentView.settingsValues {
+            settingsView.setValue(value, for: key)
+        }
+        settingsView.setValue(discoveryStatus, for: "discovery")
+        settingsView.setAction("clipboard", enabled: contentView.clipboardAvailable, checked: contentView.clipboardEnabled)
+    }
+
     private func makeWindow() {
         let frame = NSRect(x: 0, y: 0, width: 1280, height: 800)
         let content = ViewerContentView(frame: frame)
@@ -277,6 +355,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.setStatus(error.description)
         }
         contentView = content
+        content.onSettingsChange = { [weak self] in self?.refreshSettings() }
 
         let window = NSWindow(
             contentRect: frame,
@@ -284,10 +363,11 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "MacRemoteApp Viewer — Version \(ViewerApplicationMetadata.displayVersionDetails)"
+        window.title = "MacRemoteApp Viewer — Version \(viewerApplicationMetadata.displayVersionDetails)"
         window.contentView = content
         window.delegate = self
         window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 800, height: 560)
         self.window = window
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -911,7 +991,6 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let session else {
             let readiness = InputReadiness.awaitingAuthentication
             contentView?.updateStream(size: streamDimensions, readiness: readiness)
-            contentView?.setInputReadiness(readiness)
             contentView?.updateClipboard(status: nil, available: false)
             return
         }
@@ -949,7 +1028,6 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             readiness: readiness,
             capabilities: inputCapabilities
         )
-        contentView?.setInputReadiness(readiness)
         switch readiness {
         case .ready:
             setStatus("Connected — input ready")
@@ -1096,7 +1174,6 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         contentView?.updateStream(size: .zero, readiness: .awaitingAuthentication)
         contentView?.setPeerName(nil)
         contentView?.setConnectionLatency(nil)
-        contentView?.setInputReadiness(.awaitingAuthentication)
         contentView?.updateClipboard(status: nil, available: false)
         contentView?.setConnectionState(.disconnected)
         contentView?.setHostSelectionEnabled(true)
@@ -1139,6 +1216,14 @@ private enum ViewerConnectionState: Equatable {
 }
 
 @MainActor
+private final class ViewerStatusPanel: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        _ = point
+        return nil
+    }
+}
+
+@MainActor
 private final class ViewerContentView: NSView {
     let videoView: MTKView
     let surface: ViewerInputSurface
@@ -1153,14 +1238,33 @@ private final class ViewerContentView: NSView {
     var onPairingRetry: (@MainActor () -> Void)?
     var onForgetPairings: (@MainActor () -> Void)?
     var onClipboardToggle: (@MainActor () -> Void)?
+    var onSettingsChange: (@MainActor () -> Void)?
     var status: String = "Starting…" {
-        didSet { statusLabel.stringValue = status }
+        didSet {
+            statusLabel.stringValue = status
+            onSettingsChange?()
+        }
+    }
+    private(set) var clipboardAvailable = false
+    private(set) var clipboardEnabled = false
+    private var clipboardSummary = "Unavailable"
+    var settingsValues: [String: String] {
+        ["connection": connectionState.statusTitle, "host": peerName,
+         "latency": connectionLatency, "input": compactInputStatus(readiness),
+         "message": status, "clipboard": clipboardSummary]
     }
 
     private let statusLabel = NSTextField(labelWithString: "Starting…")
+    private let connectionStateLabel = NSTextField(labelWithString: "Disconnected")
     private let fpsLabel = NSTextField(labelWithString: "FPS: —")
-    private let connectionDetailsLabel = NSTextField(labelWithString: "")
+    private let connectionPanel = ViewerStatusPanel(frame: .zero)
     private let connectionStatusDot = NSView(frame: .zero)
+    private let peerNameLabel = NSTextField(labelWithString: "Host: —")
+    private let routeLabel = NSTextField(labelWithString: "Transport: LAN / TLS")
+    private let latencyLabel = NSTextField(labelWithString: "RTT: —")
+    private let inputStatusLabel = NSTextField(labelWithString: "Input: Authenticating")
+    private let versionLabel = NSTextField(labelWithString: "Version: —")
+    private let protocolLabel = NSTextField(labelWithString: "Protocol: —")
     private let hostPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let connectHostButton = NSButton(title: "Connect", target: nil, action: nil)
     private let forgetPairingsButton = NSButton(title: "Forget saved pairings…", target: nil, action: nil)
@@ -1176,7 +1280,6 @@ private final class ViewerContentView: NSView {
     private var connectionState: ViewerConnectionState = .disconnected
     private var peerName = "—"
     private var connectionLatency = "—"
-    private var inputStatus = InputReadiness.awaitingAuthentication.label
     private var streamSize: CGSize = .zero
     private var readiness: InputReadiness = .awaitingAuthentication
     private var inputCapabilities: ViewerInputCapabilities = .none
@@ -1201,18 +1304,34 @@ private final class ViewerContentView: NSView {
         statusLabel.isBordered = false
         statusLabel.alignment = .left
         statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.font = .systemFont(ofSize: 12)
+        connectionStateLabel.textColor = .labelColor
+        connectionStateLabel.backgroundColor = .clear
+        connectionStateLabel.isBordered = false
+        connectionStateLabel.alignment = .left
+        connectionStateLabel.lineBreakMode = .byTruncatingTail
+        connectionStateLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         fpsLabel.textColor = .secondaryLabelColor
         fpsLabel.backgroundColor = .clear
         fpsLabel.isBordered = false
         fpsLabel.alignment = .right
-        connectionDetailsLabel.textColor = .secondaryLabelColor
-        connectionDetailsLabel.backgroundColor = .clear
-        connectionDetailsLabel.isBordered = false
-        connectionDetailsLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        connectionDetailsLabel.alignment = .left
-        connectionDetailsLabel.lineBreakMode = .byTruncatingTail
+        connectionPanel.wantsLayer = true
+        connectionPanel.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.94).cgColor
+        connectionPanel.layer?.cornerRadius = 10
+        connectionPanel.layer?.borderWidth = 1
+        connectionPanel.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.45).cgColor
         connectionStatusDot.wantsLayer = true
         connectionStatusDot.layer?.cornerRadius = 4
+        for label in [
+            peerNameLabel,
+            routeLabel,
+            latencyLabel,
+            inputStatusLabel,
+            versionLabel,
+            protocolLabel
+        ] {
+            configureDetailLabel(label)
+        }
         hostPicker.controlSize = .small
         hostPicker.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         hostPicker.addItem(withTitle: "Choose MacRemoteApp Host")
@@ -1244,10 +1363,17 @@ private final class ViewerContentView: NSView {
         retryPairingButton.isHidden = true
         addSubview(videoView)
         addSubview(surface)
+        addSubview(connectionPanel)
+        addSubview(connectionStateLabel)
         addSubview(statusLabel)
         addSubview(fpsLabel)
         addSubview(connectionStatusDot)
-        addSubview(connectionDetailsLabel)
+        addSubview(peerNameLabel)
+        addSubview(routeLabel)
+        addSubview(latencyLabel)
+        addSubview(inputStatusLabel)
+        addSubview(versionLabel)
+        addSubview(protocolLabel)
         addSubview(hostPicker)
         addSubview(connectHostButton)
         addSubview(forgetPairingsButton)
@@ -1272,10 +1398,15 @@ private final class ViewerContentView: NSView {
         streamSize = size
         self.readiness = readiness
         inputCapabilities = capabilities
+        updateConnectionDetails()
         needsLayout = true
     }
 
     func updateClipboard(status: ClipboardSyncStatus?, available: Bool) {
+        clipboardAvailable = available
+        clipboardEnabled = available && status?.localEnabled == true
+        clipboardSummary = !available ? "Unavailable" : !clipboardEnabled ? "Off" : status?.remoteEnabled == true ? "Sharing text" : "Waiting for Host consent"
+        defer { onSettingsChange?() }
         guard available else {
             clipboardButton.title = "Text clipboard unavailable"
             clipboardButton.isEnabled = false
@@ -1341,11 +1472,6 @@ private final class ViewerContentView: NSView {
         updateConnectionDetails()
     }
 
-    func setInputReadiness(_ readiness: InputReadiness) {
-        inputStatus = readiness.label
-        updateConnectionDetails()
-    }
-
     func setConnectionLatency(_ estimate: ClockSyncEstimate?) {
         let nextLatency: String
         if let estimate {
@@ -1360,11 +1486,17 @@ private final class ViewerContentView: NSView {
     }
 
     private func updateConnectionDetails() {
-        connectionDetailsLabel.stringValue =
-            "Host: \(peerName)  •  Route: LAN / TLS  •  " +
-            "Connection: \(connectionState.statusTitle)  •  RTT: \(connectionLatency)  •  " +
-            "Input: \(inputStatus)  •  Version \(ViewerApplicationMetadata.displayVersionDetails)  •  " +
-            "Protocol \(ViewerApplicationMetadata.protocolVersion)"
+        connectionStateLabel.stringValue = connectionState.statusTitle
+        peerNameLabel.stringValue = "Host: \(peerName)"
+        peerNameLabel.toolTip = peerName == "—" ? nil : peerName
+        routeLabel.stringValue = connectionState == .connected
+            ? "Route: LAN / TLS"
+            : "Transport: LAN / TLS"
+        latencyLabel.stringValue = "RTT: \(connectionLatency)"
+        inputStatusLabel.stringValue = "Input: \(compactInputStatus(readiness))"
+        inputStatusLabel.textColor = readiness.isReady ? .systemGreen : .secondaryLabelColor
+        versionLabel.stringValue = "Version: \(viewerApplicationMetadata.displayVersionDetails)"
+        protocolLabel.stringValue = "Protocol: \(viewerProtocolVersion)"
 
         let statusColor: NSColor
         switch connectionState {
@@ -1376,6 +1508,37 @@ private final class ViewerContentView: NSView {
             statusColor = .systemGreen
         }
         connectionStatusDot.layer?.backgroundColor = statusColor.cgColor
+        onSettingsChange?()
+    }
+
+    private func configureDetailLabel(_ label: NSTextField) {
+        label.textColor = .secondaryLabelColor
+        label.backgroundColor = .clear
+        label.isBordered = false
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        label.alignment = .left
+        label.lineBreakMode = .byTruncatingTail
+        label.usesSingleLineMode = true
+    }
+
+    private func compactInputStatus(_ readiness: InputReadiness) -> String {
+        guard connectionState != .disconnected else { return "Not connected" }
+        switch readiness {
+        case .awaitingAuthentication:
+            return "Authenticating"
+        case .awaitingAuthorization:
+            return "Authorization required"
+        case .surfaceUnavailable:
+            return "Remote content unavailable"
+        case .hostPermissionUnavailable:
+            return "Host permission required"
+        case .hostFocusUnavailable:
+            return "Host not foreground"
+        case .hostStateUnavailable:
+            return "Waiting for Host"
+        case .ready:
+            return "Ready"
+        }
     }
 
     func clearHostSelection() {
@@ -1471,41 +1634,108 @@ private final class ViewerContentView: NSView {
         super.layout()
         videoView.frame = bounds
         surface.frame = bounds
-        let fpsWidth: CGFloat = 80
-        let fpsRight = retryPairingButton.isHidden
-            ? bounds.width - 12
-            : bounds.width - 116 - 8
-        let fpsX = fpsRight - fpsWidth
-        statusLabel.frame = NSRect(
+        let panelFrame = NSRect(
             x: 12,
             y: 8,
-            width: max(1, fpsX - 8 - 12),
+            width: max(1, bounds.width - 24),
+            height: 112
+        )
+        connectionPanel.frame = panelFrame
+        let contentLeft = panelFrame.minX + 14
+        let contentRight = panelFrame.maxX - 14
+        let fpsWidth: CGFloat = 80
+        let retryWidth: CGFloat = 104
+        let retryInset = retryPairingButton.isHidden ? 0 : retryWidth + 8
+        let fpsX = contentRight - retryInset - fpsWidth
+        let stateLabelWidth: CGFloat = 124
+        connectionStateLabel.frame = NSRect(
+            x: contentLeft + 22,
+            y: panelFrame.minY + 9,
+            width: stateLabelWidth,
             height: 20
         )
-        fpsLabel.frame = NSRect(x: fpsX, y: 8, width: fpsWidth, height: 20)
-        connectionDetailsLabel.frame = NSRect(
-            x: 28,
-            y: 30,
-            width: max(1, bounds.width - 40),
-            height: 18
+        statusLabel.frame = NSRect(
+            x: connectionStateLabel.frame.maxX + 8,
+            y: panelFrame.minY + 9,
+            width: max(1, fpsX - 8 - connectionStateLabel.frame.maxX - 8),
+            height: 20
         )
-        connectionStatusDot.frame = NSRect(x: 12, y: 35, width: 8, height: 8)
+        fpsLabel.frame = NSRect(
+            x: fpsX,
+            y: panelFrame.minY + 9,
+            width: fpsWidth,
+            height: 20
+        )
+        connectionStatusDot.frame = NSRect(
+            x: contentLeft,
+            y: panelFrame.minY + 15,
+            width: 8,
+            height: 8
+        )
         retryPairingButton.frame = NSRect(
-            x: max(12, bounds.width - 116),
-            y: 6,
-            width: 104,
+            x: contentRight - retryWidth,
+            y: panelFrame.minY + 7,
+            width: retryWidth,
             height: 24
         )
-        let hostControlY: CGFloat = 56
+        let firstRowY = panelFrame.minY + 36
+        let secondRowY = panelFrame.minY + 58
+        let detailWidth = max(1, contentRight - contentLeft)
+        let rowGap: CGFloat = 16
+        let firstRowAvailable = max(1, detailWidth - rowGap * 2)
+        let hostWidth = firstRowAvailable * 0.48
+        let routeWidth = firstRowAvailable * 0.30
+        let latencyWidth = max(1, firstRowAvailable - hostWidth - routeWidth)
+        peerNameLabel.frame = NSRect(
+            x: contentLeft,
+            y: firstRowY,
+            width: hostWidth,
+            height: 18
+        )
+        routeLabel.frame = NSRect(
+            x: peerNameLabel.frame.maxX + rowGap,
+            y: firstRowY,
+            width: routeWidth,
+            height: 18
+        )
+        latencyLabel.frame = NSRect(
+            x: routeLabel.frame.maxX + rowGap,
+            y: firstRowY,
+            width: latencyWidth,
+            height: 18
+        )
+        let secondRowAvailable = max(1, detailWidth - rowGap * 2)
+        let inputWidth = secondRowAvailable * 0.45
+        let versionWidth = secondRowAvailable * 0.37
+        let protocolWidth = max(1, secondRowAvailable - inputWidth - versionWidth)
+        inputStatusLabel.frame = NSRect(
+            x: contentLeft,
+            y: secondRowY,
+            width: inputWidth,
+            height: 18
+        )
+        versionLabel.frame = NSRect(
+            x: inputStatusLabel.frame.maxX + rowGap,
+            y: secondRowY,
+            width: versionWidth,
+            height: 18
+        )
+        protocolLabel.frame = NSRect(
+            x: versionLabel.frame.maxX + rowGap,
+            y: secondRowY,
+            width: protocolWidth,
+            height: 18
+        )
+        let hostControlY = panelFrame.minY + 82
         let connectWidth: CGFloat = 112
         let forgetWidth: CGFloat = 168
         let horizontalGap: CGFloat = 8
         let hostPickerWidth = min(
             420,
-            max(180, bounds.width - 24 - connectWidth - forgetWidth - horizontalGap * 2)
+            max(180, panelFrame.width - 28 - connectWidth - forgetWidth - horizontalGap * 2)
         )
         hostPicker.frame = NSRect(
-            x: 12,
+            x: contentLeft,
             y: hostControlY,
             width: hostPickerWidth,
             height: 24
@@ -1522,7 +1752,7 @@ private final class ViewerContentView: NSView {
             width: forgetWidth,
             height: 24
         )
-        let controlY = max(34, bounds.height - 36)
+        let controlY = max(panelFrame.maxY + 16, bounds.height - 36)
         let clipboardWidth: CGFloat = 176
         windowPicker.frame = NSRect(
             x: 12,

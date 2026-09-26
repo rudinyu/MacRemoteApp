@@ -390,6 +390,7 @@ MACREMOTEAPP_RUN_M2_LOCAL_IDENTITY_SMOKE=1 \
     swift test --configuration debug --scratch-path "${build_root}/root"
 
 for package_dir in \
+    Packages/AppSupport \
     Packages/RemoteProtocol \
     Packages/CaptureCore \
     Packages/CodecCore \

@@ -10,8 +10,8 @@ notarization flow. The packaging flow produces signed app bundles,
 role-specific DMGs, and role-specific install/uninstall command files. The
 Keychain profile name is configurable through `MACREMOTEAPP_NOTARY_PROFILE`
 and defaults to `notarytool-profile`; profile credentials never enter the
-repository or validation logs. Deterministic CI packages are isolated under
-`.build/` while the run is active and are removed after a successful CI run;
+repository or validation logs. Public validation packages are isolated under
+`.build/public-validation/` and only that cache is removed after a successful run;
 they are never treated as distributable release output. The complete local
 release gate is `scripts/release-notarized.sh`: it acquires the release lock and
 removes the repository `.build` cache before deterministic validation, then
@@ -25,9 +25,8 @@ artifact. The existing selected channel remains in place while the new release
 is staged, signed, and notarized beside it. It is promoted only after final
 validation; a failure before promotion leaves the old channel intact, while a
 failure during promotion restores it.
-When `MACREMOTEAPP_CI_NOTARIZED_RELEASE_ROOT` is supplied, CI directly
-validates that existing external notarized release without rebuilding or
-replacing it.
+Use `scripts/validate-notarized-release.sh` directly to validate an existing
+notarized release without rebuilding or replacing it.
 
 ## Threat-model review
 
@@ -45,6 +44,12 @@ replacing it.
 
 ## Release controls
 
+- Both role bundles use `CFBundleShortVersionString` for `major.minor` and
+  `CFBundleVersion` for the build. For example, `0.2` and `1003` display as
+  `0.2.1003 (Build 1003)` through AppSupport. About, Settings, and status UI
+  must agree with the packaged plist values. UI review artifacts with ad-hoc
+  signatures are not notarized releases; changing guides does not replace
+  documentation embedded in an already generated DMG.
 - Host and Viewer debug/physical smoke commands compile only in debug
   configuration. Release binaries do not contain those command markers.
 - Release app bundles are signed with the hardened runtime. Developer ID
@@ -81,23 +86,37 @@ replacing it.
 - The DMG uninstall helper uses the same per-role lifecycle lock as the
   installer, verifies the exact bundle identity, cryptographic signature,
   pinned MacRemoteApp Developer ID publisher, and Gatekeeper acceptance before
-  clearing both roles' exact app data, shared MacRemoteApp trust/generated
-  identity, and moving the selected per-user app to `~/.Trash`. It rejects
+  invoking each installed role's signed `--remove-all-data` command to clear
+  its role-specific trust, generated identity, and preferences, clearing both
+  roles' exact app-data paths, and moving the selected per-user app to
+  `~/.Trash`. It rejects
   symlinked Applications or Trash paths, does not touch unrelated Keychain
-  records, and leaves macOS TCC grants for System Settings or the
-  repository-only development cleanup script.
+  records, and leaves macOS TCC grants for System Settings or an explicitly
+  authorized app-specific reset. Legacy shared peer-trust records are not
+  used by the role-specific runtime and are left untouched by this path.
 - `scripts/uninstall-device-apps.sh` removes only the exact selected app
   bundle paths and requires confirmation for non-interactive removal. Its
   explicit `--clean-testing --yes` mode also removes `build/testing/`, `.build`,
-  the Host Screen Recording/PostEvent and Host/Viewer Local Network TCC
-  grants, MacRemoteApp trust/device-identity Keychain items, and
-  only the imported M2 identities whose fingerprints match generated identity
+  resets Host Screen Recording/Accessibility and Host/Viewer Local Network TCC
+  grants, invokes the legacy trust/generated-identity Keychain helper, and
+  removes only the imported M2 identities whose fingerprints match generated identity
   material present in an explicitly named M2 identity directory; beta, RC, and
   release artifacts are preserved. On a device that retains only its local
   `.p12` and the opposite `.cer`, `MACREMOTEAPP_P12_PASSWORD` is required to
   fingerprint the local certificate without printing the password. If the
   check fails, the identity directory is retained for retry. Without
-  `--identities`, imported M2 Keychain identities remain.
+  `--identities`, imported M2 Keychain identities remain. It does not explicitly
+  reset PostEvent or invoke the current per-role `--remove-all-data` commands;
+  its legacy peer-trust namespace is not the two current role namespaces.
+  Preview with `--dry-run` and use this broad reset only when that scope is
+  intended, not as routine cleanup of one UI review.
+- Local UI/installation tests follow [UI Review and Post-test
+  Cleanup](TESTING_CLEANUP.md): stop verified test roles, clear their data
+  through the verified bundles, reset only the authorized exact bundle IDs,
+  remove dedicated test output/installations, and verify absence. Copies using
+  the same role identifiers share settings, identity, and approvals, so resolve
+  production-state preservation before any reset. Do not print Keychain values,
+  edit TCC databases, or remove unrelated release channels/source.
 - `scripts/notarize-device-apps.sh` requires a Developer ID identity, submits
   both app archives and both DMGs with `xcrun notarytool --keychain-profile`,
   staples the tickets, validates them, and refreshes the distributable
@@ -119,9 +138,9 @@ replacing it.
   compares each `.app.zip` with its validated app bundle, rejects extra archive
   payloads, then validates the extracted stapled app. DMG payload checks use the
   manifest embedded in each DMG rather than mutable checkout files. The release
-  audit also asserts a universal `arm64+x86_64` Host and an `arm64` Viewer. Set
-  `MACREMOTEAPP_CI_NOTARIZED_RELEASE_ROOT` to use this direct validation path
-  from `.codex/ci.sh`.
+  audit also asserts a universal `arm64+x86_64` Host and an `arm64` Viewer. Run
+  `bash scripts/validate-notarized-release.sh <absolute-release-directory>`
+  directly; no checkout-local Codex automation is required.
 - `get-task-allow` and dynamic-loader development entitlements are rejected by
   the release audit.
 - Private identity files are generated outside the repository and are rejected
@@ -140,8 +159,8 @@ replacing it.
   arbitrary underlying error strings are not release diagnostics.
 - Trust records and locally generated TLS identity material remain in
   Keychain-backed `SecurityCore`; no file-based secret store is added. The
-  repository cleanup path removes the default generated local identity along
-  with testing trust records. In-app pairing reset preserves the local
+  current per-role `--remove-all-data` path removes that role's generated local
+  identity, saved peer trust, and preferences. In-app pairing reset preserves the local
   identity; the DMG uninstall is the explicit full MacRemoteApp data reset.
 
 ## Residual risks and owners

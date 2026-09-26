@@ -13,6 +13,7 @@ let package = Package(
         .executable(name: "M8Benchmark", targets: ["M8Benchmark"])
     ],
     dependencies: [
+        .package(path: "Packages/AppSupport"),
         .package(path: "Packages/RemoteProtocol"),
         .package(path: "Packages/CaptureCore"),
         .package(path: "Packages/CodecCore"),
@@ -24,6 +25,7 @@ let package = Package(
         .executableTarget(
             name: "Host",
             dependencies: [
+                .product(name: "AppSupport", package: "AppSupport"),
                 .product(name: "RemoteProtocol", package: "RemoteProtocol"),
                 .product(name: "CaptureCore", package: "CaptureCore"),
                 .product(name: "CodecCore", package: "CodecCore"),
@@ -40,6 +42,7 @@ let package = Package(
         .executableTarget(
             name: "Viewer",
             dependencies: [
+                .product(name: "AppSupport", package: "AppSupport"),
                 .product(name: "RemoteProtocol", package: "RemoteProtocol"),
                 .product(name: "CodecCore", package: "CodecCore"),
                 .product(name: "TransportCore", package: "TransportCore"),

@@ -45,6 +45,13 @@ clock-synchronized performance report remain unverified on this Apple Silicon
 workspace. The intentionally deferred capabilities are listed in
 `docs/POST_V1_ROADMAP.md`.
 
+M10 UI now uses the shared `AppSupport` package for native menus, settings
+content, and version/build formatting. Viewer Settings is a page in its main
+window; Host Settings retains the resident menu-bar lifecycle. The recorded
+local checks do not complete the connected navigation/input-release or Host
+window-lifecycle acceptance rows. See [M10 acceptance](M10_ACCEPTANCE.md) and
+the dated [UI review evidence](TESTING_CLEANUP.md#local-evidence-2026-09-26-021003).
+
 ## Delivery principles
 
 - Implement one milestone at a time.
@@ -60,6 +67,15 @@ workspace. The intentionally deferred capabilities are listed in
 - Keep the public validation entry point tool-agnostic and reproducible; local
   developer automation is not part of the published repository contract.
 - Do not add out-of-scope features as shortcuts or future-proofing.
+- Keep README, product requirements, architecture, milestone status, and
+  user/acceptance guides synchronized with user-visible behavior. Record
+  unverified hardware behavior separately from implementation completion.
+- Finish each UI/installation test with [scoped cleanup](TESTING_CLEANUP.md),
+  unless retaining the test state was explicitly requested. Preserve source,
+  Git state, unrelated checkouts, and release channels; record any cleanup gap.
+- Use `major.minor.build` release identifiers with separate short-version and
+  build plist fields. Documentation-only synchronization does not create a new
+  binary release or imply that existing DMGs contain the updated guides.
 
 ## Dependency overview
 
@@ -501,6 +517,13 @@ certificate remains available only for pinned migration and diagnostics. The
 actual Intel Host to Apple Silicon Viewer run cannot be claimed until it is
 executed on both physical Macs.
 
+The app-shell implementation includes native menu commands for both roles,
+shared release metadata, same-window Viewer Settings, and a retained Host
+Settings window with read-only permission/runtime state. AppSupport tests
+cover metadata formatting, menu action routing, and reusable settings-window
+status/retention. Those tests do not simulate an active remote session or prove
+macOS Dock/permission behavior on the physical target Macs.
+
 ### Scope
 
 - Run the complete Intel Host to Apple Silicon Viewer workflow on the same LAN.
@@ -508,6 +531,8 @@ executed on both physical Macs.
   mouse, keyboard, text clipboard, disconnect/reconnect, and failure UX.
 - Finalize support matrix, operator documentation, known limitations, and
   release checklist.
+- Validate standard menus, version/build display, same-window Viewer Settings,
+  and Host Settings/About activation and close/minimize behavior.
 
 ### Explicit non-scope
 
@@ -526,6 +551,10 @@ becomes a post-V1 milestone proposal.
   documented steps.
 - Known limitations do not contradict the product scope or imply unsupported
   remote-desktop behavior.
+- Settings navigation preserves an active Viewer session and releases held
+  remote input; Host window closure leaves the resident service running.
+- Test installations, per-role data/permissions, and dedicated review output
+  are cleaned and verified without removing source or retained release channels.
 
 ### Tests and verification
 
@@ -535,6 +564,16 @@ becomes a post-V1 milestone proposal.
   stale trust, unsupported capability, clipboard opt-out, and input disable.
 - Run final build/test/security/release validation and archive only sanitized
   evidence.
+- Use `bash scripts/validate.sh` for code changes; it includes AppSupport tests.
+  For documentation-only synchronization, check relative links, code-example
+  syntax, diff whitespace, and consistency with current implementation without
+  rebuilding or relaunching apps solely to review prose.
+- Exercise Viewer Settings via Command-, and return via Back, Command-0, and
+  Command-W while connected; verify held key/button release and unchanged
+  session/selection. Check Host Settings/About close and minimize behavior,
+  return from System Settings, and normal Quit shutdown on both roles.
+- Complete [post-test cleanup](TESTING_CLEANUP.md) after evidence collection;
+  keep skipped physical checks and cleanup failures explicit in the handoff.
 
 ## Milestone completion report format
 

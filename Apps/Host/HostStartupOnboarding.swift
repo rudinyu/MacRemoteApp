@@ -83,7 +83,7 @@ enum HostStartupOnboarding {
 
     private static func activateApplication() {
         _ = NSApplication.shared
-        NSApplication.shared.setActivationPolicy(.accessory)
+        // Preserve the regular policy while the operator has Host Settings open.
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 

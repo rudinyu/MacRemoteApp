@@ -50,6 +50,19 @@ legacy Keychain entries are left untouched by the upgrade. The
 actual Intel-to-Apple-Silicon run and OS Accessibility/input evidence remain
 environment gates until they are executed on both Macs.
 
+Both roles now have native macOS About, Settings, Hide, Minimize, and Quit
+commands. Viewer Settings replaces the remote view in its existing main
+window; Back, Command-0, or Command-W on that page returns to the remote view.
+The Host remains a menu-bar app, with a temporary Dock icon while its Settings
+or About window is open. Settings shows current runtime/permission information
+without replacing the session's authorization checks. Release identifiers use
+`major.minor.build`: `0.2.1003` is Version `0.2`, Build `1003`, stored separately
+in the bundle metadata. See the [UI architecture](docs/ARCHITECTURE.md#native-app-shell-and-release-identity)
+and [product requirements](docs/PRODUCT_SPEC.md#settings-and-standard-macos-controls).
+Connected page switching and Host window lifecycle still require the physical
+acceptance checks; local UI evidence is recorded in
+[UI Review and Post-test Cleanup](docs/TESTING_CLEANUP.md).
+
 The user-facing documents are [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md),
 [`docs/DEBUGGING.md`](docs/DEBUGGING.md), and
 [`docs/DEBUG_LOG_COLLECTION.md`](docs/DEBUG_LOG_COLLECTION.md). The DMG
@@ -69,6 +82,7 @@ MacRemoteApp/
 │   ├── Host/
 │   └── Viewer/
 ├── Packages/
+│   ├── AppSupport/
 │   ├── RemoteProtocol/
 │   ├── CaptureCore/
 │   ├── CodecCore/
@@ -99,6 +113,7 @@ MacRemoteApp/
     ├── USER_GUIDE.md
     ├── DEBUGGING.md
     ├── DEBUG_LOG_COLLECTION.md
+    ├── TESTING_CLEANUP.md
     ├── PRODUCT_SPEC.md
     ├── PROTOCOL.md
     └── SECURITY.md
@@ -114,6 +129,7 @@ MacRemoteApp/
 │   ├── Host/
 │   └── Viewer/
 ├── Packages/
+│   ├── AppSupport/
 │   ├── RemoteProtocol/
 │   ├── CaptureCore/
 │   ├── CodecCore/
@@ -180,8 +196,14 @@ selected app to the user's Trash. It also clears both roles' exact per-user
 app-state paths. It refuses ad-hoc or modified testing bundles and does not
 reset macOS TCC grants; use System Settings when a fresh privacy decision is
 needed. Legacy shared Keychain records from earlier builds are preserved and
-not used by the new role-specific runtime. To remove ad-hoc testing residue,
-run `scripts/uninstall-device-apps.sh --clean-testing --yes`; add
+not used by the new role-specific runtime. After every local UI/installation
+test, follow [UI Review and Post-test Cleanup](docs/TESTING_CLEANUP.md) to stop
+the test apps, remove scoped installation/settings/identity state, reset their
+permissions, and verify cleanup while preserving source and release artifacts.
+For an explicitly intended broad development reset, preview
+`scripts/uninstall-device-apps.sh --clean-testing --dry-run` before using
+`--yes`. This broader helper removes the whole `.build/` and is not a substitute
+for current per-role app-data cleanup; add
 `--identities "$HOME/MacRemoteApp-identities"` when that disposable M2
 identity directory and its matching imported Keychain identities should also
 be removed. On a physical-test Mac that keeps only its local `.p12` and the
@@ -196,11 +218,13 @@ local identity and pair again. This preserves `build/beta/`,
 [`Resources/MacRemoteAppIcon.svg`](Resources/MacRemoteAppIcon.svg); generated
 `.icns`, app bundles, and test identities stay outside version control.
 
-The repository validation and deterministic M10 gate write temporary build
-packages under `.build/` while running. A successful `.codex/ci.sh` removes
-that cache; a failed run retains it for diagnosis. To validate an already
-notarized release directly, set `MACREMOTEAPP_CI_NOTARIZED_RELEASE_ROOT` to an
-external release directory when running `.codex/ci.sh`.
+The public repository validation entry point is `bash scripts/validate.sh`.
+It builds both roles, tests all seven local packages (including AppSupport),
+and runs the deterministic M8/M9/M10 gates. Its scratch directory is
+`.build/public-validation/`; a successful run removes only that directory,
+while a failed run retains it for diagnosis. It does not uninstall apps or
+clear their settings. To validate an already notarized release directly, run
+`bash scripts/validate-notarized-release.sh <absolute-release-directory>`.
 `scripts/validate-notarized-release.sh` is read-only with respect to the
 release payload and never submits credentials or uploads artifacts.
 

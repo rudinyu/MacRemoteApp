@@ -127,6 +127,36 @@ disconnect, or failed reauthorization stops the affected operation. Optional
 Accessibility loss only removes the AX/secure-input enhancement. Recheck the
 Host permission and select the window again before reconnecting.
 
+## App menus and settings
+
+Both apps provide native macOS menus. `About MacRemoteApp Host/Viewer` shows
+the full release number and build. `Settings…` (`Command-,`) opens settings,
+`Window > Minimize` (`Command-M`) minimizes the current window,
+and `Quit MacRemoteApp Host/Viewer` (`Command-Q`) ends the session and quits.
+`Hide` (`Command-H`), `Hide Others`, `Show All`, and `Window > Show MacRemoteApp
+Host/Viewer` (`Command-0`) provide the standard window controls.
+
+Viewer Settings replaces the remote view within the same window. Use
+`Back to Remote View`, `Command-0`, or close the settings page with `Command-W`
+to return; switching pages keeps the session connected and releases any held
+remote input. Closing the remote-view window itself quits the Viewer.
+The settings page shows live connection, Host, discovery, round-trip time, input,
+and clipboard status. The text clipboard checkbox uses the same session-only
+opt-in as the main window. Settings also links to Local Network privacy controls
+and the confirmed pairing-reset action. Local app shortcuts such as `Command-,`,
+`Command-M`, and `Command-Q` operate the Viewer even when the remote surface is
+focused.
+
+The resident Host's top-right status menu also has `About` and `Settings…`.
+Opening either shows its standard application menu and a temporary Dock icon;
+closing those windows returns it to menu-bar operation. Host Settings shows the
+current Host name, runtime state, and read-only Screen Recording, PostEvent, and
+Accessibility permission checks. It provides Rename Host, Privacy & Security,
+Retry setup when required, and Forget saved pairings. Permission checks refresh
+when the Host becomes active again. Closing Host Settings does not stop the Host.
+Bonjour activity is reported separately from the macOS-managed Local Network
+permission; it is not a permission preflight result.
+
 ## Stop or uninstall
 
 Quit both apps to end the session. For an app installed by dragging to
@@ -160,18 +190,15 @@ The Host is an accessory app and should not need a persistent Dock icon. If an
 older icon remains pinned, quit the old app first, then choose Options > Remove
 from Dock or drag the icon out of the Dock.
 
-For disposable repository testing state, run the repository copy instead of
-the DMG copy from a repository checkout:
+Local development and UI reviews must finish with scoped cleanup of the test
+apps, settings, pairing/identity records, and app-specific macOS permissions.
+Follow [UI Review and Post-test Cleanup](TESTING_CLEANUP.md) for the order,
+verification, and distinction from the broader repository `--clean-testing`
+reset. This development cleanup also applies when the app was launched directly
+from a review directory without being installed. Removed identities and
+permissions require fresh pairing and consent on the next launch.
 
-```sh
-./scripts/uninstall-device-apps.sh \
-  --clean-testing \
-  --identities "$HOME/MacRemoteApp-identities" \
-  --yes
-```
-
-Use `--dry-run` first. `--clean-testing` preserves the `build/beta`,
-`build/rc`, and `build/release` channels. Before collecting a support bundle,
+Before collecting a support bundle,
 see the accompanying `MacRemoteApp-How-to-Collect-Debug-Logs.txt` in the DMG
 or `docs/DEBUG_LOG_COLLECTION.md` in the repository.
 

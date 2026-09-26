@@ -62,10 +62,11 @@ On the Host, verify:
 On the Viewer, verify Local Network access. Confirm both Macs are on the same
 trusted LAN and that the Host is running before the Viewer starts discovery.
 If a permission was just changed, quit and relaunch the affected app.
-If a previous denial must be tested again, run the uninstall command with
-`--clean-testing`; it resets the MacRemoteApp Host Screen Recording and
-PostEvent entries plus the Host and Viewer Local Network TCC entries before
-the next launch.
+If a previous denial must be tested again, follow
+[UI Review and Post-test Cleanup](TESTING_CLEANUP.md) for an app-specific
+permission reset. Its scoped reset covers all approvals for the exact Host and
+Viewer bundle identifiers, including PostEvent; do not assume the broader
+legacy `--clean-testing` helper clears every current role-specific setting.
 
 If the Host icon is still pinned in the Dock, quit it before choosing Options >
 Remove from Dock. The new Host bundle is an accessory app and does not
@@ -89,9 +90,10 @@ intentionally require a persistent Dock icon.
   trust records; it does not delete the local TLS identity or permissions. Do
   not delete unrelated Keychain records.
 - If a complete reset is required, double-click the role-specific
-  `Uninstall-MacRemoteApp-*.command` in the notarized DMG. It removes that role's
-  both roles' app data plus the shared MacRemoteApp trust and generated
-  identity. It intentionally does not reset macOS TCC grants; remove the exact
+  `Uninstall-MacRemoteApp-*.command` in the notarized DMG. It moves the selected
+  installed app to the Trash, clears each installed role's own trust/generated
+  identity through its signed app, and clears both roles' exact app-data paths.
+  It intentionally does not reset macOS TCC grants; remove the exact
   entries in System Settings when a fresh privacy decision is required.
   Reinstalling either role after this reset requires fresh pairing.
 - To change the discovery name, choose `Rename Host…` from the Host status
@@ -120,7 +122,7 @@ Release binaries intentionally reject or omit these diagnostics. Run them from
 the repository with a debug build only:
 
 ```sh
-cd <repository-root>
+cd "/absolute/path/to/MacRemoteApp" # Replace with your repository path.
 
 # Host window discovery and Screen Recording permission
 swift run --configuration debug Host --m3-list-windows

@@ -101,22 +101,24 @@ ad-hoc/testing bundle from being installed accidentally. For an explicitly
 local ad-hoc test only, add `--allow-ad-hoc`; do not use that option for the
 two-machine acceptance run.
 Use `scripts/uninstall-device-apps.sh --role host --yes` or the corresponding
-Viewer command to remove only the selected app bundle. To clean all disposable
-ad-hoc testing residue after the smoke, run this from the repository checkout:
+Viewer command to remove only the selected app bundle; that operation alone
+does not clear current app settings and identities. Follow
+[UI Review and Post-test Cleanup](TESTING_CLEANUP.md) after the smoke.
+For an explicitly intended broad reset, including imported disposable M2
+identities, preview this repository-only command first:
 
 ```sh
 ./scripts/uninstall-device-apps.sh \
   --clean-testing \
   --identities "$HOME/MacRemoteApp-identities" \
-  --yes
+  --dry-run
 ```
 
-Use `--dry-run` first to inspect the exact cleanup plan without changing the
-system.
+Replace `--dry-run` with `--yes` only after confirming the exact cleanup scope.
 
-That command removes `build/testing/`, `.build`, the installed Host/Viewer
-bundles, the Host Screen Recording/PostEvent and Host/Viewer Local Network
-grants, MacRemoteApp trust and generated local TLS/device-identity Keychain
+With `--yes`, that command removes `build/testing/`, `.build`, the installed Host/Viewer
+bundles, the Host Screen Recording/Accessibility and Host/Viewer Local Network
+grants, legacy MacRemoteApp trust and generated local TLS/device-identity Keychain
 items, plus only the
 imported M2 identities whose fingerprints match the explicitly named generated
 identity material present on that Mac. Because the physical workflow keeps the
@@ -126,6 +128,12 @@ the password or certificate check fails, the generated identity directory is
 preserved for a safe retry. It preserves `build/beta/`, `build/rc/`, and
 `build/release/`. Without `--identities`, imported M2 Keychain identities are
 preserved.
+
+This legacy helper does not explicitly reset PostEvent, clear current per-role
+preference domains, or invoke the signed apps' per-role `--remove-all-data`.
+It is not a replacement for the scoped cleanup runbook, and removes the whole
+`.build/` rather than only one review's output. Clear app-owned state before
+removing the bundles, and preserve unrelated release artifacts and source.
 
 The common icon is the source-of-truth vector at
 `Resources/MacRemoteAppIcon.svg`; the packaging script produces the Finder

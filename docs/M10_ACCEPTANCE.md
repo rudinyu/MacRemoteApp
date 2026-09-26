@@ -40,6 +40,14 @@ pairings stops the active session but preserves the local device identity and
 macOS permissions. The physical evidence below remains required; deterministic
 build/test output must not be used as a substitute.
 
+The app shell now provides native menus and version/build metadata on both
+roles. Viewer Settings navigates within its existing main window; Host
+Settings/About temporarily expose a regular application menu and Dock icon,
+then return to menu-bar operation when closed. These are app-layer changes,
+not a protocol revision. The rows below remain unchecked until exercised on
+the target Macs; [dated local UI evidence](TESTING_CLEANUP.md#local-evidence-2026-09-26-021003)
+is not physical acceptance.
+
 ## Prerequisites
 
 1. Build the release candidates on the current checkout:
@@ -166,6 +174,10 @@ from the production bundle's first-pairing flow.
 | Window selection | Exactly one eligible foreground window is selected | ☐ |
 | Same-session app switching | Start streaming one app, select another eligible app without reconnecting, then verify the new app is foreground on Host and receives mouse/keyboard only while focus and PostEvent checks pass | ☐ |
 | Viewer connection state | Connect changes to disabled `Connected`; disconnect shows `Reconnecting…` during retry and re-enables Connect only when disconnected | ☐ |
+| Native app menus | Both roles expose About with version/build, Settings, Minimize, Hide, and Quit; Host status menu also opens About/Settings | ☐ |
+| Release identity | About, Settings, Viewer title/status, and Host status menu match both installed plists; `major.minor.build` means separate short version and build, not wire protocol version | ☐ |
+| Viewer settings navigation | Settings uses the same main window; Back, Command-0, and Command-W return to remote view; switching during a connected session releases held input and preserves the session | ☐ |
+| Host settings lifecycle | Runtime and permission status refresh; closing settings keeps Host running, and the app returns to menu-bar operation after its windows close | ☐ |
 | Capture/display | Viewer renders the selected window with aspect preservation | ☐ |
 | Performance | 30-second report has clock probes, valid samples, p50/p95, fps and resource data | ☐ |
 | Input | Each authorized input capability works only while authorized; mouse-only or keyboard-only authorization keeps the other local controls disabled | ☐ |
@@ -175,6 +187,10 @@ from the production bundle's first-pairing flow.
 | LAN recovery | Disconnect shows reconnecting; reauthorization is required before input resumes | ☐ |
 | Stale trust | Revocation or identity mismatch requires explicit re-pairing | ☐ |
 | Failure UX | Malformed/unsupported/oversized input fails closed without sensitive diagnostics | ☐ |
+| Post-test cleanup | After collecting evidence, stop test apps, clear scoped settings/trust/identity and permissions, remove test installations/review output, verify absence, and preserve source/release artifacts | ☐ |
+
+Follow [UI Review and Post-test Cleanup](TESTING_CLEANUP.md) after the run.
+Its dated local evidence does not complete the physical acceptance rows above.
 
 ## Role commands
 

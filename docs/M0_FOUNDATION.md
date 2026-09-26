@@ -1,5 +1,11 @@
 # M0 Repository Foundation
 
+This document records the original M0 skeleton and its historical evidence.
+The current M10 composition additionally includes the app-layer `AppSupport`
+package for menus, settings content, and release metadata; see the current
+[architecture](ARCHITECTURE.md). The six-package and placeholder descriptions
+below describe M0, not the current production executables.
+
 ## Project format
 
 M0 uses Swift Package Manager as a small monorepo. The root `Package.swift`
@@ -59,9 +65,11 @@ The public validation entry point for the current checkout is:
 ./scripts/validate.sh
 ```
 
-It builds both executable targets, runs the root smoke test, tests all six
-packages, and checks the M2 boundary. For the original M0-only foundation
-probe, run:
+It now builds Host arm64/x86_64 and Viewer arm64, runs root and all seven local
+package tests (including AppSupport), and checks the deterministic M8/M9/M10
+gates. This is broader than the original six-package M0/M2 checks. It owns only
+`.build/public-validation/` for scratch cleanup; it does not uninstall test
+apps or clear their settings. For the original M0-only foundation probe, run:
 
 ```sh
 swift package describe
