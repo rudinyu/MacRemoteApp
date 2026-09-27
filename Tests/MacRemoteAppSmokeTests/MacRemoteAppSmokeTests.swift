@@ -17,6 +17,77 @@ final class MacRemoteAppSmokeTests: XCTestCase {
         XCTAssertEqual(SecurityCoreModule.name, "SecurityCore")
     }
 
+    /// Capture output is sized in backing pixels, but Viewer input is
+    /// normalized to the displayed content rectangle and InputCore maps it to
+    /// the selected window's global point bounds. The encoded pixel size must
+    /// therefore not change where a normalized event lands.
+    func testM3PixelCaptureSizeDoesNotChangeNormalizedInputMapping() throws {
+        let bounds = WindowBounds(x: 100, y: 50, width: 800, height: 600)
+        let configuration = CaptureConfiguration.default
+        let standard = configuration.outputDimensions(for: bounds, backingScaleFactor: 1)
+        let retina = configuration.outputDimensions(for: bounds, backingScaleFactor: 2)
+        XCTAssertEqual(standard, CaptureOutputDimensions(width: 800, height: 600))
+        XCTAssertEqual(retina, CaptureOutputDimensions(width: 1_440, height: 1_080))
+
+        let selection = HostInputWindowSelection(
+            windowIdentifier: 7,
+            processIdentifier: 70,
+            applicationIdentifier: "com.example.test",
+            generation: 3,
+            bounds: InputWindowBounds(
+                originX: bounds.x,
+                originY: bounds.y,
+                width: bounds.width,
+                height: bounds.height
+            )
+        )
+        let context = HostInputContext(
+            sessionAuthorized: true,
+            authorizedWindowGeneration: 3,
+            selectedWindow: selection,
+            currentWindowIdentifier: 7,
+            currentProcessIdentifier: 70,
+            currentApplicationIdentifier: "com.example.test",
+            currentWindowBounds: selection.bounds,
+            permission: .authorized,
+            focus: .eligible,
+            mouseInputEnabled: true,
+            keyboardInputEnabled: true
+        )
+
+        func hostPoint(forVideoPixel pixel: (x: Double, y: Double), in output: CaptureOutputDimensions) throws -> InputScreenPoint {
+            // Same normalization the Viewer applies against its content rect.
+            let x = UInt16(min(65_535, (pixel.x / Double(output.width) * 65_535).rounded()))
+            let y = UInt16(min(65_535, (pixel.y / Double(output.height) * 65_535).rounded()))
+            let record = InputEventRecord(
+                sequence: 1,
+                timestampNanoseconds: 1,
+                windowGeneration: 3,
+                kind: .pointerMove,
+                x: x,
+                y: y
+            )
+            guard case let .pointerMove(_, location) = try HostInputMapper.command(for: record, in: context) else {
+                throw XCTSkip("expected a pointer move command")
+            }
+            return location
+        }
+
+        for fraction in [(0.0, 0.0), (0.25, 0.75), (0.5, 0.5), (1.0, 1.0)] {
+            let expectedX = min(bounds.x + fraction.0 * bounds.width, (bounds.x + bounds.width).nextDown)
+            let expectedY = min(bounds.y + fraction.1 * bounds.height, (bounds.y + bounds.height).nextDown)
+            for output in [standard, retina] {
+                let point = try hostPoint(
+                    forVideoPixel: (fraction.0 * Double(output.width), fraction.1 * Double(output.height)),
+                    in: output
+                )
+                // One normalized step is 800/65535 points; allow one step.
+                XCTAssertEqual(point.x, expectedX, accuracy: 0.02)
+                XCTAssertEqual(point.y, expectedY, accuracy: 0.02)
+            }
+        }
+    }
+
     func testM8ClockSyncUsesMinimumRTTAndRequiresTwentyProbes() {
         var estimator = ClockSyncEstimator()
         for index in 0 ..< 20 {

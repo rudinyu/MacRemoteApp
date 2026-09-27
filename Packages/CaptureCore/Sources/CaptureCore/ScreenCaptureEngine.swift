@@ -50,7 +50,7 @@ public final class ScreenCaptureEngine: NSObject, WindowCaptureEngine, SCStreamO
 
         let filter = SCContentFilter(desktopIndependentWindow: shareableWindow)
         let streamConfiguration = SCStreamConfiguration()
-        let outputDimensions = configuration.outputDimensions(for: window.bounds)
+        let outputDimensions = configuration.outputDimensions(for: window)
         streamConfiguration.width = Int(outputDimensions.width)
         streamConfiguration.height = Int(outputDimensions.height)
         streamConfiguration.minimumFrameInterval = CMTime(

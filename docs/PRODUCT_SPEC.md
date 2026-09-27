@@ -234,7 +234,7 @@ has already verified them.
 
 | Metric | Target and measurement rule |
 | --- | --- |
-| Resolution | Support a 1920×1080 capture/display configuration when the selected window and hardware permit it; negotiate a lower size when necessary. |
+| Resolution | Support a 1920×1080 capture/display configuration when the selected window and hardware permit it; negotiate a lower size when necessary. Dimensions are encoded pixels: the Host captures at the window's backing scale (Retina = 2 pixels per point) and downscales with preserved aspect ratio to fit 1920×1080 pixels; see [the M3 output resolution policy](M3_CAPTURE.md#output-resolution-policy). |
 | Frame rate | Target 60 fps on the LAN path; provide a stable 30 fps fallback when the target cannot be sustained. Measure delivered frames over a defined 30-second window. |
 | End-to-end latency | Target p95 under 50 ms from a Host capture timestamp to the corresponding Viewer presentation timestamp on a controlled LAN benchmark. Report p50 and p95, not only an average. Before sampling, exchange authenticated monotonic-clock timestamps over at least 20 Ping/Pong probes; estimate clock offset from the minimum-RTT sample and report the residual offset uncertainty and drift. Exclude warm-up samples, measure for 30 seconds with at least 1,000 valid frame samples, and mark one-way latency unverified when clock uncertainty exceeds 5 ms. |
 | Interaction latency | Measure input send-to-observable-result on a documented test app; report p50/p95 and conditions. |

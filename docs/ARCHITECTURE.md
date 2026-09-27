@@ -337,7 +337,9 @@ does not grant permission or mutate trust independently.
 `CaptureCore` requests the smallest permitted ScreenCaptureKit capture scope:
 the selected window rather than the whole display. It emits pixel frames with
 a Host monotonic capture-arrival timestamp and a separate media presentation
-timestamp, plus capture-state transitions. It must stop or degrade safely when
+timestamp, plus capture-state transitions. Output is sized in pixels at the
+window's display backing scale and fit to the negotiated 1920×1080 cap; the
+size is fixed per capture generation. It must stop or degrade safely when
 the window disappears, the permission is revoked, or the selected window
 becomes ineligible.
 

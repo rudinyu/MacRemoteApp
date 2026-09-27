@@ -24,6 +24,73 @@ public struct WindowBounds: Equatable, Sendable {
         guard width > 0, height > 0 else { return nil }
         return width / height
     }
+
+    fileprivate func intersectionArea(with other: WindowBounds) -> Double {
+        let overlapWidth = min(x + width, other.x + other.width) - max(x, other.x)
+        let overlapHeight = min(y + height, other.y + other.height) - max(y, other.y)
+        guard overlapWidth.isFinite, overlapHeight.isFinite,
+              overlapWidth > 0, overlapHeight > 0 else {
+            return 0
+        }
+        return overlapWidth * overlapHeight
+    }
+}
+
+/// A Host display's global point-space frame and its backing pixels-per-point
+/// scale (1 for a standard display, 2 for Retina).
+public struct CaptureDisplayGeometry: Equatable, Sendable {
+    public let bounds: WindowBounds
+    public let backingScaleFactor: Double
+
+    public init(bounds: WindowBounds, backingScaleFactor: Double) {
+        self.bounds = bounds
+        self.backingScaleFactor = backingScaleFactor
+    }
+}
+
+/// Backing-scale policy for selected-window capture. Window bounds are global
+/// points; capture output is sized in pixels. The scale is sampled from the
+/// display that holds the largest part of the window when the catalog is
+/// read, so one capture generation keeps one output size.
+public enum CaptureBackingScale {
+    public static let supportedRange: ClosedRange<Double> = 1...4
+
+    /// Unknown or invalid scale values fall back to 1, which can only lower
+    /// capture detail; they never enlarge the output beyond the point size.
+    public static func sanitized(_ scale: Double) -> Double {
+        guard scale.isFinite, scale > 0 else { return 1 }
+        return min(supportedRange.upperBound, max(supportedRange.lowerBound, scale))
+    }
+
+    /// Returns the scale of the display with the largest overlap with the
+    /// window. Equal overlaps prefer the higher scale; no overlap yields 1.
+    public static func backingScaleFactor(
+        forWindow bounds: WindowBounds,
+        displays: [CaptureDisplayGeometry]
+    ) -> Double {
+        var bestArea = 0.0
+        var bestScale = 1.0
+        for display in displays {
+            let area = bounds.intersectionArea(with: display.bounds)
+            let scale = sanitized(display.backingScaleFactor)
+            if area > bestArea || (area == bestArea && area > 0 && scale > bestScale) {
+                bestArea = area
+                bestScale = scale
+            }
+        }
+        return bestScale
+    }
+}
+
+/// Encoded capture size in pixels for one capture generation.
+public struct CaptureOutputDimensions: Equatable, Sendable {
+    public let width: UInt32
+    public let height: UInt32
+
+    public init(width: UInt32, height: UInt32) {
+        self.width = width
+        self.height = height
+    }
 }
 
 public struct CaptureWindow: Equatable, Sendable {
@@ -31,7 +98,11 @@ public struct CaptureWindow: Equatable, Sendable {
     public let applicationIdentifier: String
     public let applicationName: String?
     public let title: String?
+    /// Global point-space frame used for Host input mapping.
     public let bounds: WindowBounds
+    /// Pixels per point of the display holding most of the window when the
+    /// catalog was read. Used only to size capture output.
+    public let backingScaleFactor: Double
     public let processIdentifier: Int32
     public let eligible: Bool
 
@@ -41,6 +112,7 @@ public struct CaptureWindow: Equatable, Sendable {
         applicationName: String? = nil,
         title: String? = nil,
         bounds: WindowBounds,
+        backingScaleFactor: Double = 1,
         processIdentifier: Int32,
         eligible: Bool
     ) {
@@ -49,6 +121,7 @@ public struct CaptureWindow: Equatable, Sendable {
         self.applicationName = applicationName
         self.title = title
         self.bounds = bounds
+        self.backingScaleFactor = CaptureBackingScale.sanitized(backingScaleFactor)
         self.processIdentifier = processIdentifier
         self.eligible = eligible
     }
@@ -121,17 +194,23 @@ public struct CaptureSessionSnapshot: Equatable, Sendable {
     public let selectedWindow: CaptureWindow?
     public let generation: UInt64
     public let permission: CapturePermissionState
+    /// Pixel size the engine was configured with for the current generation.
+    /// It stays fixed while the selected window's catalog entry is refreshed,
+    /// so the Host encoder and StreamConfig match the delivered frames.
+    public let outputDimensions: CaptureOutputDimensions?
 
     public init(
         state: CaptureSessionState,
         selectedWindow: CaptureWindow?,
         generation: UInt64,
-        permission: CapturePermissionState
+        permission: CapturePermissionState,
+        outputDimensions: CaptureOutputDimensions? = nil
     ) {
         self.state = state
         self.selectedWindow = selectedWindow
         self.generation = generation
         self.permission = permission
+        self.outputDimensions = outputDimensions
     }
 }
 
@@ -286,15 +365,30 @@ public struct CaptureConfiguration: Equatable, Sendable {
             bounds.height >= Double(minimumWindowHeight)
     }
 
-    public func outputDimensions(for bounds: WindowBounds) -> (width: UInt32, height: UInt32) {
-        let sourceWidth = max(1.0, bounds.width.rounded())
-        let sourceHeight = max(1.0, bounds.height.rounded())
+    /// Capture output size for a selected window: its point bounds times its
+    /// backing scale, downscaled with preserved aspect ratio to fit
+    /// `maximumWidth` x `maximumHeight` pixels. Never upscales.
+    public func outputDimensions(for window: CaptureWindow) -> CaptureOutputDimensions {
+        outputDimensions(for: window.bounds, backingScaleFactor: window.backingScaleFactor)
+    }
+
+    public func outputDimensions(
+        for bounds: WindowBounds,
+        backingScaleFactor: Double = 1
+    ) -> CaptureOutputDimensions {
+        let scale = CaptureBackingScale.sanitized(backingScaleFactor)
+        func pixels(_ points: Double) -> Double {
+            let value = (points * scale).rounded()
+            return value.isFinite ? max(1.0, value) : 1.0
+        }
+        let sourceWidth = pixels(bounds.width)
+        let sourceHeight = pixels(bounds.height)
         let maximumWidth = Double(max(1, self.maximumWidth))
         let maximumHeight = Double(max(1, self.maximumHeight))
-        let scale = min(1.0, maximumWidth / sourceWidth, maximumHeight / sourceHeight)
-        let width = min(maximumWidth, max(1.0, (sourceWidth * scale).rounded()))
-        let height = min(maximumHeight, max(1.0, (sourceHeight * scale).rounded()))
-        return (UInt32(width), UInt32(height))
+        let fit = min(1.0, maximumWidth / sourceWidth, maximumHeight / sourceHeight)
+        let width = min(maximumWidth, max(1.0, (sourceWidth * fit).rounded()))
+        let height = min(maximumHeight, max(1.0, (sourceHeight * fit).rounded()))
+        return CaptureOutputDimensions(width: UInt32(width), height: UInt32(height))
     }
 }
 

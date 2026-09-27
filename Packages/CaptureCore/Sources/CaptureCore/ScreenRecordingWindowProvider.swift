@@ -35,7 +35,8 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
             true,
             onScreenWindowsOnly: onScreenWindowsOnly
         )
-        return content.windows.compactMap(makeWindow).sorted {
+        let displays = content.displays.map(Self.displayGeometry)
+        return content.windows.compactMap { makeWindow($0, displays: displays) }.sorted {
             if $0.applicationIdentifier == $1.applicationIdentifier {
                 return $0.identifier < $1.identifier
             }
@@ -43,7 +44,7 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
         }
     }
 
-    private func makeWindow(_ window: SCWindow) -> CaptureWindow? {
+    private func makeWindow(_ window: SCWindow, displays: [CaptureDisplayGeometry]) -> CaptureWindow? {
         guard window.isOnScreen,
               window.windowLayer == 0,
               let application = window.owningApplication else {
@@ -72,19 +73,44 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
         }
 
         let title = window.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bounds = WindowBounds(
+            x: frame.origin.x,
+            y: frame.origin.y,
+            width: frame.width,
+            height: frame.height
+        )
         return CaptureWindow(
             identifier: UInt64(window.windowID),
             applicationIdentifier: application.bundleIdentifier,
             applicationName: application.applicationName,
             title: title?.isEmpty == false ? title : nil,
+            bounds: bounds,
+            backingScaleFactor: CaptureBackingScale.backingScaleFactor(
+                forWindow: bounds,
+                displays: displays
+            ),
+            processIdentifier: application.processID,
+            eligible: true
+        )
+    }
+
+    /// `SCDisplay.frame` and `SCWindow.frame` share the global point space.
+    /// The current display mode's pixel/point ratio is the backing scale; an
+    /// unavailable mode yields 1 through `CaptureBackingScale.sanitized`.
+    private static func displayGeometry(_ display: SCDisplay) -> CaptureDisplayGeometry {
+        let frame = display.frame
+        var scale = 1.0
+        if let mode = CGDisplayCopyDisplayMode(display.displayID), mode.width > 0 {
+            scale = Double(mode.pixelWidth) / Double(mode.width)
+        }
+        return CaptureDisplayGeometry(
             bounds: WindowBounds(
                 x: frame.origin.x,
                 y: frame.origin.y,
                 width: frame.width,
                 height: frame.height
             ),
-            processIdentifier: application.processID,
-            eligible: true
+            backingScaleFactor: scale
         )
     }
 
