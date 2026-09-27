@@ -58,6 +58,14 @@ integration target remains a physical Intel Host and an Apple Silicon Viewer.
 Build compatibility does not claim Host runtime, permission, or cross-machine
 interoperability on Apple Silicon.
 
+**Platform lifespan risk.** Apple has announced that macOS 26 Tahoe is the
+last macOS release for Intel Macs. An Intel-only Host therefore stops
+receiving macOS feature updates after that release, and ScreenCaptureKit or
+VideoToolbox behavior on Intel will not track newer releases. V1 keeps the
+Intel Host target, but an Apple Silicon Host is the expected successor: keep
+the `arm64` Host build green, avoid Intel-specific encoder assumptions, and
+run an Apple Silicon Host smoke before any post-V1 platform decision.
+
 The exact supported macOS deployment target and toolchain matrix must be
 verified and recorded in M0. No document should silently assume that an API is
 available on every macOS version.
@@ -80,6 +88,9 @@ available on every macOS version.
    two devices.
 6. The devices store the resulting trust record and establish an authenticated
    session.
+7. The Host name shown during discovery may be changed from the Host status
+   menu. Either endpoint can explicitly forget saved peer trust to recover
+   from a stale or one-sided pairing record.
 
 ### Select and view one window
 
@@ -90,7 +101,12 @@ available on every macOS version.
 4. The Viewer displays the remote content with a visible connection and stream
    status.
 5. The Operator may stop the session or explicitly change the selected window;
-   there is never simultaneous multi-window control.
+   the Viewer can request an eligible app switch in the same session. The Host
+   may foreground that explicitly selected regular application, but input stays
+   disabled until focus and permission checks pass. While a Viewer is
+   authorized for a window, the Host menu-bar icon is tinted and the status
+   menu names the shared app and whether the Viewer brought it to the front. There is never simultaneous
+   multi-window control.
 
 ### Interact with the selected window
 
@@ -133,6 +149,9 @@ available on every macOS version.
   reject input when focus, permission, pairing, or session state is invalid.
 - **HOST-08**: Report permission loss, capture failure, stream failure, and
   authorization changes as actionable states.
+- **HOST-09**: Let the Operator change the Host's Bonjour display name and
+  explicitly forget saved peer trust without deleting the Host's local device
+  identity. Default the display name to the Host Mac's short hostname.
 
 ### Viewer requirements
 
@@ -147,9 +166,13 @@ available on every macOS version.
 - **VIEWER-05**: Send only events that belong to the active authenticated
   session and selected window.
 - **VIEWER-06**: Show connection, authorization, permission, stream, and input
-  availability states without implying that disabled input is still active.
+  availability states without implying that disabled input is still active;
+  show Connected and disable duplicate connection actions while connected.
 - **VIEWER-07**: Participate in opt-in text clipboard synchronization and
   clearly indicate when it is enabled.
+- **VIEWER-08**: Send the Viewer Mac's bounded short hostname as optional
+  display-only pairing metadata; it must never be used for authentication or
+  authorization.
 
 ### Shared requirements
 
@@ -249,12 +272,16 @@ documented compatibility matrix:
 
 - Exact minimum macOS deployment target and supported Intel/Apple Silicon
   hardware matrix — M0.
+- Whether a post-V1 release adds Apple Silicon as a supported Host platform,
+  given the Intel platform lifespan risk above — post-V1 decision; V1 does not
+  change the Intel Host target.
 - Final stream transport binding and whether a future datagram/QUIC path is
   necessary after the baseline is measured — M2/M8; no WebRTC in V1.
 - Exact H.264 profile, bitrate/rate-control defaults, and decoder fallback —
   M4.
-- User-facing pairing UX and Keychain trust reuse — M10; trust-record
-  revocation UI remains a release-operations follow-up.
+- User-facing pairing UX, Keychain trust reuse, trust-record revocation UI,
+  and editable Host discovery name — implemented in M10; physical recovery
+  walkthrough remains an acceptance item.
 - Clipboard size limit, conflict policy, and text encoding edge cases — resolved
   in M7: 65,515 UTF-8 bytes, Offer/ACK/Text ordering, and deterministic
   arrival-order conflict handling.

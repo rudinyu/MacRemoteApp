@@ -37,24 +37,135 @@ public struct PairingChallenge: Equatable, Sendable {
     public let remoteIdentity: PeerIdentity
     public let confirmationCode: String
     public let expiresAt: Date
+    /// The initiator's commitment for the M10 commit/reveal exchange.
+    /// Legacy/unit-test challenges may leave this nil.
+    public let commitment: Data?
+
+    public var isVerificationReady: Bool {
+        !confirmationCode.isEmpty
+    }
 
     public init(
         challengeID: UInt64,
         remoteIdentity: PeerIdentity,
         confirmationCode: String,
-        expiresAt: Date
+        expiresAt: Date,
+        commitment: Data? = nil
     ) {
         self.challengeID = challengeID
         self.remoteIdentity = remoteIdentity
         self.confirmationCode = confirmationCode
         self.expiresAt = expiresAt
+        self.commitment = commitment
+    }
+}
+
+/// The Viewer commitment sent after receiving the Host commitment.
+public struct PairingSessionResponse: Equatable, Sendable {
+    public let challengeID: UInt64
+    public let commitment: Data
+
+    public init(challengeID: UInt64, commitment: Data) {
+        self.challengeID = challengeID
+        self.commitment = commitment
+    }
+}
+
+/// The Host reveal sent after both endpoints have committed to their values.
+public struct PairingSessionVerification: Equatable, Sendable {
+    public let challengeID: UInt64
+    public let contribution: Data
+
+    public init(challengeID: UInt64, contribution: Data) {
+        self.challengeID = challengeID
+        self.contribution = contribution
+    }
+}
+
+/// The Viewer reveal sent after verifying the Host contribution.
+public struct PairingSessionReveal: Equatable, Sendable {
+    public let challengeID: UInt64
+    public let contribution: Data
+
+    public init(challengeID: UInt64, contribution: Data) {
+        self.challengeID = challengeID
+        self.contribution = contribution
+    }
+}
+
+/// MacKVM-style commit/reveal code derivation for the first-pairing flow.
+/// Both endpoints derive the same short display value from the challenge,
+/// both public identities, and both random contributions.
+public enum PairingVerificationCode {
+    public static let contributionByteCount = 32
+    public static let commitmentByteCount = 32
+
+    public static func randomContribution() -> Data {
+        Data((0 ..< contributionByteCount).map { _ in
+            UInt8.random(in: UInt8.min ... UInt8.max)
+        })
+    }
+
+    public static func commitment(for contribution: Data) -> Data {
+        var transcript = Data("MacRemoteApp pairing commitment v1".utf8)
+        transcript.append(contribution)
+        return Data(SHA256.hash(data: transcript))
+    }
+
+    public static func deriveCode(
+        challengeID: UInt64,
+        localIdentity: PeerIdentity,
+        remoteIdentity: PeerIdentity,
+        localContribution: Data,
+        remoteContribution: Data
+    ) -> String {
+        let identityContributions = [
+            (localIdentity, localContribution),
+            (remoteIdentity, remoteContribution)
+        ].sorted { $0.0.identifier < $1.0.identifier }
+
+        var transcript = Data("MacRemoteApp pairing verification v1".utf8)
+        appendUInt64(challengeID, to: &transcript)
+        for (identity, contribution) in identityContributions {
+            appendUInt32(UInt32(identity.publicKeyRepresentation.count), to: &transcript)
+            transcript.append(identity.publicKeyRepresentation)
+            appendUInt32(UInt32(contribution.count), to: &transcript)
+            transcript.append(contribution)
+        }
+        let digest = Array(SHA256.hash(data: transcript))
+        let number = (UInt32(digest[0]) << 24 |
+            UInt32(digest[1]) << 16 |
+            UInt32(digest[2]) << 8 |
+            UInt32(digest[3])) % 1_000_000
+        return String(format: "%06u", number)
+    }
+
+    private static func appendUInt32(_ value: UInt32, to data: inout Data) {
+        data.append(UInt8((value >> 24) & 0xFF))
+        data.append(UInt8((value >> 16) & 0xFF))
+        data.append(UInt8((value >> 8) & 0xFF))
+        data.append(UInt8(value & 0xFF))
+    }
+
+    private static func appendUInt64(_ value: UInt64, to data: inout Data) {
+        data.append(UInt8((value >> 56) & 0xFF))
+        data.append(UInt8((value >> 48) & 0xFF))
+        data.append(UInt8((value >> 40) & 0xFF))
+        data.append(UInt8((value >> 32) & 0xFF))
+        data.append(UInt8((value >> 24) & 0xFF))
+        data.append(UInt8((value >> 16) & 0xFF))
+        data.append(UInt8((value >> 8) & 0xFF))
+        data.append(UInt8(value & 0xFF))
     }
 }
 
 public actor PairingCoordinator {
     private struct PendingPairing: Sendable {
-        let challenge: PairingChallenge
+        var challenge: PairingChallenge
         let nonce: Data
+        let localContribution: Data?
+        var remoteCommitment: Data?
+        var remoteContribution: Data?
         var localConsent = false
         var remoteConsent = false
         var displayName: String?
@@ -112,7 +223,13 @@ public actor PairingCoordinator {
             confirmationCode: code,
             expiresAt: now.addingTimeInterval(timeout)
         )
-        pending = PendingPairing(challenge: challenge, nonce: nonce)
+        pending = PendingPairing(
+            challenge: challenge,
+            nonce: nonce,
+            localContribution: nil,
+            remoteCommitment: nil,
+            remoteContribution: nil
+        )
         currentState = .awaitingConfirmation
         return challenge
     }
@@ -123,13 +240,26 @@ public actor PairingCoordinator {
         now: Date = Date(),
         timeout: TimeInterval = 300
     ) throws -> PairingChallenge {
-        try beginPairing(
-            with: remoteIdentity,
+        guard pending == nil else {
+            throw SecurityCoreError.pairingAlreadyPending
+        }
+        let localContribution = PairingVerificationCode.randomContribution()
+        let challenge = PairingChallenge(
             challengeID: challengeID,
-            nonce: Self.sessionNonce(for: challengeID),
-            now: now,
-            timeout: timeout
+            remoteIdentity: remoteIdentity,
+            confirmationCode: "",
+            expiresAt: now.addingTimeInterval(timeout),
+            commitment: PairingVerificationCode.commitment(for: localContribution)
         )
+        pending = PendingPairing(
+            challenge: challenge,
+            nonce: localContribution,
+            localContribution: localContribution,
+            remoteCommitment: nil,
+            remoteContribution: nil
+        )
+        currentState = .awaitingConfirmation
+        return challenge
     }
 
     public func adoptRemoteChallenge(
@@ -158,10 +288,179 @@ public actor PairingCoordinator {
         // reuses the same ID and peer identity.
         pending = PendingPairing(
             challenge: challenge,
-            nonce: Data(confirmationCode.utf8)
+            nonce: Data(confirmationCode.utf8),
+            localContribution: nil,
+            remoteCommitment: nil,
+            remoteContribution: nil
         )
         currentState = .awaitingConfirmation
         return challenge
+    }
+
+    /// Adopts the Host commitment and creates the Viewer contribution.
+    public func adoptRemoteSessionChallenge(
+        challengeID: UInt64,
+        from remoteIdentity: PeerIdentity,
+        commitment: Data,
+        now: Date = Date(),
+        timeout: TimeInterval = 300
+    ) throws -> PairingChallenge {
+        guard commitment.count == PairingVerificationCode.commitmentByteCount else {
+            throw SecurityCoreError.pairingCodeMismatch
+        }
+        guard pending == nil else {
+            throw SecurityCoreError.pairingAlreadyPending
+        }
+        let localContribution = PairingVerificationCode.randomContribution()
+        let challenge = PairingChallenge(
+            challengeID: challengeID,
+            remoteIdentity: remoteIdentity,
+            confirmationCode: "",
+            expiresAt: now.addingTimeInterval(timeout),
+            commitment: commitment
+        )
+        pending = PendingPairing(
+            challenge: challenge,
+            nonce: localContribution,
+            localContribution: localContribution,
+            remoteCommitment: commitment,
+            remoteContribution: nil
+        )
+        currentState = .awaitingConfirmation
+        return challenge
+    }
+
+    /// Returns the contribution generated for the adopted challenge. It is
+    /// sent only over the authenticated bootstrap channel and never persisted.
+    public func sessionResponse(
+        challengeID: UInt64,
+        remoteIdentity: PeerIdentity
+    ) throws -> PairingSessionResponse {
+        guard let pending,
+              pending.challenge.challengeID == challengeID,
+              pending.challenge.remoteIdentity == remoteIdentity,
+              let contribution = pending.localContribution else {
+            throw SecurityCoreError.noPendingPairing
+        }
+        return PairingSessionResponse(
+            challengeID: challengeID,
+            commitment: PairingVerificationCode.commitment(for: contribution)
+        )
+    }
+
+    /// Records the Viewer's commitment and returns the Host reveal. The
+    /// confirmation code is deliberately not available until the Viewer
+    /// reveals its already-committed contribution.
+    public func prepareSessionVerification(
+        challengeID: UInt64,
+        remoteIdentity: PeerIdentity,
+        remoteCommitment: Data
+    ) throws -> PairingSessionVerification {
+        guard var pending,
+              pending.challenge.challengeID == challengeID,
+              pending.challenge.remoteIdentity == remoteIdentity,
+              let localContribution = pending.localContribution,
+              pending.challenge.commitment != nil,
+              pending.remoteCommitment == nil,
+              pending.remoteContribution == nil,
+              remoteCommitment.count == PairingVerificationCode.commitmentByteCount else {
+            throw SecurityCoreError.pairingCodeMismatch
+        }
+        pending.remoteCommitment = remoteCommitment
+        self.pending = pending
+        return PairingSessionVerification(
+            challengeID: challengeID,
+            contribution: localContribution
+        )
+    }
+
+    /// Verifies the Host reveal against the initial commitment and derives the
+    /// code locally. A changed Host contribution fails closed. The Viewer can
+    /// now reveal its already-committed contribution.
+    public func adoptRemoteSessionVerification(
+        challengeID: UInt64,
+        from remoteIdentity: PeerIdentity,
+        remoteContribution: Data
+    ) throws -> PairingChallenge {
+        guard var pending,
+              pending.challenge.challengeID == challengeID,
+              pending.challenge.remoteIdentity == remoteIdentity,
+              let localContribution = pending.localContribution,
+              let remoteCommitment = pending.remoteCommitment,
+              pending.remoteContribution == nil,
+              remoteContribution.count == PairingVerificationCode.contributionByteCount,
+              PairingVerificationCode.commitment(for: remoteContribution) == remoteCommitment else {
+            throw SecurityCoreError.pairingCodeMismatch
+        }
+        let code = PairingVerificationCode.deriveCode(
+            challengeID: challengeID,
+            localIdentity: localIdentity,
+            remoteIdentity: remoteIdentity,
+            localContribution: localContribution,
+            remoteContribution: remoteContribution
+        )
+        pending.challenge = PairingChallenge(
+            challengeID: challengeID,
+            remoteIdentity: remoteIdentity,
+            confirmationCode: code,
+            expiresAt: pending.challenge.expiresAt,
+            commitment: remoteCommitment
+        )
+        pending.remoteContribution = remoteContribution
+        self.pending = pending
+        return pending.challenge
+    }
+
+    /// Returns the Viewer's reveal after the Host contribution was verified.
+    public func sessionReveal(
+        challengeID: UInt64,
+        remoteIdentity: PeerIdentity
+    ) throws -> PairingSessionReveal {
+        guard let pending,
+              pending.challenge.challengeID == challengeID,
+              pending.challenge.remoteIdentity == remoteIdentity,
+              let contribution = pending.localContribution,
+              pending.remoteCommitment != nil,
+              pending.remoteContribution != nil else {
+            throw SecurityCoreError.noPendingPairing
+        }
+        return PairingSessionReveal(challengeID: challengeID, contribution: contribution)
+    }
+
+    /// Verifies and records the Viewer's reveal, then derives the Host-side
+    /// code. The Viewer contribution was committed before the Host reveal.
+    public func adoptRemoteSessionReveal(
+        challengeID: UInt64,
+        from remoteIdentity: PeerIdentity,
+        remoteContribution: Data
+    ) throws -> PairingChallenge {
+        guard var pending,
+              pending.challenge.challengeID == challengeID,
+              pending.challenge.remoteIdentity == remoteIdentity,
+              let localContribution = pending.localContribution,
+              pending.remoteCommitment != nil,
+              pending.remoteContribution == nil,
+              remoteContribution.count == PairingVerificationCode.contributionByteCount,
+              PairingVerificationCode.commitment(for: remoteContribution) == pending.remoteCommitment else {
+            throw SecurityCoreError.pairingCodeMismatch
+        }
+        let code = PairingVerificationCode.deriveCode(
+            challengeID: challengeID,
+            localIdentity: localIdentity,
+            remoteIdentity: remoteIdentity,
+            localContribution: localContribution,
+            remoteContribution: remoteContribution
+        )
+        pending.challenge = PairingChallenge(
+            challengeID: challengeID,
+            remoteIdentity: remoteIdentity,
+            confirmationCode: code,
+            expiresAt: pending.challenge.expiresAt,
+            commitment: pending.challenge.commitment
+        )
+        pending.remoteContribution = remoteContribution
+        self.pending = pending
+        return pending.challenge
     }
 
     public func adoptRemoteSessionChallenge(
@@ -213,7 +512,8 @@ public actor PairingCoordinator {
             currentState = .idle
             throw SecurityCoreError.pairingRejected
         }
-        guard confirmationCode == pending.challenge.confirmationCode else {
+        guard pending.challenge.isVerificationReady,
+              confirmationCode == pending.challenge.confirmationCode else {
             throw SecurityCoreError.pairingCodeMismatch
         }
 
@@ -266,7 +566,8 @@ public actor PairingCoordinator {
             currentState = .idle
             throw SecurityCoreError.pairingRejected
         }
-        guard confirmationCode == pending.challenge.confirmationCode else {
+        guard pending.challenge.isVerificationReady,
+              confirmationCode == pending.challenge.confirmationCode else {
             throw SecurityCoreError.pairingCodeMismatch
         }
 

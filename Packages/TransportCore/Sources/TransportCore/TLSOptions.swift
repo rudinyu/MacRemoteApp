@@ -42,7 +42,11 @@ public final class TLSOptions: @unchecked Sendable {
     }
 
     public func makeParameters() -> NWParameters {
-        let parameters = NWParameters(tls: makeProtocolOptions(), tcp: NWProtocolTCP.Options())
+        // Input and control envelopes are small and latency-sensitive; Nagle
+        // coalescing would hold them behind in-flight video segments.
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.noDelay = true
+        let parameters = NWParameters(tls: makeProtocolOptions(), tcp: tcpOptions)
         parameters.allowLocalEndpointReuse = true
         return parameters
     }

@@ -18,6 +18,23 @@ public enum BonjourDiscoveryState: Sendable, Equatable {
     case cancelled
 }
 
+public enum BonjourDiscoveryStartupError: Error, CustomStringConvertible, Sendable {
+    case failed(String)
+    case cancelled
+    case timedOut
+
+    public var description: String {
+        switch self {
+        case let .failed(code):
+            return "Bonjour discovery failed before becoming ready (\(code))"
+        case .cancelled:
+            return "Bonjour discovery was cancelled before it became ready"
+        case .timedOut:
+            return "Bonjour discovery did not become ready before the startup deadline"
+        }
+    }
+}
+
 public final class NetworkBonjourDiscovery: BonjourDiscovery, @unchecked Sendable {
     public let updates: AsyncStream<[DiscoveredService]>
     public let stateUpdates: AsyncStream<BonjourDiscoveryState>
@@ -99,6 +116,69 @@ public final class NetworkBonjourDiscovery: BonjourDiscovery, @unchecked Sendabl
         lock.unlock()
         guard shouldStart else { return }
         browser.start(queue: callbackQueue)
+    }
+
+    /// Starts a short-lived Bonjour browse so an app can request and verify
+    /// Local Network access before it performs work that depends on a local
+    /// identity. The browse does not retain discovered services and is
+    /// cancelled as soon as Network.framework reports readiness.
+    public func startAndWaitForReadiness(
+        timeoutNanoseconds: UInt64? = 15_000_000_000
+    ) async throws {
+        defer { cancel() }
+
+        enum StartupResult: Sendable {
+            case ready
+            case failed(String)
+            case cancelled
+            case timedOut
+        }
+
+        let result = await withTaskGroup(of: StartupResult.self) { group in
+            group.addTask { [stateUpdates] in
+                for await state in stateUpdates {
+                    switch state {
+                    case .ready:
+                        return .ready
+                    case let .failed(code):
+                        return .failed(code)
+                    case .cancelled:
+                        return .cancelled
+                    case .setup, .waiting:
+                        continue
+                    }
+                }
+                return .cancelled
+            }
+
+            if let timeoutNanoseconds {
+                group.addTask {
+                    do {
+                        try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                        return .timedOut
+                    } catch {
+                        return .cancelled
+                    }
+                }
+            }
+
+            start()
+            let first = await group.next() ?? .cancelled
+            group.cancelAll()
+            return first
+        }
+
+        try Task.checkCancellation()
+        switch result {
+        case .ready:
+            return
+        case let .failed(code):
+            throw BonjourDiscoveryStartupError.failed(code)
+        case .cancelled:
+            throw BonjourDiscoveryStartupError.cancelled
+        case .timedOut:
+            throw BonjourDiscoveryStartupError.timedOut
+        }
     }
 
     public func cancel() {

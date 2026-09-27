@@ -203,13 +203,31 @@ Additional rules:
   Viewer input surface, pairing prompts, and clipboard bridge. The normal
   pilot uses TLS bootstrap plus a `SecurityCore.PairingCoordinator` backed by
   the Keychain trust store; the Host owns the consent alert and the Viewer
-  owns the one-time code-entry prompt. `MACREMOTEAPP_PEER_CERT` remains an
+  owns a code-comparison consent prompt with explicit Accept/Deny actions.
+  `MACREMOTEAPP_PEER_CERT` remains an
   optional pinned-peer migration/diagnostic input, not a new-installation
   requirement. The Host remains authoritative by validating eligibility and
-  generation before authorization. The Host remains resident when TCC or
+  generation before authorization. During an active session it refreshes the
+  eligible-window catalog so the Viewer can replace the selected app without
+  reconnecting. A direct Viewer selection may foreground that regular app on
+  the Host; this only expresses the user's explicit target choice and does not
+  bypass InputCore's per-event permission/focus/identity checks. The Viewer
+  shows explicit Connecting, Connected, and Reconnecting states and disables
+  duplicate Connect actions while a session is active. Host and Viewer send
+  their bounded short hostnames in the optional `Hello.deviceName` display
+  field; a Host rename is reflected in that field, and it never affects trust.
+  The Host remains resident when TCC or
   Bonjour setup is denied: `HostRuntimeStatus` is projected into the status
   menu and an explicit Retry action re-runs setup. Physical cross-hardware
   evidence remains the open M10 acceptance gate.
+- M10 also exposes trust recovery in the app layer without moving trust
+  storage out of `SecurityCore`: the Host status menu and Viewer window can
+  explicitly forget all saved peer records. The app stops the active session
+  before asking the Keychain-backed `TrustStore` to revoke those records; the
+  local device identity, permissions, and capture settings remain intact. The
+  Host status menu also edits a bounded, UserDefaults-backed Bonjour instance
+  name. That name is discovery metadata visible on the LAN, never a TLS or
+  pairing identity, and changing it restarts only the listener.
 - M10 startup ordering is intentional: `Apps/Host` enrolls the local
   Keychain-backed identity and completes the Screen Recording setup before it
   waits for Bonjour listener readiness. Starting Bonjour is the Local Network
@@ -219,8 +237,9 @@ Additional rules:
   `Apps/Viewer` enrolls its own identity before starting discovery, reports
   discovery error categories, and requires the operator to choose a Host
   before connecting. Neither app treats a permission grant as pairing: the
-  first connection still requires Host consent and Viewer code confirmation,
-  and only both consents commit the peer trust records.
+  first connection still requires Host consent and explicit Viewer acceptance
+  after comparing the independently derived code; only both consents commit
+  the peer trust records.
 - Authorization enforcement is deliberately split by responsibility:
   `SecurityCore` owns identity, trust records, pairing consent, and peer
   identity validation; `TransportCore.SessionCoordinator` owns the
@@ -238,6 +257,18 @@ Additional rules:
   path remains for physical smoke diagnostics. No peer private key is
   exchanged; the optional public-certificate path is retained only for pinned
   migration and diagnostics.
+- The M10 production composition uses separate Keychain namespaces for the
+  two roles: Host identity label `MacRemoteApp.host` and trust service
+  `com.rudinyu.MacRemoteApp.Host.trust`; Viewer identity label
+  `MacRemoteApp.viewer` and trust service
+  `com.rudinyu.MacRemoteApp.Viewer.trust`. The legacy
+  `MACREMOTEAPP_LOCAL_IDENTITY_LABEL` diagnostic value is treated as a base and
+  receives a role suffix, so setting the same base for both apps cannot make
+  them load one private key. This also permits same-Mac GUI testing without
+  cross-app access to either role's generated identity or peer-trust records.
+  Existing pre-isolation trust records are not imported; both endpoints must
+  complete pairing once after upgrading. The update leaves legacy Keychain
+  records untouched rather than attempting cross-role deletion.
 - Cross-cutting diagnostics use a narrow structured logging interface. They do
   not pass raw clipboard text, secrets, or full captured frames.
 
@@ -246,7 +277,8 @@ Additional rules:
 ### Host UI and lifecycle
 
 The Host owns the permission education flow, pairing confirmation, session
-status, selected-window state, and stop/disconnect actions. The Host remains
+status, saved-pairing revocation, editable discovery name, selected-window
+state, and stop/disconnect actions. The Host remains
 resident while first-run permissions are incomplete and exposes a retry action
 from its status menu. The Viewer presents explicit Host and eligible-window
 pickers, but the Host remains the only component allowed to accept a selection,
@@ -324,11 +356,13 @@ lists, selected-window state, session status, input events, clipboard messages,
 and errors. It is reliable and ordered.
 
 The media plane carries codec configuration and video frames. It has an
-independent bounded scheduling queue and may replace only unsent, discardable
-video frames before they are admitted to the wire. `VideoConfig` and
-recovery keyframes are not discardable. Media sequences are strictly
-increasing, but a replaced frame may create a forward media gap; control
-sequences remain contiguous. The baseline V1 binding is one ordered
+independent bounded scheduling queue with a keyframe-aware drop policy:
+when full it discards the incoming delta frame, never a queued one, and then
+skips every later delta frame until a keyframe, because H.264 delta frames
+reference earlier pictures. A keyframe purges queued delta frames it
+supersedes. `VideoConfig` and keyframes are never discarded. Media sequences
+are strictly increasing, but a discarded frame may create a forward media gap;
+control sequences remain contiguous. The baseline V1 binding is one ordered
 Network.framework TCP stream protected by the same authenticated session
 policy; control is prioritized between individual writes, while TCP
 head-of-line blocking remains an M8 measurement concern. M8 may evaluate a
@@ -403,9 +437,31 @@ to add speculative features.
 - The benchmark exchanges at least 20 authenticated four-timestamp probes,
   selects the minimum-RTT offset, reports residual uncertainty and drift, and
   refuses to label one-way latency verified when uncertainty exceeds 5 ms.
-- Video queue capacity remains three; only unsent non-keyframes may be
-  superseded. Control/input ordering and authorization gates are never traded
-  for a latency optimization.
+- Video queue capacity remains three. The Host outgoing queue and both Viewer
+  incoming queues share `KeyframeAwareMediaAdmission`: a discarded delta frame
+  starts a skip-until-keyframe state so no delta frame is ever decoded against
+  a missing reference, and protected-media invalidation starts the same wait.
+  `SessionCoordinator.send` reports `.replacedMedia` only when the queue
+  enters that wait (a keyframe purging superseded delta frames does not), and
+  the Host forces its next encode to a keyframe. A Viewer-side gap or decode
+  failure sends the rate-limited `KeyframeRequest` described in
+  `docs/PROTOCOL.md`.
+- Encoder output reaches the wire through one FIFO relay
+  (`Apps/Host/HostEncodedFrameRelay`) instead of one unstructured task per
+  frame, so frames cannot be reordered before sequence numbers are assigned.
+  Its bounded buffer follows the same skip-until-keyframe rule on overflow.
+- Capture defaults to 4:2:0 bi-planar video-range pixels tagged BT.709, the
+  encoder's native input, removing a per-frame BGRA conversion on the Host.
+- The p95 latency budget is split per stage in `LatencyBudget.v1`: Host
+  capture-to-send 12 ms, network transit 18 ms, Viewer receive-to-present
+  20 ms, summing to the 50 ms target. Host and Viewer log sanitized per-stage
+  p50/p95 aggregates so a miss can be attributed to one stage.
+  Control/input ordering and authorization gates are never traded for a
+  latency optimization.
+- The encoder disables B-frame reordering and applies a best-effort
+  one-second `DataRateLimits` cap at 1.5x the average bitrate. The TCP binding
+  sets `noDelay` so small control/input envelopes are not held by Nagle
+  coalescing behind video segments.
 
 ## M2 decisions
 

@@ -70,9 +70,13 @@ the authenticated pairing flow.
 1. Discovery provides only an endpoint and non-sensitive display metadata.
 2. The Viewer connects and authenticates the transport enough to establish the
    peer identity exchange.
-3. The Host displays a short, human-comparable confirmation value derived from
-   the pairing transcript. The Viewer verifies the value locally and displays
-   the same value with a one-time code-entry field.
+3. The Host commits to a fresh random contribution. The Viewer commits to its
+   own fresh random value, after which the Host reveals its committed value.
+   The Viewer verifies that reveal and then reveals its committed value. Both
+   endpoints independently derive a short, human-comparable confirmation value
+   from the challenge ID, both public identities, and both contributions. The
+   Viewer displays the same value with explicit **Accept** and **Deny**
+   actions; no code is typed or treated as a credential.
 4. The local operator on each endpoint explicitly consents after checking that
    the values match. A remote `PairingConfirmation` is evidence of remote
    consent, not local consent.
@@ -107,6 +111,29 @@ identity and the session policy permits it. A trust mismatch requires an
 explicit re-pair or trust revocation flow; silently accepting a changed key is
 not allowed.
 
+### User-initiated trust reset
+
+The Host status menu and Viewer window provide an explicit `Forget saved
+pairings…` action. The action stops the active session first, then deletes only
+the saved peer `TrustedPeer` records from that app role's Keychain service. It
+does not delete the endpoint's own TLS identity, the other role's trust
+records, permissions, or unrelated Keychain items. The next connection
+therefore returns to the two-sided pairing flow and requires a new confirmation
+code. The operation is all-peer for the current role by design so an operator
+cannot leave an unknown stale peer record behind for that app.
+
+The Host's editable Bonjour instance name is local-network discovery metadata.
+It is bounded, may be visible to untrusted LAN browsers, and must never be
+used as an identity, authorization signal, or secret. Changing it does not
+change the TLS key or peer trust records.
+
+The optional `Hello.deviceName` is also untrusted, bounded display metadata.
+The Host defaults its advertised/device display name to the macOS short
+hostname, and the Viewer sends its own short hostname. A Host rename is
+reflected in its Hello display name but does not change the certificate,
+pairing identity, or authorization. Receivers validate and sanitize this value
+before showing it and never use it to select a trust record.
+
 ## Authorization model
 
 Authorization is the intersection of all of the following:
@@ -125,6 +152,15 @@ The Host must evaluate this before sending protected content and before each
 input injection operation or bounded batch. The Viewer must disable its input
 surface when the state is not ready. A UI label such as "connected" must not
 be treated as equivalent to "authorized to control".
+
+An explicit Viewer selection may ask the Host to foreground an eligible
+regular application so it can be operated. This is not background control:
+Host-side input remains rejected unless the selected target is confirmed
+foreground-eligible, authorized, and permitted at the time of each event.
+Because a remote selection changes the Host's frontmost app, the Host shows
+it locally: the menu-bar icon is tinted while a window is shared, and the
+status menu names the app and states when the Viewer brought it to the front.
+The app name is local UI only; it is not logged or sent to the Viewer.
 
 ## macOS permission boundaries
 
@@ -265,7 +301,14 @@ private key and a matching self-signed TLS certificate, then supplies the
 resulting `SecIdentity` to Network.framework. Normal pairing does not require
 an operator to import `host.p12`/`viewer.p12` or copy the other endpoint's
 certificate; peer trust is stored only after the existing two-sided pairing
-consent completes. A private key is never copied between devices.
+consent completes. The M10 Host and Viewer use distinct Keychain identity
+labels and peer-trust services, including when both apps run under one macOS
+account. A legacy `MACREMOTEAPP_LOCAL_IDENTITY_LABEL` diagnostic value is
+role-suffixed before use. The apps therefore do not read or sign with each
+other's generated private key. Trust records and local identities from the
+older shared namespace are not migrated or deleted during upgrade; new code
+does not consult those old trust records, so the operator must pair once again.
+A private key is never copied between devices.
 
 ## Security non-goals and residual risks
 
@@ -289,15 +332,17 @@ an unknown but presented identity may enter the protected bootstrap flow but
 cannot send or receive protected session content until pairing and Host
 authorization complete.
 
-The Host initiates pairing. The challenge identifier deterministically binds the
-pairing nonce, and both peers independently derive the confirmation value from
-that nonce and the two presented public identities; the Viewer rejects a value
-that does not match its local derivation. Each endpoint records an explicit
+The Host initiates pairing with a commitment to a fresh random contribution.
+The Viewer commits its own fresh contribution, the Host reveals its committed
+value, and the Viewer verifies and reveals its contribution. `SecurityCore`
+derives the confirmation value from the challenge ID, both presented public
+identities, and both contributions; either endpoint rejects a reveal that does
+not match the corresponding commitment. Each endpoint records an explicit
 local consent event, and a remote confirmation is accepted only as the other
-side's consent for the same challenge. Both sides persist the peer identity only
-after the two-sided state is complete. Revocation deletes the trust record and
-requires pairing again. Reconnect clears session authorization, window scope,
-capability scope, and channel sequence state.
+side's consent for the same challenge. Both sides persist the peer identity
+only after the two-sided state is complete. Revocation deletes
+the trust record and requires pairing again. Reconnect clears session
+authorization, window scope, capability scope, and channel sequence state.
 
 The local device key is retained by Keychain-backed `SecurityCore`; the TLS
 adapter receives a platform `SecIdentity` loaded from Keychain or assembled

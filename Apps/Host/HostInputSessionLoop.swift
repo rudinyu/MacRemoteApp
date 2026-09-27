@@ -75,6 +75,7 @@ final class HostInputSessionLoop: @unchecked Sendable {
     private let handler: HostInputMessageHandler
     private let onNonInputMessage: @Sendable (MessagePayload) async -> Void
     private let onSessionLifecycleReset: @Sendable () async -> Void
+    private let onInputStatusChange: @Sendable (HostInputStatus) async -> Void
     private let now: @Sendable () -> UInt64
     private let admissionGate = HostInputAdmissionGate()
     private let cleanupLeaseLock = NSLock()
@@ -86,6 +87,7 @@ final class HostInputSessionLoop: @unchecked Sendable {
         cleanupLease: HostInputSessionCleanupLease,
         onNonInputMessage: @escaping @Sendable (MessagePayload) async -> Void,
         onSessionLifecycleReset: @escaping @Sendable () async -> Void = {},
+        onInputStatusChange: @escaping @Sendable (HostInputStatus) async -> Void = { _ in },
         now: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
     ) {
         self.session = session
@@ -93,12 +95,13 @@ final class HostInputSessionLoop: @unchecked Sendable {
         self.cleanupLease = cleanupLease
         self.onNonInputMessage = onNonInputMessage
         self.onSessionLifecycleReset = onSessionLifecycleReset
+        self.onInputStatusChange = onInputStatusChange
         self.now = now
     }
 
     func run() async {
         var iterator = session.incomingMessages.makeAsyncIterator()
-        let lifecycleTask = Task { [session, handler, admissionGate] in
+        let lifecycleTask = Task { [session, handler, admissionGate, onInputStatusChange] in
             var previous = await session.snapshot()
             var previousInputStatus = handler.status()
             var previousSelection = handler.selectionSnapshot()
@@ -137,6 +140,7 @@ final class HostInputSessionLoop: @unchecked Sendable {
                 if inputStatus != previousInputStatus {
                     await session.discardPendingInputMessages()
                     handler.reset()
+                    await onInputStatusChange(handler.status())
                 }
                 if inputStatus == .inputStateCleanupPending {
                     handler.reconcileInputState()
@@ -176,8 +180,10 @@ final class HostInputSessionLoop: @unchecked Sendable {
                     }
                 } catch {
                     if Self.requiresInputReset(after: error) {
+                        let rejectedStatus = handler.status()
                         await session.discardPendingInputMessages()
                         handler.reset()
+                        await onInputStatusChange(rejectedStatus)
                     }
                     // The event is rejected and the loop remains alive for a
                     // later authorized event. The UI can read controller

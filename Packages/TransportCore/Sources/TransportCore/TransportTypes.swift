@@ -53,6 +53,9 @@ public enum PeerAuthenticationState: Equatable, Sendable {
 
 public enum TransportSendResult: Equatable, Sendable {
     case queued
+    /// Media was discarded and the keyframe-aware queue now skips delta
+    /// frames until the next keyframe, so a sender should force one to end
+    /// the gap quickly.
     case replacedMedia
 }
 

@@ -100,6 +100,7 @@ final actor HostInputSessionRuntime {
         onNonInputMessage: @escaping @Sendable (MessagePayload) async -> Void,
         onSessionLifecycleChange: @escaping @Sendable (Bool) async -> Void = { _ in },
         onSessionLifecycleReset: @escaping @Sendable () async -> Void = {},
+        onInputStatusChange: @escaping @Sendable (HostInputStatus) async -> Void = { _ in },
         setClipboardEnabled: @escaping @Sendable (Bool) async throws -> Void = { _ in },
         clipboardStatus: @escaping @Sendable () async -> ClipboardSyncStatus? = { nil }
     ) {
@@ -119,7 +120,8 @@ final actor HostInputSessionRuntime {
             handler: handler,
             cleanupLease: cleanupLease,
             onNonInputMessage: onNonInputMessage,
-            onSessionLifecycleReset: onSessionLifecycleReset
+            onSessionLifecycleReset: onSessionLifecycleReset,
+            onInputStatusChange: onInputStatusChange
         )
     }
 

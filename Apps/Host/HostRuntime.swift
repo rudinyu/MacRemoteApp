@@ -3,6 +3,7 @@ import CaptureCore
 import CodecCore
 import Foundation
 import InputCore
+import os
 import RemoteProtocol
 import SecurityCore
 import TransportCore
@@ -18,6 +19,11 @@ enum HostRuntimeStatus: Sendable, Equatable, CustomStringConvertible {
     case needsLocalNetwork
     case listenerFailed
     case connected
+    /// A Viewer is authorized for one app window. `broughtToFront` records
+    /// that the Host activated the app because of the Viewer's selection, so
+    /// the person at the Host can see why their frontmost app changed.
+    case sharing(application: String, broughtToFront: Bool)
+    case pairing(code: String)
     case listening
     case failed
     case stopped
@@ -29,6 +35,11 @@ enum HostRuntimeStatus: Sendable, Equatable, CustomStringConvertible {
         case .needsLocalNetwork: return "Local Network permission required"
         case .listenerFailed: return "Bonjour service unavailable"
         case .connected: return "Viewer connected"
+        case let .sharing(application, broughtToFront):
+            return broughtToFront
+                ? "Viewer brought \(application) to the front and is sharing it"
+                : "Viewer is sharing \(application)"
+        case .pairing: return "Pairing requested"
         case .listening: return "Listening for a paired Viewer"
         case .failed: return "Startup failed — retry setup"
         case .stopped: return "Stopped"
@@ -44,17 +55,23 @@ enum HostRuntimeStatus: Sendable, Equatable, CustomStringConvertible {
 /// one active Viewer and one selected window per Host session.
 actor HostRuntime {
     struct Configuration: Sendable {
-        let serviceName: String
+        static let defaultIdentityLabel = "MacRemoteApp.host"
+        static let defaultTrustStoreService = "com.rudinyu.MacRemoteApp.Host.trust"
+
+        var serviceName: String
         let peerCertificateURL: URL?
         let identityLabel: String
 
         static func load(environment: [String: String] = ProcessInfo.processInfo.environment) throws -> Configuration {
             let peerCertificateURL = environment["MACREMOTEAPP_PEER_CERT"]
                 .flatMap { path in path.isEmpty ? nil : URL(fileURLWithPath: path) }
+            let serviceName = HostPreferences.load(environment: environment)
+            let identityLabel = environment["MACREMOTEAPP_LOCAL_IDENTITY_LABEL"]
+                .map { "\($0).host" } ?? defaultIdentityLabel
             return Configuration(
-                serviceName: environment["MACREMOTEAPP_SERVICE_NAME"] ?? "MacRemoteApp-Host",
+                serviceName: serviceName,
                 peerCertificateURL: peerCertificateURL,
-                identityLabel: environment["MACREMOTEAPP_LOCAL_IDENTITY_LABEL"] ?? KeychainIdentityProvider.defaultLabel
+                identityLabel: identityLabel
             )
         }
     }
@@ -65,14 +82,19 @@ actor HostRuntime {
         .h264Video,
         .mouseInput,
         .keyboardInput,
-        .textClipboard
+        .textClipboard,
+        .keyframeRequest
     ]
+    /// Floor between Viewer-requested keyframes, independent of the Viewer's
+    /// own throttle, so a misbehaving peer cannot force every frame to be
+    /// a keyframe.
+    private static let viewerKeyframeRequestMinimumIntervalNanoseconds: UInt64 = 250_000_000
     private static let inputCapabilities: Set<Capability> = [
         .mouseInput,
         .keyboardInput
     ]
 
-    private let configuration: Configuration
+    private var configuration: Configuration
     private let windowProvider: ScreenRecordingWindowProvider
     private let captureSession: WindowCaptureSession
     private let stateStore = HostInputStateStore()
@@ -85,14 +107,31 @@ actor HostRuntime {
     private var inputRuntime: HostInputSessionRuntime?
     private var sessionMonitor: Task<Void, Never>?
     private var captureTask: Task<Void, Never>?
+    private var encodedSendTask: Task<Void, Never>?
+    private var encodedFrameRelay: HostEncodedFrameRelay?
     private var encoder: H264Encoder?
     private var selectedWindow: CaptureWindow?
     private var selectedWindowGeneration: UInt64?
     private var advertisedWindowGeneration: UInt64 = 1
+    private var advertisedWindowList: [WindowDescriptor] = []
     private var videoConfigSentGeneration: UInt64?
+    /// Set when the media queue discarded video. The Viewer skips delta
+    /// frames until the next keyframe, so the capture loop forces one.
+    private var keyframeRequested = false
+    private var lastViewerKeyframeRequestNanoseconds: UInt64?
+    /// M8 stage budget evidence: capture arrival to wire-queue admission.
+    private var captureToSendCollector = BoundedStageLatencyCollector()
+    private static let stageLogSampleInterval = 600
     private var clipboardOptedInForSession = false
+    private var clipboardConsentPromptedForSession = false
+    private var clipboardConsentTask: Task<Void, Never>?
     private var retryRequested = false
+    private var restartRequested = false
     private var selectionTransitionInProgress = false
+    private let startupLogger = Logger(
+        subsystem: "com.rudinyu.MacRemoteApp",
+        category: "host-runtime"
+    )
 
     init(
         configuration: Configuration,
@@ -110,6 +149,7 @@ actor HostRuntime {
     }
 
     func run() async throws {
+        startupLogger.info("Host runtime entered")
         publish(.starting)
         while !Task.isCancelled {
             do {
@@ -121,6 +161,9 @@ actor HostRuntime {
                 publish(.stopped)
                 throw CancellationError()
             } catch let error as HostRuntimeError {
+                startupLogger.error(
+                    "Host runtime startup retry required (stage: \(hostRuntimeErrorCode(error), privacy: .public))"
+                )
                 await stop()
                 publish(error.status)
                 try await waitForRetry()
@@ -129,6 +172,9 @@ actor HostRuntime {
                 // transient Keychain, listener, or TCC error occurred. Keep
                 // the process alive and make the recovery action explicit in
                 // the status menu instead of silently retrying forever.
+                startupLogger.error(
+                    "Host runtime startup retry required (stage: unknown, error: \(String(describing: error), privacy: .public))"
+                )
                 await stop()
                 publish(.failed)
                 try await waitForRetry()
@@ -142,12 +188,44 @@ actor HostRuntime {
         retryRequested = true
     }
 
+    func updateServiceName(_ serviceName: String) throws {
+        guard let validated = HostPreferences.validatedServiceName(serviceName) else {
+            throw HostRuntimeError.configuration(
+                "Host name must contain visible characters and be at most 63 UTF-8 bytes"
+            )
+        }
+        configuration.serviceName = validated
+        restartRequested = true
+        retryRequested = true
+        publish(.starting)
+    }
+
+    /// Revokes every saved peer trust record without deleting this Mac's own
+    /// TLS identity. An active session is stopped before the records are
+    /// removed so no already-authorized input or media path survives the
+    /// operator's explicit reset.
+    func forgetAllPairings() async throws -> Int {
+        await stopActiveSession()
+        let trustStore = KeychainTrustStore(service: Configuration.defaultTrustStoreService)
+        let count = try await trustStore.removeAllPairings()
+        if listener != nil {
+            publish(.listening)
+        }
+        return count
+    }
+
     private func publish(_ status: HostRuntimeStatus) {
         statusContinuation.yield(status)
     }
 
     private func waitUntilCancelled() async throws {
         while !Task.isCancelled {
+            if restartRequested {
+                restartRequested = false
+                await stop()
+                publish(.starting)
+                return
+            }
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
         throw CancellationError()
@@ -158,6 +236,10 @@ actor HostRuntime {
         while !Task.isCancelled {
             if retryRequested {
                 retryRequested = false
+                // A rename requested while startup was already waiting for
+                // recovery only needs this retry; do not perform a second
+                // restart after the new listener becomes ready.
+                restartRequested = false
                 publish(.starting)
                 return
             }
@@ -167,14 +249,14 @@ actor HostRuntime {
     }
 
     private func startRuntime() async throws {
-        // Enroll the signed Host identity before opening any network service.
-        // The first-run permission setup is deliberately completed before we
-        // wait for Bonjour readiness. Screen Recording is an app capability;
-        // it must not be hidden behind a stalled Local Network consent flow.
-        let localIdentity = try await loadLocalIdentity()
-        self.localIdentity = localIdentity
+        // Permission setup must not be hidden behind Keychain enrollment. A
+        // broken or locked login Keychain must still allow the signed Host to
+        // request Screen Recording and Local Network access visibly.
+        startupLogger.info("Host startup stage: screen-recording permission")
         try await prepareScreenRecordingPermission()
+        startupLogger.info("Host startup stage complete: screen-recording permission")
 
+        startupLogger.info("Host startup stage: local-network Bonjour readiness")
         let shouldRequestLocalNetwork = await MainActor.run {
             HostStartupOnboarding.shouldRequestLocalNetwork()
         }
@@ -188,6 +270,29 @@ actor HostRuntime {
                 )
             }
         }
+
+        do {
+            let discovery = NetworkBonjourDiscovery()
+            try await discovery.startAndWaitForReadiness()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let discoveryError as BonjourDiscoveryStartupError {
+            startupLogger.error(
+                "Host Bonjour permission probe failed (stage: \(hostBonjourErrorCode(discoveryError), privacy: .public))"
+            )
+            throw HostRuntimeError.localNetwork(
+                "Local Network access did not become ready; enable MacRemoteApp Host in System Settings > Privacy & Security > Local Network, then relaunch the Host"
+            )
+        }
+        await MainActor.run {
+            HostStartupOnboarding.markLocalNetworkReady()
+        }
+        startupLogger.info("Host startup stage complete: local-network Bonjour readiness")
+
+        startupLogger.info("Host startup stage: Keychain identity")
+        let localIdentity = try await loadLocalIdentity()
+        self.localIdentity = localIdentity
+        startupLogger.info("Host startup stage complete: Keychain identity")
 
         let authenticationMode: TLSAuthenticationMode
         if let peerCertificateURL = configuration.peerCertificateURL {
@@ -207,6 +312,7 @@ actor HostRuntime {
             tlsOptions: tlsOptions,
             authentication: .pending
         )
+        startupLogger.info("Host startup stage: Bonjour listener")
         listener.onConnection = { [weak self] transport in
             Task { [weak self] in
                 await self?.accept(transport)
@@ -232,6 +338,7 @@ actor HostRuntime {
         await MainActor.run {
             HostStartupOnboarding.markLocalNetworkReady()
         }
+        startupLogger.info("Host startup stage complete: Bonjour listener")
         print("MacRemoteApp Host listening for one paired Viewer")
 
         let currentPermission = await captureSession.permissionState()
@@ -276,9 +383,17 @@ actor HostRuntime {
     }
 
     func stop() async {
+        await stopActiveSession()
+        listener?.cancel()
+        listener = nil
+    }
+
+    private func stopActiveSession() async {
         sessionMonitor?.cancel()
         sessionMonitor = nil
         await stopVideoPipeline()
+        clipboardConsentTask?.cancel()
+        clipboardConsentTask = nil
         await inputRuntime?.stop()
         inputRuntime = nil
         if let activeSession {
@@ -287,10 +402,10 @@ actor HostRuntime {
         activeSession = nil
         selectedWindow = nil
         selectedWindowGeneration = nil
+        advertisedWindowList.removeAll(keepingCapacity: false)
         clipboardOptedInForSession = false
+        clipboardConsentPromptedForSession = false
         stateStore.clearSelection()
-        listener?.cancel()
-        listener = nil
     }
 
     private func loadLocalIdentity() async throws -> ProvisionedIdentity {
@@ -315,13 +430,14 @@ actor HostRuntime {
 
         let pairingCoordinator = PairingCoordinator(
             localIdentity: localIdentity.peerIdentity,
-            trustStore: KeychainTrustStore()
+            trustStore: KeychainTrustStore(service: Configuration.defaultTrustStoreService)
         )
 
         let session = SessionCoordinator(
             configuration: SessionConfiguration(
                 role: .host,
                 implementationIdentifier: "MacRemoteApp-Host-M10",
+                deviceName: configuration.serviceName,
                 capabilities: Self.capabilities,
                 mandatoryCapabilities: [.pingPong],
                 maxVideoWidth: 1920,
@@ -334,6 +450,7 @@ actor HostRuntime {
         activeSession = session
         publish(.connected)
         clipboardOptedInForSession = false
+        clipboardConsentPromptedForSession = false
         stateStore.update(session: await session.snapshot())
 
         let contextProvider = CoreGraphicsAccessibilityContextProvider(
@@ -351,6 +468,46 @@ actor HostRuntime {
             onSessionLifecycleReset: { [stateStore] in
                 let snapshot = await session.snapshot()
                 stateStore.update(session: snapshot)
+            },
+            onInputStatusChange: { status in
+                let snapshot = await session.snapshot()
+                guard snapshot.state != .failed,
+                      snapshot.state != .stopping,
+                      snapshot.state != .reconnecting else { return }
+
+                let permission: PermissionState
+                let focusEligible: Bool
+                switch status {
+                case .ready:
+                    permission = .granted
+                    focusEligible = true
+                case .permissionUnavailable:
+                    // A previously authorized input path lost its local TCC
+                    // access. The Viewer must remain disabled until a fresh
+                    // Host status proves that permission is usable again.
+                    permission = .revoked
+                    focusEligible = false
+                case .focusUnavailable:
+                    permission = .granted
+                    focusEligible = false
+                case .sessionUnauthorized,
+                     .selectionUnavailable,
+                     .capabilityUnavailable,
+                     .inputStateCleanupPending:
+                    permission = .unknown
+                    focusEligible = false
+                }
+                _ = try? await session.send(
+                    .sessionState(
+                        SessionStateMessage(
+                            state: snapshot.state,
+                            permission: permission,
+                            focusEligible: focusEligible,
+                            windowGeneration: snapshot.authorizedWindowGeneration
+                        )
+                    ),
+                    expectedAuthorizationGeneration: snapshot.authorizationGeneration
+                )
             }
         )
         inputRuntime = runtime
@@ -367,7 +524,12 @@ actor HostRuntime {
                 capabilities: [.windowSelection]
             )
             stateStore.update(session: await session.snapshot())
-            try await session.send(.windowList(.init(windows: windows.map(Self.descriptor))))
+            let descriptors = windows.map(Self.descriptor)
+            try await session.send(.windowList(.init(windows: descriptors)))
+            advertisedWindowList = descriptors
+            startupLogger.info(
+                "Host advertised window list (count: \(descriptors.count, privacy: .public))"
+            )
             sessionMonitor = Task { [weak self] in
                 await self?.monitor(session)
             }
@@ -381,26 +543,47 @@ actor HostRuntime {
         pairingCoordinator: PairingCoordinator
     ) async throws {
         var promptedChallengeID: UInt64?
+        var projectedChallengeID: UInt64?
         while !Task.isCancelled {
             let snapshot = await session.snapshot()
             switch snapshot.state {
             case .trusted, .capabilitiesNegotiated, .windowSelectionAuthorized,
                  .streaming:
+                publish(.connected)
                 return
             case .pairingRequired:
-                if let challenge = await pairingCoordinator.pendingChallenge(),
-                   promptedChallengeID != challenge.challengeID {
+                if let challenge = await pairingCoordinator.pendingChallenge() {
+                    // The code is not available until the Viewer contribution
+                    // has been received and the Host reveal is complete.
+                    guard challenge.isVerificationReady else {
+                        try await Task.sleep(nanoseconds: 100_000_000)
+                        continue
+                    }
+                    if projectedChallengeID != challenge.challengeID {
+                        // A Host with an existing one-sided trust record may
+                        // already have local consent and therefore skip the
+                        // Allow/Deny prompt. Still expose the same one-time
+                        // code in the Host status menu so both operators can
+                        // compare the same value before consenting.
+                        publish(.pairing(code: challenge.confirmationCode))
+                        projectedChallengeID = challenge.challengeID
+                    }
                     let consent = await pairingCoordinator.consentState()
                     guard consent?.localConsent != true else {
+                        try await Task.sleep(nanoseconds: 100_000_000)
+                        continue
+                    }
+                    guard promptedChallengeID != challenge.challengeID else {
                         try await Task.sleep(nanoseconds: 100_000_000)
                         continue
                     }
                     promptedChallengeID = challenge.challengeID
                     let outcome = await withTaskGroup(of: HostPairingPromptOutcome.self) { group in
                         group.addTask {
-                            let accepted = await HostPairingPrompt.requestConsent(
-                                confirmationCode: challenge.confirmationCode,
-                                expiresAt: challenge.expiresAt
+                    let accepted = await HostPairingPrompt.requestConsent(
+                        confirmationCode: challenge.confirmationCode,
+                        peerName: (await session.snapshot()).peerDeviceName,
+                        expiresAt: challenge.expiresAt
                             )
                             return .consent(accepted)
                         }
@@ -428,8 +611,7 @@ actor HostRuntime {
                     }
                     try await session.confirmPairing(
                         confirmationCode: challenge.confirmationCode,
-                        accepted: accepted,
-                        displayName: "MacRemoteApp Viewer"
+                        accepted: accepted
                     )
                 }
             case .failed, .stopping:
@@ -457,6 +639,7 @@ actor HostRuntime {
     }
 
     private func monitor(_ session: SessionCoordinator) async {
+        var nextWindowListRefreshAt: UInt64 = 0
         while !Task.isCancelled {
             let snapshot = await session.snapshot()
             stateStore.update(session: snapshot)
@@ -479,7 +662,41 @@ actor HostRuntime {
                     return
                 }
             }
+            let canRefreshWindowCatalog = snapshot.state == .capabilitiesNegotiated ||
+                snapshot.state == .windowSelectionAuthorized ||
+                snapshot.state == .streaming
+            if !selectionTransitionInProgress, canRefreshWindowCatalog {
+                let now = DispatchTime.now().uptimeNanoseconds
+                if now >= nextWindowListRefreshAt {
+                    nextWindowListRefreshAt = now &+ 1_000_000_000
+                    await refreshWindowListIfNeeded(session)
+                }
+            }
             try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
+    /// Window discovery can change after a Viewer connects: the user may
+    /// launch, unminimize, or bring an application to the foreground after
+    /// the initial handshake. Refresh during the authorized session, including
+    /// while a window is selected, and publish only when the descriptor list
+    /// changes so the Viewer can switch apps without reconnecting.
+    private func refreshWindowListIfNeeded(_ session: SessionCoordinator) async {
+        guard activeSession === session,
+              !selectionTransitionInProgress else { return }
+        do {
+            let windows = try await captureSession.discoverWindows()
+            let descriptors = windows.map(Self.descriptor)
+            guard descriptors != advertisedWindowList else { return }
+            try await session.send(.windowList(.init(windows: descriptors)))
+            advertisedWindowList = descriptors
+            startupLogger.info(
+                "Host refreshed window list (count: \(descriptors.count, privacy: .public))"
+            )
+        } catch {
+            startupLogger.error(
+                "Host window list refresh failed (error: \(String(describing: error), privacy: .public))"
+            )
         }
     }
 
@@ -560,10 +777,37 @@ actor HostRuntime {
                     scheduleTeardown(session: session)
                     return
                 }
-                try await activateSelection(window, generation: selection.windowGeneration, session: session)
+                guard advertisedWindowGeneration < UInt64.max else {
+                    scheduleTeardown(session: session)
+                    return
+                }
+                // The generation in the request identifies the currently
+                // authorized WindowList. A replacement receives a new wire
+                // generation before Host authorization is published. This
+                // makes Viewer input queued for the old window fail closed
+                // even when the numeric WindowServer ID is reused.
+                let replacementGeneration = advertisedWindowGeneration &+ 1
+                advertisedWindowGeneration = replacementGeneration
+                try await activateSelection(
+                    window,
+                    generation: replacementGeneration,
+                    session: session
+                )
             } catch {
                 scheduleTeardown(session: session)
             }
+        case let .keyframeRequest(request):
+            // SessionCoordinator already checked the authorized capability
+            // and window generation; also ignore a request for a stream the
+            // encoder is no longer producing.
+            guard request.generation == selectedWindowGeneration, encoder != nil else { return }
+            let now = DispatchTime.now().uptimeNanoseconds
+            if let last = lastViewerKeyframeRequestNanoseconds,
+               now &- last < Self.viewerKeyframeRequestMinimumIntervalNanoseconds {
+                return
+            }
+            lastViewerKeyframeRequestNanoseconds = now
+            requestKeyframe()
         case .close:
             scheduleTeardown(session: session)
         default:
@@ -633,31 +877,6 @@ actor HostRuntime {
             // request; a view-only session never receives this prompt.
             return CoreGraphicsAccessibilityContextProvider.requestPermission()
         }
-        if negotiatedCapabilities.contains(.textClipboard) {
-            let consented = await HostClipboardPrompt.requestConsent(
-                expiresAt: Date().addingTimeInterval(60),
-                isSessionActive: {
-                    let snapshot = await session.snapshot()
-                    guard snapshot.authorized else { return false }
-                    switch snapshot.state {
-                    case .failed, .stopping, .reconnecting:
-                        return false
-                    default:
-                        return true
-                    }
-                }
-            )
-            let currentSnapshot = await session.snapshot()
-            clipboardOptedInForSession = consented &&
-                activeSession === session &&
-                currentSnapshot.authorized &&
-                currentSnapshot.state != .failed &&
-                currentSnapshot.state != .stopping &&
-                currentSnapshot.state != .reconnecting
-        } else {
-            clipboardOptedInForSession = false
-        }
-
         // Authorize only the capabilities both endpoints negotiated. A Viewer
         // may intentionally omit optional input or clipboard support; that
         // must degrade to view-only/partial control instead of rejecting the
@@ -670,9 +889,26 @@ actor HostRuntime {
             authorizedCapabilities.remove(.textClipboard)
         }
 
+        // Selecting a listed application is explicit Viewer intent to use it
+        // interactively. Bring its app to the Host foreground before the
+        // authorization/focus checks; InputCore still rejects every event if
+        // macOS does not confirm that the selected window is foreground.
+        let didForegroundSelectedApplication = await bringSelectedApplicationToForeground(selected)
+        if !didForegroundSelectedApplication {
+            startupLogger.error(
+                "Host could not confirm the selected application became foreground; input remains fail-closed"
+            )
+        }
+
         try await session.authorize(windowGeneration: generation, capabilities: authorizedCapabilities)
         selectedWindow = selected
         selectedWindowGeneration = generation
+        publish(
+            .sharing(
+                application: Self.statusApplicationName(for: selected),
+                broughtToFront: didForegroundSelectedApplication
+            )
+        )
         stateStore.setSelection(
             HostInputWindowSelection(
                 windowIdentifier: selected.identifier,
@@ -688,6 +924,16 @@ actor HostRuntime {
             )
         )
         stateStore.update(session: await session.snapshot())
+
+        // Re-publish the eligible list after every selection authorization so
+        // the Viewer learns the new selection/authorization generation before
+        // it can request another replacement. WindowList itself carries no
+        // generation field; the SessionAuthorize snapshot supplies it.
+        let refreshedWindows = try await captureSession.discoverWindows()
+        let refreshedDescriptors = refreshedWindows.map(Self.descriptor)
+        try await session.send(.windowList(.init(windows: refreshedDescriptors)))
+        advertisedWindowList = refreshedDescriptors
+
         if clipboardOptedInForSession {
             try await inputRuntime?.setClipboardEnabled(true)
         }
@@ -706,6 +952,8 @@ actor HostRuntime {
         try encoder.start(generation: generation)
         self.encoder = encoder
         videoConfigSentGeneration = nil
+        keyframeRequested = false
+        captureToSendCollector.reset()
         try await session.send(
             .streamConfig(
                 StreamConfigMessage(
@@ -719,22 +967,39 @@ actor HostRuntime {
         )
 
         let frames = captureSession.frames
+        let relay = HostEncodedFrameRelay()
+        encodedFrameRelay = relay
+        encodedSendTask = Task { [weak self] in
+            var awaitingKeyframe = false
+            for await result in relay.frames {
+                guard !Task.isCancelled else { return }
+                if relay.takeDroppedFrame() {
+                    awaitingKeyframe = true
+                    await self?.requestKeyframe()
+                }
+                if awaitingKeyframe {
+                    guard case let .success(frame) = result, frame.keyframe else { continue }
+                    awaitingKeyframe = false
+                }
+                await self?.sendEncoded(result, generation: generation, session: session)
+            }
+        }
         captureTask = Task { [weak self, weak encoder] in
+            defer { relay.finish() }
             var framesSinceKeyframe = 60
             do {
                 for try await frame in frames {
                     guard !Task.isCancelled, let encoder else { return }
-                    let forceKeyframe = framesSinceKeyframe >= 60
+                    let requested = await self?.consumeKeyframeRequest() ?? false
+                    let forceKeyframe = requested || framesSinceKeyframe >= 60
                     do {
                         try encoder.encode(
                             pixelBuffer: frame.pixelBuffer,
                             captureTimestamp: frame.captureTimestamp,
                             presentationTimestamp: frame.presentationTimestamp,
                             forceKeyframe: forceKeyframe,
-                            completion: { [weak self] result in
-                                Task { [weak self] in
-                                    await self?.sendEncoded(result, generation: generation, session: session)
-                                }
+                            completion: { result in
+                                relay.submit(result)
                             }
                         )
                         framesSinceKeyframe = forceKeyframe ? 0 : framesSinceKeyframe + 1
@@ -742,12 +1007,61 @@ actor HostRuntime {
                         // VideoToolbox queue pressure is handled by dropping
                         // the frame; the bounded CaptureCore stream provides
                         // the next opportunity for a keyframe.
+                        if forceKeyframe {
+                            framesSinceKeyframe = 60
+                        }
                     }
                 }
             } catch {
                 await self?.captureDidEnd(session)
             }
         }
+
+        // Clipboard sync is optional. Presenting its consent sheet must never
+        // hold up the selected-window video path: authorize and stream the
+        // picture first, then apply clipboard permission independently.
+        if negotiatedCapabilities.contains(.textClipboard) {
+            scheduleClipboardConsentPrompt(for: session)
+        }
+    }
+
+    private func scheduleClipboardConsentPrompt(for session: SessionCoordinator) {
+        guard !clipboardConsentPromptedForSession,
+              activeSession === session else { return }
+        clipboardConsentPromptedForSession = true
+        clipboardConsentTask = Task { [weak self] in
+            let consented = await HostClipboardPrompt.requestConsent(
+                expiresAt: Date().addingTimeInterval(60),
+                isSessionActive: {
+                    let snapshot = await session.snapshot()
+                    guard snapshot.authorized else { return false }
+                    switch snapshot.state {
+                    case .failed, .stopping, .reconnecting:
+                        return false
+                    default:
+                        return true
+                    }
+                }
+            )
+            await self?.completeClipboardConsent(consented, for: session)
+        }
+    }
+
+    private func completeClipboardConsent(
+        _ consented: Bool,
+        for session: SessionCoordinator
+    ) async {
+        guard activeSession === session else { return }
+        clipboardConsentTask = nil
+        guard consented,
+              (await session.snapshot()).negotiatedCapabilities.contains(.textClipboard) else {
+            return
+        }
+        clipboardOptedInForSession = true
+        // The regular authorization monitor applies the new capability as
+        // soon as the current selection transition has published its generation.
+        guard !selectionTransitionInProgress else { return }
+        await synchronizeInputAuthorization(session)
     }
 
     private func sendEncoded(
@@ -773,7 +1087,7 @@ actor HostRuntime {
                 videoConfigSentGeneration = generation
             }
             guard videoConfigSentGeneration == generation else { return }
-            try await session.send(
+            let result = try await session.send(
                 .videoFrame(
                     VideoFrameMessage(
                         generation: generation,
@@ -787,9 +1101,66 @@ actor HostRuntime {
                 ),
                 flags: frame.keyframe ? [.keyframe] : []
             )
+            if result == .replacedMedia {
+                keyframeRequested = true
+            }
+            captureToSendCollector.append(
+                startNanoseconds: frame.captureTimestamp,
+                endNanoseconds: DispatchTime.now().uptimeNanoseconds
+            )
+            logCaptureToSendStageIfDue()
         } catch {
             await stopVideoPipelineIfCurrent(session)
         }
+    }
+
+    /// Logs only aggregate timing, roughly every ten seconds at 60 fps.
+    private func logCaptureToSendStageIfDue() {
+        let count = captureToSendCollector.retainedSampleCount
+        guard count > 0, count % Self.stageLogSampleInterval == 0,
+              let summary = captureToSendCollector.summary() else { return }
+        let budget = LatencyBudget.v1.hostCaptureToSendNanoseconds
+        let within = LatencyBudget.isWithinBudget(summary, budget: budget) ?? false
+        startupLogger.notice(
+            "M8 stage host-capture-to-send samples=\(summary.count, privacy: .public) p50Ns=\(summary.p50Nanoseconds, privacy: .public) p95Ns=\(summary.p95Nanoseconds, privacy: .public) budgetNs=\(budget, privacy: .public) withinBudget=\(within, privacy: .public)"
+        )
+    }
+
+    private func requestKeyframe() {
+        keyframeRequested = true
+    }
+
+    private func consumeKeyframeRequest() -> Bool {
+        defer { keyframeRequested = false }
+        return keyframeRequested
+    }
+
+    /// Local status-menu text only; never logged or sent to the Viewer.
+    /// Bounded so an unusual app name cannot stretch the menu.
+    private static func statusApplicationName(for window: CaptureWindow) -> String {
+        let name = window.applicationName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let display = (name?.isEmpty == false ? name : nil) ?? window.applicationIdentifier
+        return display.count > 48 ? String(display.prefix(47)) + "…" : display
+    }
+
+    @MainActor
+    private func bringSelectedApplicationToForeground(_ window: CaptureWindow) async -> Bool {
+        guard let application = NSRunningApplication(processIdentifier: window.processIdentifier),
+              application.activationPolicy == .regular else {
+            return false
+        }
+        _ = application.activate(options: [.activateIgnoringOtherApps])
+        for _ in 0 ..< 20 {
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == window.processIdentifier {
+                return true
+            }
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            } catch {
+                return false
+            }
+        }
+        return NSWorkspace.shared.frontmostApplication?.processIdentifier == window.processIdentifier
     }
 
     private func stopVideoPipelineIfCurrent(_ session: SessionCoordinator) async {
@@ -802,9 +1173,12 @@ actor HostRuntime {
     private func captureDidEnd(_ session: SessionCoordinator) {
         guard activeSession === session else { return }
         captureTask = nil
+        stopEncodedFrameRelay()
         encoder?.reset()
         encoder = nil
         videoConfigSentGeneration = nil
+        keyframeRequested = false
+        captureToSendCollector.reset()
     }
 
     private func stopVideoPipeline() async {
@@ -814,24 +1188,26 @@ actor HostRuntime {
             await captureTask.value
         }
         captureTask = nil
+        stopEncodedFrameRelay()
         encoder?.reset()
         encoder = nil
         videoConfigSentGeneration = nil
+        keyframeRequested = false
+        captureToSendCollector.reset()
+    }
+
+    /// Ends the ordered send path. The send task is cancelled rather than
+    /// awaited because a send failure inside it may itself stop the pipeline.
+    private func stopEncodedFrameRelay() {
+        encodedFrameRelay?.finish()
+        encodedFrameRelay = nil
+        encodedSendTask?.cancel()
+        encodedSendTask = nil
     }
 
     private func teardown(session: SessionCoordinator) async {
         guard activeSession === session else { return }
-        sessionMonitor?.cancel()
-        sessionMonitor = nil
-        await stopVideoPipeline()
-        await inputRuntime?.stop()
-        inputRuntime = nil
-        await session.stop(reason: .normal)
-        activeSession = nil
-        selectedWindow = nil
-        selectedWindowGeneration = nil
-        clipboardOptedInForSession = false
-        stateStore.clearSelection()
+        await stopActiveSession()
         publish(.listening)
     }
 
@@ -844,6 +1220,27 @@ actor HostRuntime {
             height: UInt32(max(1, window.bounds.height.rounded())),
             eligible: window.eligible
         )
+    }
+}
+
+private func hostRuntimeErrorCode(_ error: HostRuntimeError) -> String {
+    switch error {
+    case .configuration: return "configuration"
+    case .permission: return "screen-recording"
+    case .localNetwork: return "local-network"
+    case .listener: return "listener"
+    case .sessionEnded: return "session-ended"
+    case .sessionTimedOut: return "session-timeout"
+    case .pairingTimedOut: return "pairing-timeout"
+    case .staleWindowGeneration: return "stale-window"
+    }
+}
+
+private func hostBonjourErrorCode(_ error: BonjourDiscoveryStartupError) -> String {
+    switch error {
+    case .failed: return "failed"
+    case .cancelled: return "cancelled"
+    case .timedOut: return "timed-out"
     }
 }
 

@@ -22,17 +22,17 @@ the capability for the current paired session.
    signature-checked per-user install in `~/Applications`. The DMG helper has
    no command-line options and is not a CI or testing tool. For safety, the
    drop target refuses a symlink or non-directory at `~/Applications`.
-3. Open the installed app bundle. On first launch, the app creates or reuses a
-   local P-256 TLS identity in that Mac's login
-   Keychain. The private key never leaves the Mac and no `.p12` file is needed.
-4. On the Host, the first launch shows a setup step for Screen Recording before
-   it waits for Bonjour readiness. Continue there so macOS can ask for access
-   for the signed `MacRemoteApp-Host` bundle. The Host then starts Bonjour and
-   shows the Local Network setup step. Allow both requested accesses in System
-   Settings > Privacy & Security. Accessibility/post-event input access is
-   intentionally requested later, only after a Viewer has paired, negotiated
-   input, and the operator selects a window. If input permission is missing,
-   the Viewer remains view-only.
+3. Open the installed app bundle. On first Host launch, Screen Recording is
+   requested first and a short Bonjour readiness probe requests Local Network
+   access for the signed `MacRemoteApp-Host` bundle. Allow both in System
+   Settings > Privacy & Security. The Host then creates or reuses its local
+   role-specific P-256 TLS identity in that Mac's login Keychain. Host and
+   Viewer use separate identity and peer-trust namespaces, even when both are
+   installed on the same Mac. The private key never leaves the Mac and no
+   `.p12` file is needed. Accessibility/post-event input
+   access is intentionally requested later, only after a Viewer has paired,
+   negotiated input, and the operator selects a window. If input permission is
+   missing, the Viewer remains view-only.
 5. On the Viewer, the first launch creates its local identity, shows the Local
    Network setup step, and then starts Bonjour discovery. Allow Local Network
    access for the signed `MacRemoteApp-Viewer` bundle when macOS asks. If
@@ -61,17 +61,42 @@ The repository's `scripts/create-m2-identities.sh` and PKCS#12 flow are for
 disposable debug physical smoke only. They are not required for a production
 installation. `MACREMOTEAPP_LOCAL_IDENTITY_LABEL` and
 `MACREMOTEAPP_LOCAL_IDENTITY_P12` are controlled diagnostic overrides, not
-normal user setup.
+normal user setup. When set, the identity-label value is a base; the app adds
+`.host` or `.viewer` so both roles remain isolated.
+
+When upgrading from an older build that used one shared Keychain namespace,
+the new version does not import the old shared peer-trust records. Complete a
+fresh pairing once. The old Keychain items are left untouched by the upgrade.
 
 ## First connection and pairing
 
 1. Put both Macs on the same trusted LAN.
 2. Start the Host first, then start the Viewer.
-3. After discovery, the Host displays a one-time pairing code and asks for
-   local consent.
-4. Enter the matching code on the Viewer and approve the connection there.
-5. Both endpoints save the peer trust record in the macOS Keychain only after
-   both operators consent. A permission grant alone never creates a pairing.
+3. After discovery, both apps commit fresh random values before either side
+   reveals them, then complete the commit/reveal exchange and independently
+   derive the same six-digit one-time pairing code. The Host
+   displays it in the pairing dialog and status-menu item. If the Host already
+   trusts this Viewer but the Viewer trust record was lost, the Host may not
+   show an Allow/Deny dialog; its status menu still shows the code.
+4. Compare the same six-digit code on both Macs. If the Host asks, select
+   **Allow**; select **Accept** on the Viewer only when the codes match.
+   Otherwise select **Deny** on either Mac.
+5. Each endpoint saves the peer trust record in its role-specific macOS
+   Keychain service only after both operators consent. A permission grant
+   alone never creates a pairing.
+
+The Host status menu provides `Rename Host…` for changing the name shown in
+Viewer discovery. The name is visible to devices on the local network and is
+not the Host's TLS identity; changing it does not by itself remove pairing.
+The listener briefly restarts under the new name.
+
+If a previous pairing is stale or only one endpoint still has its trust record,
+use `Forget saved pairings…` on the Host status menu and on the Viewer before
+trying again. The action stops the active session, clears the current Viewer
+Host selection, and removes only that app role's saved peer trust records. It
+does not delete the local TLS identity, permissions, or Host name. The Host
+continues to be discoverable, but it must be explicitly selected again before
+the next connection can show and confirm a new pairing code.
 
 New production installations do not need `MACREMOTEAPP_PEER_CERT`. That
 variable is reserved for the pinned-certificate migration and debug smoke
@@ -86,6 +111,10 @@ paths.
    If the session authorizes only mouse or only keyboard input, the Viewer
    keeps the other local controls disabled and continues to expose the
    authorized capability.
+
+Very small macOS helper/service surfaces are intentionally omitted from the
+window picker. If an application's main window is not listed, bring that
+window on screen on the Host and refresh the session.
 4. When the Host authorizes text clipboard, use the Viewer’s `Enable text
    clipboard` button to opt in for the current session. The button becomes
    unavailable when the Host has not granted the capability or the session
@@ -102,12 +131,28 @@ Quit both apps to end the session. For an app installed by dragging to
 `/Applications`, use Finder's normal Move to Trash action. For an app installed
 by the optional DMG helper, open the DMG and double-click the role-specific
 `Uninstall-MacRemoteApp-*.command` file. It asks that role to quit first, then
-moves only the exact per-user app from `~/Applications` to `~/.Trash`; it does
-not remove other applications, Keychain records, TCC permissions, or test
-artifacts. If the app is still running after the quit request, the script stops
-and asks you to quit it before retrying. Moving to the Trash keeps the normal
+moves only the exact per-user app from `~/Applications` to `~/.Trash`. It
+clears both roles' per-user preferences, caches, and saved application state.
+Each signed app removes only its own role-specific peer trust and generated
+TLS identity; if the opposite role is installed, the helper asks that app's
+signed binary to clear its own Keychain data too. It does not remove unrelated
+Keychain records. It intentionally does not reset macOS TCC entries; use
+System Settings to remove the exact permission when a fresh privacy decision
+is required.
+If the app is still running after the quit request, the script stops and asks
+you to quit it before retrying. Moving the app to the Trash keeps the normal
 macOS recovery path; empty the Trash separately if permanent deletion is
 intended.
+
+Host and Viewer now have separate Keychain namespaces. If both roles are
+installed on the same Mac, either DMG uninstaller clears both roles' current
+Keychain data but moves only the selected role's app to the Trash; the other
+app stays installed and enrolls a fresh identity on next launch. If only one
+role is installed, its uninstaller clears that role's Keychain data. Legacy
+shared Keychain entries from older builds are not imported by the new version
+and are preserved rather than deleted across app-role boundaries. Use the
+in-app `Forget saved pairings…` action when you want to remove only the
+selected role's peer trust while preserving its app and local identity.
 
 The Host is an accessory app and should not need a persistent Dock icon. If an
 older icon remains pinned, quit the old app first, then choose Options > Remove

@@ -67,6 +67,13 @@ public final class H264Encoder: @unchecked Sendable {
 
         do {
             try setProperty(kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue, on: newSession)
+            // B-frame reordering delays output by at least one frame; the
+            // interactive stream must emit each frame as soon as it is encoded.
+            try setProperty(
+                kVTCompressionPropertyKey_AllowFrameReordering,
+                value: kCFBooleanFalse,
+                on: newSession
+            )
             try setProperty(
                 kVTCompressionPropertyKey_ProfileLevel,
                 value: kVTProfileLevel_H264_Main_AutoLevel as CFTypeRef,
@@ -75,6 +82,14 @@ public final class H264Encoder: @unchecked Sendable {
             try setProperty(
                 kVTCompressionPropertyKey_AverageBitRate,
                 value: NSNumber(value: configuration.averageBitrate),
+                on: newSession
+            )
+            // A hard cap keeps keyframe and scene-change bursts from filling
+            // the TCP send buffer. Not every encoder honors it, so it is
+            // best-effort; the average bitrate above remains mandatory.
+            try setOptionalProperty(
+                kVTCompressionPropertyKey_DataRateLimits,
+                value: Self.dataRateLimits(for: configuration) as CFArray,
                 on: newSession
             )
             try setProperty(
@@ -299,6 +314,27 @@ public final class H264Encoder: @unchecked Sendable {
             sequenceParameterSet: sps,
             pictureParameterSet: Data(bytes: secondPointer, count: secondSize)
         )
+    }
+
+    /// Peak-to-average ratio for `DataRateLimits`, measured over one second.
+    static let peakBitrateMultiplier = 1.5
+
+    /// Returns the VideoToolbox `DataRateLimits` pair: a byte budget and the
+    /// window in seconds over which it applies.
+    static func dataRateLimits(for configuration: H264EncoderConfiguration) -> [NSNumber] {
+        let peakBytesPerSecond = Double(configuration.averageBitrate) * peakBitrateMultiplier / 8
+        return [NSNumber(value: peakBytesPerSecond.rounded(.down)), NSNumber(value: 1.0)]
+    }
+
+    private func setOptionalProperty(
+        _ key: CFString,
+        value: CFTypeRef,
+        on session: VTCompressionSession
+    ) throws {
+        let status = VTSessionSetProperty(session, key: key, value: value)
+        guard status == noErr || status == kVTPropertyNotSupportedErr else {
+            throw CodecError.videoToolboxFailure(status)
+        }
     }
 
     private func setProperty(

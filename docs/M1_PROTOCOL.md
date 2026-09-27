@@ -71,9 +71,9 @@ and remote values, with encoding overhead still applied.
 
 The first sequence on each channel may be any value. Control sequences must be
 strictly contiguous and control/media sequences are independent. Media
-sequences must be strictly increasing; a bounded queue may replace an unsent,
-discardable video frame with a newer one, so the receiver may observe a forward
-gap in the media sequence. It must never drop `VideoConfig` or a required
+sequences must be strictly increasing; a bounded queue may discard delta video
+frames under the keyframe-aware policy in `docs/PROTOCOL.md`, so the receiver
+may observe a forward gap in the media sequence. It must never drop `VideoConfig` or a required
 recovery keyframe locally, and a non-increasing media sequence is still a
 replay/protocol error.
 
@@ -136,6 +136,7 @@ are rejected.
 | `0x0010` | SessionState |
 | `0x0011` | Error |
 | `0x0012` | Close |
+| `0x0017` | KeyframeRequest (M8, optional capability) |
 
 ### Capabilities
 
@@ -147,6 +148,7 @@ are rejected.
 | `0x0004` | Keyboard input |
 | `0x0005` | Text clipboard |
 | `0x0006` | Ping/pong |
+| `0x0007` | Keyframe request (M8, optional) |
 
 `0x8000` is a wire-only mandatory marker and is not part of the identifier
 value. `CodecIdentifier.h264` is `0x0001`.
@@ -160,10 +162,13 @@ capability list above.
 
 | Message | Fields in ascending field ID |
 | --- | --- |
-| `Hello` | 1 `version` (2 bytes), 2 `role` (u8), 3 `implementationIdentifier` (utf8), 4 `maxPayloadLength` (u32), 5 `maxControlPayloadLength` (u32), 6 `maxClipboardTextBytes` (u32) |
+| `Hello` | 1 `version` (2 bytes), 2 `role` (u8), 3 `implementationIdentifier` (utf8), 4 `maxPayloadLength` (u32), 5 `maxControlPayloadLength` (u32), 6 `maxClipboardTextBytes` (u32), 7 `deviceName` (utf8, optional, max 63 bytes; display-only) |
 | `Capabilities` | 1 `capabilities`, 2 `maxVideoWidth` (u32, optional), 3 `maxVideoHeight` (u32, optional), 4 `maxFrameRate` (u16, optional) |
-| `PairingChallenge` | 1 `challengeID` (u64), 2 `confirmationCode` (utf8) |
+| `PairingChallenge` | 1 `challengeID` (u64), 2 `confirmationCode` (utf8, legacy optional), 3 `commitment` (32-byte bytes, production required) |
 | `PairingConfirmation` | 1 `challengeID` (u64), 2 `accepted` (bool), 3 `confirmationCode` (utf8, optional) |
+| `PairingResponse` | 1 `challengeID` (u64), 2 `commitment` (32-byte bytes) |
+| `PairingVerification` | 1 `challengeID` (u64), 2 `contribution` (32-byte bytes) |
+| `PairingReveal` | 1 `challengeID` (u64), 2 `contribution` (32-byte bytes) |
 | `SessionAuthorize` | 1 `authorized` (bool), 2 `windowGeneration` (u64, optional), 3 `capabilities` |
 | `WindowList` | 1 `windows`: count u16 followed by length-prefixed nested window records |
 | `WindowSelection` | 1 `windowIdentifier` (u64), 2 `windowGeneration` (u64) |
@@ -178,10 +183,18 @@ capability list above.
 | `SessionState` | 1 `state` (u8), 2 `permission` (u8), 3 `focusEligible` (bool), 4 `windowGeneration` (u64, optional) |
 | `Error` | 1 `code` (u16), 2 `retryable` (bool), 3 `detailCode` (utf8, optional) |
 | `Close` | 1 `reason` (u16), 2 `detailCode` (utf8, optional) |
+| `KeyframeRequest` | 1 `generation` (u64), 2 `reason` (u8: 1 media gap, 2 decode failure) |
 
 `WindowList` nested window records use the same TLV format with fields:
 1 `identifier` (u64), 2 `applicationIdentifier` (utf8), 3 `title` (utf8,
 optional), 4 `width` (u32), 5 `height` (u32), and 6 `eligible` (bool).
+
+`Hello.deviceName` is an optional M10-compatible extension. Older peers may
+omit it; implementations that do not recognize optional fields ignore it. It
+is bounded and validated for display, but is untrusted metadata: it is never a
+peer identity, authorization input, or pairing secret. Host discovery may use
+an independently configured Bonjour display name; the Host defaults that name
+to its macOS short hostname. A Viewer sends its own macOS short hostname.
 
 ## Golden vectors
 
@@ -209,6 +222,7 @@ Pong                010101000000080102030405060708
 SessionState        010101000000010802010000000102030100000001010400000000080000000000000009
 Error               0101010000000200050201000000010103000000001073637265656E2D7265636F7264696E67
 Close               010101000000020001020000000004646F6E65
+KeyframeRequest     01010100000008000000000000000902010000000101
 ```
 
 The test suite asserts the exact bytes above, then decodes and re-encodes every

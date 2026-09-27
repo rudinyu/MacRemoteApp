@@ -92,9 +92,12 @@ The exact binary field widths and serialization format are fixed by M1 in
 
 | Message | Direction | Purpose |
 | --- | --- | --- |
-| `Hello` | Both | Protocol version, device role, implementation identity, and supported limits |
+| `Hello` | Both | Protocol version, device role, implementation identity, supported limits, and optional bounded display-only device name |
 | `Capabilities` | Both | Codec, resolution, frame-rate, input, and clipboard capabilities |
-| `PairingChallenge` | Host → Viewer | Bootstrap challenge and displayable confirmation data |
+| `PairingChallenge` | Host → Viewer | Bootstrap challenge and Host commitment |
+| `PairingResponse` | Viewer → Host | Fresh Viewer commitment for the commit/reveal exchange |
+| `PairingVerification` | Host → Viewer | Host contribution reveal after both commitments are fixed |
+| `PairingReveal` | Viewer → Host | Viewer contribution reveal after verifying the Host contribution |
 | `PairingConfirmation` | Both | User-confirmed pairing result; never a substitute for authenticated transport |
 | `SessionAuthorize` | Host → Viewer / local policy | Selected session authorization state and enabled capabilities |
 | `WindowList` | Host → Viewer | Eligible application/window summaries, not pixels or secrets |
@@ -110,6 +113,7 @@ The exact binary field widths and serialization format are fixed by M1 in
 | `SessionState` | Both | Explicit state, permission, focus, and capability transitions |
 | `Error` | Both | Structured failure code, retryability, and safe user-facing detail |
 | `Close` | Both | Intentional shutdown reason |
+| `KeyframeRequest` | Viewer → Host | Ask the Host to make its next frame a keyframe after a media gap or decode failure (M8, optional capability) |
 
 Message names are design identifiers. M1 defines exact schemas, optionality,
 canonical encoding, and golden test vectors in `docs/M1_PROTOCOL.md`.
@@ -119,10 +123,12 @@ canonical encoding, and golden test vectors in `docs/M1_PROTOCOL.md`.
 1. The Viewer connects to a discovered Host endpoint.
 2. The transport authenticates the peer and validates the trust record or
    enters the explicit pairing flow. In bootstrap mode, a matching local trust
-   record auto-consents to the challenge but does not remove the two-sided
-   `PairingConfirmation` exchange.
+   record auto-consents after the commit/reveal value is ready but does not
+   remove the two-sided `PairingConfirmation` exchange.
 3. Both sides send `Hello` with role, protocol version, implementation version,
-   and bounded limits.
+   and bounded limits. They may also send a short device name for pairing and
+   status UI; it is untrusted display metadata and never affects identity or
+   authorization.
 4. Both sides send `Capabilities` and compute an intersection. Unsupported
    mandatory capabilities fail with a structured error.
 5. The Host reports whether a selected window and required permissions are
@@ -141,10 +147,15 @@ when policy permits, application identity, bounds/aspect metadata, and
 eligibility state. The identifier is not a permanent security credential.
 
 The Host is authoritative for selection. A Viewer request cannot select a
-window that the Host did not expose, and a stale identifier is rejected. When a
-window closes, changes identity, loses permission, or becomes ineligible, the
-Host sends a state change and disables input before stopping or renegotiating
-the stream.
+window that the Host did not expose, and a stale identifier is rejected. The
+Host refreshes the eligible catalog during an active session so the Viewer can
+switch applications without reconnecting. A requested eligible regular app is
+brought to the Host foreground as a direct consequence of that explicit
+selection; input remains disabled until the Host independently confirms the
+selected window is foreground-eligible. The per-event permission, focus,
+identity, and generation checks remain mandatory. When a window closes,
+changes identity, loses permission, or becomes ineligible, the Host disables
+input before stopping or renegotiating the stream.
 
 ## Video contract
 
@@ -159,10 +170,21 @@ the stream.
   generations. Forward gaps are allowed for discardable `VideoFrame` messages;
   the decoder waits for the next usable keyframe/configuration rather than
   applying stale state.
-- Backpressure: the media queue is bounded and may replace only unsent,
-  discardable video frames before they receive a wire sequence number; it must
-  never grow without limit. `VideoConfig` and recovery keyframes are not
-  discardable.
+- Backpressure: the media queue is bounded and must never grow without limit.
+  When full it discards the incoming delta frame and then skips delta frames
+  until the next keyframe, so a decoder never receives a delta frame whose
+  reference was dropped. A keyframe purges queued delta frames. `VideoConfig`
+  and keyframes are never discarded. A sender that observes a discard forces
+  its next frame to a keyframe.
+- Keyframe request (M8): when both endpoints negotiate the optional
+  `keyframeRequest` capability and the Host authorizes it for the selected
+  window, the Viewer sends `KeyframeRequest` on the control channel after an
+  incoming media sequence gap, a local media-queue discard, or a decode
+  failure. It is a protected message bound to the authorized window
+  generation. The Viewer sends at most one request per 250 ms and the Host
+  independently honors at most one per 250 ms, so a peer cannot force every
+  frame to be a keyframe. Peers without the capability never receive it and
+  recover at the periodic keyframe.
 - Authorization invalidation: unsent protected media is discarded. An admitted
   protected control envelope is replaced by an optional unknown tombstone with
   the same sequence, preserving strict control ordering while ensuring the
@@ -296,7 +318,11 @@ error strings.
 
 ## Liveness, shutdown, and reconnect
 
-- `Ping`/`Pong` supports liveness and controlled timing measurement.
+- `Ping`/`Pong` supports liveness and controlled timing measurement. `Pong`
+  may carry the receiver's monotonic timestamp; when present, the session
+  combines it with the envelope timestamps to form an authenticated
+  four-timestamp clock probe. Older peers may omit that optional field, in
+  which case liveness remains valid but one-way latency is not measured.
 - A missed heartbeat changes the visible session state before input is disabled
   or the connection is closed.
 - `Close` is best effort; transport teardown must still be safe if it is lost.

@@ -7,6 +7,80 @@ final class RemoteProtocolTests: XCTestCase {
         XCTAssertEqual(RemoteProtocolModule.name, "RemoteProtocol")
     }
 
+    func testPairingCommitRevealMessagesRoundTripAndBoundContributions() throws {
+        let contribution = Data(repeating: 0xAB, count: 32)
+        let challenge = PairingChallengeMessage(
+            challengeID: 7,
+            commitment: Data(repeating: 0xCD, count: 32)
+        )
+        let response = PairingResponseMessage(challengeID: 7, commitment: contribution)
+        let verification = PairingVerificationMessage(challengeID: 7, contribution: contribution)
+        let reveal = PairingRevealMessage(challengeID: 7, contribution: contribution)
+
+        XCTAssertEqual(
+            try MessagePayload.decode(
+                messageType: .pairingChallenge,
+                data: try challenge.encoded()
+            ),
+            .pairingChallenge(challenge)
+        )
+        XCTAssertEqual(
+            try MessagePayload.decode(
+                messageType: .pairingResponse,
+                data: try response.encoded()
+            ),
+            .pairingResponse(response)
+        )
+        XCTAssertEqual(
+            try MessagePayload.decode(
+                messageType: .pairingVerification,
+                data: try verification.encoded()
+            ),
+            .pairingVerification(verification)
+        )
+        XCTAssertEqual(
+            try MessagePayload.decode(
+                messageType: .pairingReveal,
+                data: try reveal.encoded()
+            ),
+            .pairingReveal(reveal)
+        )
+        XCTAssertThrowsError(try PairingResponseMessage(challengeID: 7, commitment: Data([1])).encoded())
+        XCTAssertThrowsError(try PairingVerificationMessage(challengeID: 7, contribution: Data([1])).encoded())
+        XCTAssertThrowsError(try PairingRevealMessage(challengeID: 7, contribution: Data([1])).encoded())
+    }
+
+    func testHelloDeviceNameIsOptionalBoundedDisplayMetadata() throws {
+        let namedHello = HelloMessage(
+            protocolVersion: .current,
+            role: .viewer,
+            implementationIdentifier: "MacRemoteApp-Viewer-M10",
+            limits: .default,
+            deviceName: "Apple-Silicon-Viewer"
+        )
+        let decodedNamedHello = try HelloMessage.decode(try namedHello.encoded())
+        XCTAssertEqual(decodedNamedHello, namedHello)
+
+        let legacyHello = HelloMessage(
+            protocolVersion: .current,
+            role: .host,
+            implementationIdentifier: "MacRemoteApp-Host-M10",
+            limits: .default
+        )
+        XCTAssertNil(try HelloMessage.decode(legacyHello.encoded()).deviceName)
+
+        for invalidName in ["", "  ", String(repeating: "x", count: 64), "bad\nname"] {
+            let hello = HelloMessage(
+                protocolVersion: .current,
+                role: .viewer,
+                implementationIdentifier: "MacRemoteApp-Viewer-M10",
+                limits: .default,
+                deviceName: invalidName
+            )
+            XCTAssertThrowsError(try hello.encoded(), "accepted invalid device name: \(invalidName)")
+        }
+    }
+
     func testEnvelopeGoldenVectorAndRoundTrip() throws {
         let envelope = try Envelope(
             channel: .control,
@@ -287,7 +361,8 @@ final class RemoteProtocolTests: XCTestCase {
                 )
             ),
             .error(ErrorMessage(code: .permissionMissing, retryable: true, detailCode: "screen-recording")),
-            .close(CloseMessage(reason: .normal, detailCode: "done"))
+            .close(CloseMessage(reason: .normal, detailCode: "done")),
+            .keyframeRequest(KeyframeRequestMessage(generation: 9, reason: .mediaGap))
         ]
 
         let goldenVectors: [MessageType: String] = [
@@ -309,7 +384,8 @@ final class RemoteProtocolTests: XCTestCase {
             .pong: "010101000000080102030405060708",
             .sessionState: "010101000000010802010000000102030100000001010400000000080000000000000009",
             .error: "0101010000000200050201000000010103000000001073637265656E2D7265636F7264696E67",
-            .close: "010101000000020001020000000004646F6E65"
+            .close: "010101000000020001020000000004646F6E65",
+            .keyframeRequest: "01010100000008000000000000000902010000000101"
         ]
 
         for message in messages {
@@ -340,6 +416,37 @@ final class RemoteProtocolTests: XCTestCase {
         assertProtocolError(.unknownMandatoryField(message: .ping, fieldID: 250)) {
             _ = try PingMessage.decode(mandatoryUnknown)
         }
+    }
+
+    func testKeyframeRequestRejectsUnknownReasonAndUsesControlChannel() throws {
+        XCTAssertEqual(MessageType(rawValue: 0x0017), .keyframeRequest)
+        XCTAssertEqual(MessageType.keyframeRequest.defaultChannel, .control)
+        XCTAssertEqual(Capability(rawValue: 0x0007), .keyframeRequest)
+        var encoded = try KeyframeRequestMessage(generation: 9, reason: .decodeFailure).encoded()
+        encoded[encoded.count - 1] = 0x7F
+        XCTAssertThrowsError(
+            try MessagePayload.decode(messageType: .keyframeRequest, data: encoded)
+        ) { error in
+            XCTAssertEqual(
+                error as? ProtocolError,
+                .invalidFieldValue(message: .keyframeRequest, fieldID: 2)
+            )
+        }
+    }
+
+    func testPongOptionalReceiverTimestampRoundTripsAndLegacyDefaultsToNil() throws {
+        let timestamped = PongMessage(
+            nonce: 7,
+            receiverTimestampNanoseconds: 42
+        )
+        XCTAssertEqual(
+            try PongMessage.decode(timestamped.encoded()),
+            timestamped
+        )
+        XCTAssertNil(
+            try PongMessage.decode(PongMessage(nonce: 7).encoded())
+                .receiverTimestampNanoseconds
+        )
     }
 
     func testMessageMalformedFieldsAndBoundsFailPredictably() throws {
@@ -414,12 +521,12 @@ final class RemoteProtocolTests: XCTestCase {
         )
 
         let unknownOptional = try CapabilitiesMessage.decode(
-            Data(hex: "0101010000000400010007")
+            Data(hex: "0101010000000400010008")
         )
-        XCTAssertEqual(unknownOptional.capabilities, [.unknown(7)])
+        XCTAssertEqual(unknownOptional.capabilities, [.unknown(8)])
         XCTAssertTrue(unknownOptional.mandatoryCapabilities.isEmpty)
-        assertProtocolError(.unknownMandatoryCapability(rawValue: 7)) {
-            _ = try CapabilitiesMessage.decode(Data(hex: "0101010000000400018007"))
+        assertProtocolError(.unknownMandatoryCapability(rawValue: 8)) {
+            _ = try CapabilitiesMessage.decode(Data(hex: "0101010000000400018008"))
         }
         assertProtocolError(.invalidFieldValue(message: .capabilities, fieldID: 1)) {
             _ = try CapabilitiesMessage(capabilities: [.unknown(0)]).encoded()

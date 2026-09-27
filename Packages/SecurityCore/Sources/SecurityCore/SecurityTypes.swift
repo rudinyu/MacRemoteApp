@@ -168,11 +168,16 @@ public actor KeychainTrustStore: TrustStore {
     public static let defaultService = "com.rudinyu.MacRemoteApp.trust"
 
     private let service: String
+    private let keychain: KeychainReference?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
-    public init(service: String = KeychainTrustStore.defaultService) {
+    public init(
+        service: String = KeychainTrustStore.defaultService,
+        keychain: KeychainReference? = nil
+    ) {
         self.service = service
+        self.keychain = keychain
     }
 
     public func trustedPeer(for identifier: String) async throws -> TrustedPeer? {
@@ -184,7 +189,7 @@ public actor KeychainTrustStore: TrustStore {
             kSecReturnData: true
         ]
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = SecItemCopyMatching(scoped(query) as CFDictionary, &result)
         if status == errSecItemNotFound {
             return nil
         }
@@ -209,7 +214,7 @@ public actor KeychainTrustStore: TrustStore {
             kSecReturnData: true
         ]
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = SecItemCopyMatching(scoped(query) as CFDictionary, &result)
         if status == errSecItemNotFound {
             return []
         }
@@ -236,14 +241,14 @@ public actor KeychainTrustStore: TrustStore {
             kSecAttrAccount: peer.identity.identifier
         ]
         let attributes: [CFString: Any] = [kSecValueData: data]
-        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        let updateStatus = SecItemUpdate(scoped(query) as CFDictionary, attributes as CFDictionary)
         if updateStatus == errSecSuccess {
             return
         }
         guard updateStatus == errSecItemNotFound else {
             throw SecurityCoreError.keychain(updateStatus)
         }
-        var addQuery = query
+        var addQuery = scoped(query)
         addQuery[kSecValueData] = data
         let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
         guard addStatus == errSecSuccess else {
@@ -257,8 +262,80 @@ public actor KeychainTrustStore: TrustStore {
             kSecAttrService: service,
             kSecAttrAccount: peerIdentifier
         ]
-        let status = SecItemDelete(query as CFDictionary)
+        let status = SecItemDelete(scoped(query) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw SecurityCoreError.keychain(status)
+        }
+    }
+
+    /// Removes every peer trust record in this exact service namespace and
+    /// returns the number of matching records observed before deletion.
+    ///
+    /// The count query intentionally returns Keychain attributes rather than
+    /// decoding trust-record data. Older or partially written records must
+    /// still be removable during an explicit pairing reset.
+    public func removeAllPairings() throws -> Int {
+        let count = try matchingRecordCount()
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service
+        ]
+        var remaining = count
+        var attempts = 0
+        while remaining > 0 {
+            let status = SecItemDelete(scoped(query) as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw SecurityCoreError.keychain(status)
+            }
+            attempts += 1
+            let updatedCount = try matchingRecordCount()
+            guard updatedCount < remaining else {
+                throw SecurityCoreError.keychain(errSecInternalComponent)
+            }
+            remaining = updatedCount
+            if remaining == 0 {
+                break
+            }
+            guard attempts < 64 else {
+                throw SecurityCoreError.keychain(errSecInternalComponent)
+            }
+        }
+        return count
+    }
+
+    /// Removes every peer trust record in this exact service namespace.
+    ///
+    /// This is used by the signed app's explicit uninstall cleanup path. It
+    /// intentionally does not enumerate or delete unrelated Keychain items.
+    public func removeAll() throws {
+        _ = try removeAllPairings()
+    }
+
+    private func scoped(_ query: [CFString: Any]) -> [CFString: Any] {
+        guard let keychain else { return query }
+        var scopedQuery = query
+        scopedQuery[kSecUseKeychain] = keychain.raw
+        return scopedQuery
+    }
+
+    private func matchingRecordCount() throws -> Int {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecMatchLimit: kSecMatchLimitAll,
+            kSecReturnAttributes: true
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(scoped(query) as CFDictionary, &result)
+        switch status {
+        case errSecItemNotFound:
+            return 0
+        case errSecSuccess:
+            if let records = result as? [Any] {
+                return records.count
+            }
+            return result == nil ? 0 : 1
+        default:
             throw SecurityCoreError.keychain(status)
         }
     }
@@ -293,6 +370,21 @@ public actor KeychainDeviceIdentityProvider {
             )
         }
         return try identity(for: privateKey)
+    }
+
+    /// Removes the legacy/generated device identity in this exact application
+    /// tag. Production M10 cleanup calls this as a compatibility sweep for
+    /// identities created by earlier repository builds.
+    public func removeIdentity() throws {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassKey,
+            kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrApplicationTag: applicationTag
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw SecurityCoreError.keychain(status)
+        }
     }
 
     private func loadPrivateKey() throws -> SecKey? {

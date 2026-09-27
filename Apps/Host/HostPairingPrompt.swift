@@ -6,13 +6,17 @@ import AppKit
 enum HostPairingPrompt {
     static func requestConsent(
         confirmationCode: String,
+        peerName: String?,
         expiresAt: Date
     ) async -> Bool {
         _ = NSApplication.shared
         NSApplication.shared.setActivationPolicy(.accessory)
         NSApplication.shared.activate(ignoringOtherApps: true)
 
-        let controller = PromptController(confirmationCode: confirmationCode)
+        let controller = PromptController(
+            confirmationCode: confirmationCode,
+            peerName: peerName
+        )
         return await withTaskCancellationHandler(operation: {
             await controller.present(expiresAt: expiresAt)
         }, onCancel: {
@@ -31,7 +35,7 @@ enum HostPairingPrompt {
         private var finished = false
         private var cancellationRequested = false
 
-        init(confirmationCode: String) {
+        init(confirmationCode: String, peerName: String?) {
             let parentWindow = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
                 styleMask: [.titled],
@@ -46,11 +50,23 @@ enum HostPairingPrompt {
 
             let alert = NSAlert()
             alert.alertStyle = .informational
-            alert.messageText = "Pair this MacRemoteApp Viewer?"
-            alert.informativeText = "Compare this code with the code shown on the Viewer before allowing the connection:\n\n\(confirmationCode)"
+            let displayName = Self.safePeerName(peerName, fallback: "MacRemoteApp Viewer")
+            alert.messageText = "Pair with \(displayName)?"
+            alert.informativeText = "Compare this code with the code shown on \(displayName) before allowing the connection:\n\n\(confirmationCode)"
             alert.addButton(withTitle: "Allow")
             alert.addButton(withTitle: "Deny")
             self.alert = alert
+        }
+
+        private static func safePeerName(_ value: String?, fallback: String) -> String {
+            guard let value,
+                  !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  value.unicodeScalars.allSatisfy({
+                      !CharacterSet.controlCharacters.contains($0)
+                  }) else {
+                return fallback
+            }
+            return value
         }
 
         func present(expiresAt: Date) async -> Bool {

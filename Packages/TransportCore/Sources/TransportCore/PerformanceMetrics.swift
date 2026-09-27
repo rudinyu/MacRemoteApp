@@ -1,12 +1,19 @@
 import Foundation
 
+public enum ClockSyncProbeDirection: String, Codable, Equatable, Sendable {
+    case hostInitiated
+    case viewerInitiated
+}
+
 /// One authenticated four-timestamp clock probe.
 ///
-/// The Host timestamps `hostSent` and `hostReceived`; the Viewer timestamps
-/// `viewerReceived` and `viewerSent`.  The estimator uses the minimum-RTT
-/// probe as the least-contended offset sample and reports a conservative
-/// residual uncertainty instead of pretending that the hosts share a clock.
+/// The Host and Viewer timestamp the same four events.  The direction records
+/// which peer initiated the exchange because the two valid event orders have
+/// different round-trip formulas. The estimator uses the minimum-RTT probe as
+/// the least-contended offset sample and reports a conservative residual
+/// uncertainty instead of pretending that the hosts share a clock.
 public struct ClockSyncProbe: Codable, Equatable, Sendable {
+    public let direction: ClockSyncProbeDirection
     public let hostSentNanoseconds: UInt64
     public let viewerReceivedNanoseconds: UInt64
     public let viewerSentNanoseconds: UInt64
@@ -16,8 +23,10 @@ public struct ClockSyncProbe: Codable, Equatable, Sendable {
         hostSentNanoseconds: UInt64,
         viewerReceivedNanoseconds: UInt64,
         viewerSentNanoseconds: UInt64,
-        hostReceivedNanoseconds: UInt64
+        hostReceivedNanoseconds: UInt64,
+        direction: ClockSyncProbeDirection = .hostInitiated
     ) {
+        self.direction = direction
         self.hostSentNanoseconds = hostSentNanoseconds
         self.viewerReceivedNanoseconds = viewerReceivedNanoseconds
         self.viewerSentNanoseconds = viewerSentNanoseconds
@@ -26,31 +35,45 @@ public struct ClockSyncProbe: Codable, Equatable, Sendable {
 
     /// Estimated Viewer-minus-Host clock offset for this probe.
     public var offsetNanoseconds: Int64? {
-        guard viewerSentNanoseconds >= viewerReceivedNanoseconds,
-              hostReceivedNanoseconds >= hostSentNanoseconds,
-              let forward = Self.signedDifference(
-                  viewerReceivedNanoseconds,
-                  hostSentNanoseconds
-              ),
-              let reverse = Self.signedDifference(
-                  viewerSentNanoseconds,
-                  hostReceivedNanoseconds
-              ) else {
+        let validOrdering: Bool
+        switch direction {
+        case .hostInitiated:
+            validOrdering = viewerSentNanoseconds >= viewerReceivedNanoseconds &&
+                hostReceivedNanoseconds >= hostSentNanoseconds
+        case .viewerInitiated:
+            validOrdering = viewerReceivedNanoseconds >= viewerSentNanoseconds &&
+                hostSentNanoseconds >= hostReceivedNanoseconds
+        }
+        guard validOrdering,
+              let forward = Self.signedDifference(viewerReceivedNanoseconds, hostSentNanoseconds),
+              let reverse = Self.signedDifference(viewerSentNanoseconds, hostReceivedNanoseconds) else {
             return nil
         }
         return Self.average(forward, reverse)
     }
 
-    /// Round-trip transport time after subtracting time spent on the Viewer.
+    /// Round-trip transport time after subtracting the responder's work.
     public var roundTripNanoseconds: UInt64? {
-        guard hostReceivedNanoseconds >= hostSentNanoseconds,
-              viewerSentNanoseconds >= viewerReceivedNanoseconds else {
-            return nil
+        switch direction {
+        case .hostInitiated:
+            guard hostReceivedNanoseconds >= hostSentNanoseconds,
+                  viewerSentNanoseconds >= viewerReceivedNanoseconds else {
+                return nil
+            }
+            let total = hostReceivedNanoseconds - hostSentNanoseconds
+            let viewerWork = viewerSentNanoseconds - viewerReceivedNanoseconds
+            guard total >= viewerWork else { return nil }
+            return total - viewerWork
+        case .viewerInitiated:
+            guard viewerReceivedNanoseconds >= viewerSentNanoseconds,
+                  hostSentNanoseconds >= hostReceivedNanoseconds else {
+                return nil
+            }
+            let total = viewerReceivedNanoseconds - viewerSentNanoseconds
+            let hostWork = hostSentNanoseconds - hostReceivedNanoseconds
+            guard total >= hostWork else { return nil }
+            return total - hostWork
         }
-        let total = hostReceivedNanoseconds - hostSentNanoseconds
-        let viewerWork = viewerSentNanoseconds - viewerReceivedNanoseconds
-        guard total >= viewerWork else { return nil }
-        return total - viewerWork
     }
 
     private static func signedDifference(_ lhs: UInt64, _ rhs: UInt64) -> Int64? {
@@ -200,6 +223,159 @@ public struct ClockSyncEstimator: Sendable {
     }
 }
 
+/// A presentation timestamp pair retained only inside a bounded production
+/// collector. The pair is never part of the sanitized report; it is kept long
+/// enough to apply the final authenticated clock estimate at snapshot time.
+public struct PresentationTimingSample: Equatable, Sendable {
+    public let captureTimestampNanoseconds: UInt64
+    public let presentedTimestampNanoseconds: UInt64
+
+    public init(
+        captureTimestampNanoseconds: UInt64,
+        presentedTimestampNanoseconds: UInt64
+    ) {
+        self.captureTimestampNanoseconds = captureTimestampNanoseconds
+        self.presentedTimestampNanoseconds = presentedTimestampNanoseconds
+    }
+}
+
+/// Sanitized, bounded production measurement output. It contains timing
+/// aggregates and counts only; raw capture/presentation timestamps are not
+/// exposed so a release run cannot accidentally persist a frame trace.
+public struct PresentationSampleSnapshot: Codable, Equatable, Sendable {
+    public let presentedFrameCount: Int
+    public let warmupFrames: Int
+    public let retainedSampleCount: Int
+    public let droppedSampleCount: Int
+    public let validFrameSamples: Int
+    public let captureToDisplay: PercentileSummary?
+    public let clockSync: ClockSyncEstimate?
+
+    public init(
+        presentedFrameCount: Int,
+        warmupFrames: Int,
+        retainedSampleCount: Int,
+        droppedSampleCount: Int,
+        validFrameSamples: Int,
+        captureToDisplay: PercentileSummary?,
+        clockSync: ClockSyncEstimate?
+    ) {
+        self.presentedFrameCount = presentedFrameCount
+        self.warmupFrames = warmupFrames
+        self.retainedSampleCount = retainedSampleCount
+        self.droppedSampleCount = droppedSampleCount
+        self.validFrameSamples = validFrameSamples
+        self.captureToDisplay = captureToDisplay
+        self.clockSync = clockSync
+    }
+
+    public var oneWayMeasurementEligible: Bool {
+        guard let clockSync else { return false }
+        return clockSync.oneWayMeasurementEligible
+    }
+}
+
+/// Collects actual Viewer drawable-presentation timestamps for the M8/M10
+/// latency boundary. It deliberately keeps a small, fixed number of raw
+/// timing pairs and converts them only with an authenticated clock estimate.
+/// If the estimate never meets the uncertainty bound, the snapshot reports no
+/// one-way samples instead of manufacturing a latency result.
+public struct BoundedPresentationSampleCollector: Sendable {
+    public static let defaultWarmupFrameCount = 60
+    public static let defaultMaximumSamples = 10_000
+
+    private let warmupFrameCount: Int
+    private let maximumSamples: Int
+    private var presentedFrameCountValue = 0
+    private var droppedSampleCountValue = 0
+    private var samples: [PresentationTimingSample] = []
+
+    public init(
+        warmupFrameCount: Int = Self.defaultWarmupFrameCount,
+        maximumSamples: Int = Self.defaultMaximumSamples
+    ) {
+        self.warmupFrameCount = max(0, warmupFrameCount)
+        self.maximumSamples = max(1, maximumSamples)
+        self.samples.reserveCapacity(min(self.maximumSamples, 256))
+    }
+
+    public var presentedFrameCount: Int { presentedFrameCountValue }
+    public var retainedSampleCount: Int { samples.count }
+    public var droppedSampleCount: Int { droppedSampleCountValue }
+
+    public mutating func append(
+        captureTimestampNanoseconds: UInt64,
+        presentedTimestampNanoseconds: UInt64
+    ) {
+        let ordinal = presentedFrameCountValue
+        if presentedFrameCountValue < Int.max {
+            presentedFrameCountValue += 1
+        }
+        guard ordinal >= warmupFrameCount else { return }
+        guard samples.count < maximumSamples else {
+            if droppedSampleCountValue < Int.max {
+                droppedSampleCountValue += 1
+            }
+            return
+        }
+        samples.append(
+            PresentationTimingSample(
+                captureTimestampNanoseconds: captureTimestampNanoseconds,
+                presentedTimestampNanoseconds: presentedTimestampNanoseconds
+            )
+        )
+    }
+
+    public mutating func reset() {
+        presentedFrameCountValue = 0
+        droppedSampleCountValue = 0
+        samples.removeAll(keepingCapacity: true)
+    }
+
+    public func snapshot(clockSync: ClockSyncEstimate?) -> PresentationSampleSnapshot {
+        var latencies: [UInt64] = []
+        if let clockSync, clockSync.oneWayMeasurementEligible {
+            latencies.reserveCapacity(samples.count)
+            for sample in samples {
+                guard let latency = Self.latency(
+                    for: sample,
+                    offsetNanoseconds: clockSync.offsetNanoseconds
+                ) else { continue }
+                latencies.append(latency)
+            }
+        }
+        return PresentationSampleSnapshot(
+            presentedFrameCount: presentedFrameCountValue,
+            warmupFrames: warmupFrameCount,
+            retainedSampleCount: samples.count,
+            droppedSampleCount: droppedSampleCountValue,
+            validFrameSamples: latencies.count,
+            captureToDisplay: PercentileSummary(samples: latencies),
+            clockSync: clockSync
+        )
+    }
+
+    private static func latency(
+        for sample: PresentationTimingSample,
+        offsetNanoseconds: Int64
+    ) -> UInt64? {
+        guard sample.presentedTimestampNanoseconds <= UInt64(Int64.max),
+              sample.captureTimestampNanoseconds <= UInt64(Int64.max) else {
+            return nil
+        }
+        let presented = Int64(sample.presentedTimestampNanoseconds)
+        let capture = Int64(sample.captureTimestampNanoseconds)
+        let (hostAligned, alignmentOverflow) = presented
+            .subtractingReportingOverflow(offsetNanoseconds)
+        let (latency, subtractionOverflow) = hostAligned
+            .subtractingReportingOverflow(capture)
+        guard !alignmentOverflow, !subtractionOverflow, latency >= 0 else {
+            return nil
+        }
+        return UInt64(latency)
+    }
+}
+
 public struct PercentileSummary: Codable, Equatable, Sendable {
     public let count: Int
     public let minimumNanoseconds: UInt64
@@ -321,5 +497,90 @@ public struct PerformanceRunReport: Codable, Equatable, Sendable {
         self.maximumMediaQueueDepth = maximumMediaQueueDepth
         self.resources = resources
         self.verdict = verdict
+    }
+}
+
+/// Bounded interval collector for one pipeline stage whose start and end are
+/// taken on the same monotonic clock, so no clock synchronization is needed.
+/// Only interval lengths are retained, never raw timestamps.
+public struct BoundedStageLatencyCollector: Sendable {
+    public static let defaultWarmupSampleCount = 60
+    public static let defaultMaximumSamples = 10_000
+
+    private let warmupSampleCount: Int
+    private let maximumSamples: Int
+    private var observedCount = 0
+    private var intervals: [UInt64] = []
+
+    public init(
+        warmupSampleCount: Int = Self.defaultWarmupSampleCount,
+        maximumSamples: Int = Self.defaultMaximumSamples
+    ) {
+        self.warmupSampleCount = max(0, warmupSampleCount)
+        self.maximumSamples = max(1, maximumSamples)
+    }
+
+    public var retainedSampleCount: Int { intervals.count }
+
+    /// Ignores an interval whose end precedes its start.
+    public mutating func append(startNanoseconds: UInt64, endNanoseconds: UInt64) {
+        guard endNanoseconds >= startNanoseconds else { return }
+        let ordinal = observedCount
+        if observedCount < Int.max {
+            observedCount += 1
+        }
+        guard ordinal >= warmupSampleCount, intervals.count < maximumSamples else { return }
+        intervals.append(endNanoseconds - startNanoseconds)
+    }
+
+    public mutating func reset() {
+        observedCount = 0
+        intervals.removeAll(keepingCapacity: true)
+    }
+
+    public func summary() -> PercentileSummary? {
+        PercentileSummary(samples: intervals)
+    }
+}
+
+/// The p95 latency budget for each pipeline stage. The stages sum to the
+/// V1 end-to-end target, so a miss can be attributed to one stage.
+///
+/// - `hostCaptureToSend`: capture arrival to wire-queue admission on the
+///   Host clock (encode plus Host scheduling).
+/// - `networkTransit`: wire admission to Viewer receipt. It spans two clocks
+///   and is not measured directly; it is the remainder of the end-to-end
+///   figure.
+/// - `viewerReceiveToPresent`: Viewer receipt to drawable presentation on
+///   the Viewer clock (decode plus waiting for the display refresh).
+public struct LatencyBudget: Codable, Equatable, Sendable {
+    public let hostCaptureToSendNanoseconds: UInt64
+    public let networkTransitNanoseconds: UInt64
+    public let viewerReceiveToPresentNanoseconds: UInt64
+
+    public static let v1 = LatencyBudget(
+        hostCaptureToSendNanoseconds: 12_000_000,
+        networkTransitNanoseconds: 18_000_000,
+        viewerReceiveToPresentNanoseconds: 20_000_000
+    )
+
+    public init(
+        hostCaptureToSendNanoseconds: UInt64,
+        networkTransitNanoseconds: UInt64,
+        viewerReceiveToPresentNanoseconds: UInt64
+    ) {
+        self.hostCaptureToSendNanoseconds = hostCaptureToSendNanoseconds
+        self.networkTransitNanoseconds = networkTransitNanoseconds
+        self.viewerReceiveToPresentNanoseconds = viewerReceiveToPresentNanoseconds
+    }
+
+    public var endToEndNanoseconds: UInt64 {
+        hostCaptureToSendNanoseconds + networkTransitNanoseconds + viewerReceiveToPresentNanoseconds
+    }
+
+    /// Returns `nil` when the stage has no samples, otherwise whether its p95
+    /// is within the budget.
+    public static func isWithinBudget(_ summary: PercentileSummary?, budget: UInt64) -> Bool? {
+        summary.map { $0.p95Nanoseconds <= budget }
     }
 }

@@ -40,7 +40,13 @@ The production path now wires window discovery/selection, ScreenCaptureKit,
 H.264 encode/decode, Metal presentation, authenticated mouse/keyboard input,
 and opt-in text clipboard synchronization. The Viewer presents the eligible
 Host windows in a picker so a system/helper window is not selected silently.
-The interactive pairing UI is implemented with Keychain trust reuse. The
+The interactive pairing UI is implemented with Keychain trust reuse. Host and
+Viewer use separate identity labels and peer-trust services so they can also
+be tested on the same Mac without sharing a private key. The Host status menu
+and Viewer window provide role-specific peer-trust reset controls, and the
+Host discovery name can be changed without rotating its TLS identity. An
+upgrade from the previous shared-trust namespace requires one fresh pairing;
+legacy Keychain entries are left untouched by the upgrade. The
 actual Intel-to-Apple-Silicon run and OS Accessibility/input evidence remain
 environment gates until they are executed on both Macs.
 
@@ -166,9 +172,15 @@ role-specific helpers only install a verified app into `~/Applications` or
 move that exact per-user app to the Trash; the DMG also includes the User
 Guide, How to Debug, and How to Collect Debug Logs text files. Users may drag
 the app onto the DMG's `Applications` drop target to install into their own
-`~/Applications`, or use the optional helper. The DMG uninstall helper only moves a
-Developer ID/Gatekeeper-accepted, exact-identity per-user app to the Trash;
-it refuses ad-hoc or modified testing bundles. To remove ad-hoc testing residue,
+`~/Applications`, or use the optional helper. The DMG uninstall helper verifies
+the selected Developer ID/Gatekeeper-accepted app and any installed opposite
+role, quits installed MacRemoteApp roles, and asks each role's signed app to
+clear its own Keychain trust and generated identity before moving only the
+selected app to the user's Trash. It also clears both roles' exact per-user
+app-state paths. It refuses ad-hoc or modified testing bundles and does not
+reset macOS TCC grants; use System Settings when a fresh privacy decision is
+needed. Legacy shared Keychain records from earlier builds are preserved and
+not used by the new role-specific runtime. To remove ad-hoc testing residue,
 run `scripts/uninstall-device-apps.sh --clean-testing --yes`; add
 `--identities "$HOME/MacRemoteApp-identities"` when that disposable M2
 identity directory and its matching imported Keychain identities should also
@@ -177,7 +189,9 @@ opposite device's `.cer`, export `MACREMOTEAPP_P12_PASSWORD` for the cleanup
 run so the local certificate fingerprint can be checked without printing the
 password. If that verification cannot be completed, the identity directory is
 preserved for a safe retry. Without `--identities`, imported M2 Keychain
-identities are preserved. This preserves `build/beta/`,
+identities are preserved. The DMG uninstall is intentionally a full
+MacRemoteApp reset: if the other role remains installed, it must enroll a new
+local identity and pair again. This preserves `build/beta/`,
 `build/rc/`, and `build/release/`. The packaging source icon is
 [`Resources/MacRemoteAppIcon.svg`](Resources/MacRemoteAppIcon.svg); generated
 `.icns`, app bundles, and test identities stay outside version control.
@@ -194,7 +208,9 @@ release payload and never submits credentials or uploads artifacts.
 
 The installed Host and Viewer binaries start their production runtime when
 launched without debug-only smoke arguments. On first launch, each endpoint
-creates or reuses its own P-256 TLS identity in the login Keychain. No
+creates or reuses a role-specific P-256 TLS identity in the login Keychain.
+The identity labels are `MacRemoteApp.host` and `MacRemoteApp.viewer`; peer
+trust is kept in a separate Keychain service for each role. No
 `host.p12` or `viewer.p12` is required for the production path. On the first
 connection, omit `MACREMOTEAPP_PEER_CERT` to use the interactive Host/Viewer
 pairing flow:
@@ -204,10 +220,16 @@ open ~/Applications/MacRemoteApp-Host.app
 open ~/Applications/MacRemoteApp-Viewer.app
 ```
 
-The Host displays a one-time code and asks for local approval; the Viewer
-displays the same code and asks the operator to enter it. Both endpoints store
-the resulting peer identity in the Keychain only after local and remote
-consent complete. The Host requests Screen Recording before waiting for Bonjour
+The Host and Viewer complete a MacKVM-style two-sided commit/reveal exchange:
+both endpoints commit to fresh random contributions before either reveal, then
+derive the same six-digit one-time comparison code independently. The Host
+displays it and asks for local approval; the Viewer displays the same code and
+asks the operator to compare it and select **Accept** or **Deny**. Neither side
+creates new trust from remote approval alone: each endpoint stores the peer
+identity in the Keychain only after its local consent policy and the matching
+remote consent complete. A matching trust already saved on one endpoint may
+satisfy that endpoint's prior approval. The Host
+requests Screen Recording before waiting for Bonjour
 readiness, then starts Bonjour to trigger Local Network consent. It requests
 Accessibility/post-event input permission from its signed app bundle only
 after a Viewer negotiates input and the operator selects a window; without

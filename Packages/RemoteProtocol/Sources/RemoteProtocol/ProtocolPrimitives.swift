@@ -50,6 +50,9 @@ public enum MessageType: Equatable, Hashable, Sendable {
     case capabilities
     case pairingChallenge
     case pairingConfirmation
+    case pairingResponse
+    case pairingVerification
+    case pairingReveal
     case sessionAuthorize
     case windowList
     case windowSelection
@@ -65,6 +68,7 @@ public enum MessageType: Equatable, Hashable, Sendable {
     case sessionState
     case error
     case close
+    case keyframeRequest
     case unknown(UInt16)
 
     public init(rawValue: UInt16) {
@@ -73,6 +77,9 @@ public enum MessageType: Equatable, Hashable, Sendable {
         case 0x0002: self = .capabilities
         case 0x0003: self = .pairingChallenge
         case 0x0004: self = .pairingConfirmation
+        case 0x0014: self = .pairingResponse
+        case 0x0015: self = .pairingVerification
+        case 0x0016: self = .pairingReveal
         case 0x0005: self = .sessionAuthorize
         case 0x0006: self = .windowList
         case 0x0007: self = .windowSelection
@@ -88,6 +95,7 @@ public enum MessageType: Equatable, Hashable, Sendable {
         case 0x0010: self = .sessionState
         case 0x0011: self = .error
         case 0x0012: self = .close
+        case 0x0017: self = .keyframeRequest
         default: self = .unknown(rawValue)
         }
     }
@@ -98,6 +106,9 @@ public enum MessageType: Equatable, Hashable, Sendable {
         case .capabilities: return 0x0002
         case .pairingChallenge: return 0x0003
         case .pairingConfirmation: return 0x0004
+        case .pairingResponse: return 0x0014
+        case .pairingVerification: return 0x0015
+        case .pairingReveal: return 0x0016
         case .sessionAuthorize: return 0x0005
         case .windowList: return 0x0006
         case .windowSelection: return 0x0007
@@ -113,6 +124,7 @@ public enum MessageType: Equatable, Hashable, Sendable {
         case .sessionState: return 0x0010
         case .error: return 0x0011
         case .close: return 0x0012
+        case .keyframeRequest: return 0x0017
         case let .unknown(rawValue): return rawValue
         }
     }
@@ -139,6 +151,9 @@ public enum Capability: Equatable, Hashable, Sendable {
     case keyboardInput
     case textClipboard
     case pingPong
+    /// Optional: the Viewer may send `KeyframeRequest`. Peers that do not
+    /// advertise it never receive the message.
+    case keyframeRequest
     case unknown(UInt16)
 
     public init(rawValue: UInt16) {
@@ -149,6 +164,7 @@ public enum Capability: Equatable, Hashable, Sendable {
         case 0x0004: self = .keyboardInput
         case 0x0005: self = .textClipboard
         case 0x0006: self = .pingPong
+        case 0x0007: self = .keyframeRequest
         default: self = .unknown(rawValue)
         }
     }
@@ -161,9 +177,20 @@ public enum Capability: Equatable, Hashable, Sendable {
         case .keyboardInput: return 0x0004
         case .textClipboard: return 0x0005
         case .pingPong: return 0x0006
+        case .keyframeRequest: return 0x0007
         case let .unknown(rawValue): return rawValue
         }
     }
+}
+
+/// Why a Viewer asks the Host for a new keyframe. Diagnostic only; the Host
+/// treats every reason the same way.
+public enum KeyframeRequestReason: UInt8, Equatable, Hashable, Sendable {
+    /// A media sequence gap or local queue discard; delta frames are being
+    /// skipped until the next keyframe.
+    case mediaGap = 1
+    /// The decoder rejected a frame.
+    case decodeFailure = 2
 }
 
 /// The reason attached to a clipboard offer acknowledgement is deliberately

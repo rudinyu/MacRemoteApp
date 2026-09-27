@@ -3,8 +3,9 @@ import RemoteProtocol
 
 /// A single-consumer bounded stream used by the transport implementations.
 ///
-/// Control messages are never evicted. When the media limit is reached, only
-/// an older discardable video frame may be replaced. The queue is deliberately
+/// Control messages are never evicted. Media follows the keyframe-aware
+/// policy in `KeyframeAwareMediaAdmission`, so a discarded delta frame never
+/// leaves later delta frames referencing a missing picture. The queue is deliberately
 /// implemented outside AsyncThrowingStream so the per-channel limits remain
 /// enforceable even when the consumer is slow.
 public struct EnvelopeStream: AsyncSequence, Sendable {
@@ -40,6 +41,7 @@ internal final class EnvelopeStreamStorage: @unchecked Sendable {
     private let maxControlFrames: Int
     private let maxMediaFrames: Int
     private var queue: [Envelope] = []
+    private var mediaAdmission = KeyframeAwareMediaAdmission()
     private var waiter: CheckedContinuation<Envelope?, Error>?
     private var isFinished = false
     private var terminalError: Error?
@@ -98,16 +100,23 @@ internal final class EnvelopeStreamStorage: @unchecked Sendable {
             }
             result = .queued
         case .media:
-            if mediaCountLocked >= maxMediaFrames {
-                guard envelope.isDiscardableMedia,
-                      let discardableIndex = queue.firstIndex(where: { $0.isDiscardableMedia }) else {
-                    lock.unlock()
-                    throw TransportError.mediaBackpressure
-                }
-                queue.remove(at: discardableIndex)
-                result = .replacedMedia
-            } else {
-                result = .queued
+            let decision: KeyframeAwareMediaAdmission.Decision
+            do {
+                decision = try mediaAdmission.admit(
+                    envelope.mediaAdmissionKind,
+                    into: &queue,
+                    maxMediaCount: maxMediaFrames,
+                    isMedia: { $0.channel == .media },
+                    kindOf: \.mediaAdmissionKind
+                )
+            } catch {
+                lock.unlock()
+                throw error
+            }
+            result = decision.awaitingKeyframe ? .replacedMedia : .queued
+            guard decision.admitIncoming else {
+                lock.unlock()
+                return result
             }
         }
 
@@ -156,10 +165,14 @@ internal final class EnvelopeStreamStorage: @unchecked Sendable {
             // protected control envelope with an optional tombstone so local
             // sequence validation can continue without exposing its payload.
             // Protected media is best-effort and can be purged outright.
+            let mediaCount = mediaCountLocked
             queue = queue.map {
                 $0.authorizationInvalidationTombstone ?? $0
             }.filter {
                 !$0.isProtectedSessionMessage || $0.channel == .control
+            }
+            if mediaCountLocked != mediaCount {
+                mediaAdmission.noteMediaRemoved()
             }
         }
     }

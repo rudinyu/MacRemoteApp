@@ -30,9 +30,16 @@ same-session one-window replacement, capture, H.264/Metal presentation,
 authenticated input, and opt-in text clipboard delivery. Host
 permission/listener failures are recoverable from a resident status-menu
 action, Bonjour readiness includes service registration, and the Metal path
-reports the actual drawable presentation boundary. M10's deterministic final
+reports the actual drawable presentation boundary. M10 now also refreshes the
+eligible window catalog during active sessions, foregrounds an explicitly
+selected regular app while retaining per-event input gates, exposes truthful
+Viewer connection-button states, and exchanges short hostnames as display-only
+Hello metadata. M10's deterministic final
 gate, interactive pairing UI, Keychain trust reuse, and acceptance checklist
-are implemented, while the physical two-machine acceptance and
+are implemented, including explicit trust reset controls on both endpoints
+and editable Host discovery naming. The production roles now use separate
+Keychain identity labels and peer-trust services, with signed per-role cleanup
+for uninstall. The physical two-machine acceptance and
 clock-synchronized performance report remain unverified on this Apple Silicon
 workspace. The intentionally deferred capabilities are listed in
 `docs/POST_V1_ROADMAP.md`.
@@ -178,8 +185,8 @@ or WebRTC.
 - Authorization records bind the session generation, selected-window
   generation, and enabled capabilities; protected delivery checks that scope.
 - Control and media queue ownership is isolated enough to prioritize control;
-  replacing an unsent discardable media frame may create an observable forward
-  media gap, but never drops required config/recovery frames or accepts a
+  discarding delta media frames until the next keyframe may create an
+  observable forward media gap, but never drops required config/recovery frames or accepts a
   non-increasing media sequence.
 - Trust records and revocation behavior are documented and tested.
 
@@ -486,7 +493,8 @@ No new product feature or scope expansion under the label of hardening.
 The production Host/Viewer composition, deterministic final gate, role
 commands, sanitized evidence boundary, and operator acceptance checklist are
 implemented in `docs/M10_ACCEPTANCE.md`. The current production pilot uses a
-local Keychain identity on each endpoint, TLS bootstrap, two-sided code
+role-specific local Keychain identity and peer-trust service on each endpoint,
+TLS bootstrap, two-sided code
 confirmation, and an explicit Viewer window picker; an optional peer
 certificate remains available only for pinned migration and diagnostics. The
 actual Intel Host to Apple Silicon Viewer run cannot be claimed until it is

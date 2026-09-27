@@ -113,7 +113,7 @@ public actor NetworkFramedTransport: SessionTransport {
             throw TransportError.alreadyClosed
         }
         let result = try await outgoing.enqueue(envelope)
-        if result == .replacedOldestMedia {
+        if result == .discardedMedia {
             await pump()
             return .replacedMedia
         }

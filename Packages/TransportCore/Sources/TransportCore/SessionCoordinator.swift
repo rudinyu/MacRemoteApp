@@ -58,6 +58,7 @@ public struct SessionConfiguration: Sendable {
 
     public let role: DeviceRole
     public let implementationIdentifier: String
+    public let deviceName: String?
     public let limits: ProtocolLimits
     public let capabilities: Set<Capability>
     public let mandatoryCapabilities: Set<Capability>
@@ -72,6 +73,7 @@ public struct SessionConfiguration: Sendable {
     public init(
         role: DeviceRole,
         implementationIdentifier: String,
+        deviceName: String? = nil,
         limits: ProtocolLimits = .default,
         capabilities: Set<Capability>,
         mandatoryCapabilities: Set<Capability> = [],
@@ -85,6 +87,7 @@ public struct SessionConfiguration: Sendable {
     ) {
         self.role = role
         self.implementationIdentifier = implementationIdentifier
+        self.deviceName = deviceName
         self.limits = limits
         self.capabilities = capabilities
         self.mandatoryCapabilities = mandatoryCapabilities
@@ -101,6 +104,7 @@ public struct SessionConfiguration: Sendable {
 public struct SessionSnapshot: Equatable, Sendable {
     public let state: SessionState
     public let peerIdentity: PeerIdentity?
+    public let peerDeviceName: String?
     public let negotiatedCapabilities: Set<Capability>
     public let authorized: Bool
     public let authorizedWindowGeneration: UInt64?
@@ -116,6 +120,7 @@ public struct SessionSnapshot: Equatable, Sendable {
     public init(
         state: SessionState,
         peerIdentity: PeerIdentity?,
+        peerDeviceName: String? = nil,
         negotiatedCapabilities: Set<Capability>,
         authorized: Bool,
         authorizedWindowGeneration: UInt64?,
@@ -130,6 +135,7 @@ public struct SessionSnapshot: Equatable, Sendable {
     ) {
         self.state = state
         self.peerIdentity = peerIdentity
+        self.peerDeviceName = peerDeviceName
         self.negotiatedCapabilities = negotiatedCapabilities
         self.authorized = authorized
         self.authorizedWindowGeneration = authorizedWindowGeneration
@@ -161,6 +167,11 @@ public struct SessionInputAdmissionToken: Equatable, Sendable {
 public actor SessionCoordinator {
     private static let incomingControlMessageCapacity = 64
     private static let incomingMediaMessageCapacity = 3
+    private static let maximumClockSyncProbes = 64
+    /// Minimum spacing between Viewer keyframe requests. One forced keyframe
+    /// recovers every gap that occurred before it, so closer requests only
+    /// cost bandwidth.
+    static let keyframeRequestMinimumIntervalNanoseconds: UInt64 = 250_000_000
 
     private static let protectedMessageTypes: Set<MessageType> = [
         .windowList,
@@ -171,12 +182,14 @@ public actor SessionCoordinator {
         .inputEvent,
         .clipboardOffer,
         .clipboardText,
-        .clipboardAcknowledgement
+        .clipboardAcknowledgement,
+        .keyframeRequest
     ]
 
     private static let windowBoundCapabilities: Set<Capability> = [
         .windowSelection,
         .h264Video,
+        .keyframeRequest,
         .mouseInput,
         .keyboardInput
     ]
@@ -186,6 +199,7 @@ public actor SessionCoordinator {
         .capabilities,
         .pairingChallenge,
         .pairingConfirmation,
+        .pairingVerification,
         .sessionAuthorize,
         .windowList,
         .streamConfig,
@@ -204,9 +218,12 @@ public actor SessionCoordinator {
     private static let viewerOutboundMessageTypes: Set<MessageType> = [
         .hello,
         .capabilities,
+        .pairingResponse,
+        .pairingReveal,
         .pairingConfirmation,
         .windowSelection,
         .inputEvent,
+        .keyframeRequest,
         .clipboardOffer,
         .clipboardText,
         .clipboardAcknowledgement,
@@ -220,9 +237,12 @@ public actor SessionCoordinator {
     private static let hostInboundMessageTypes: Set<MessageType> = [
         .hello,
         .capabilities,
+        .pairingResponse,
+        .pairingReveal,
         .pairingConfirmation,
         .windowSelection,
         .inputEvent,
+        .keyframeRequest,
         .clipboardOffer,
         .clipboardText,
         .clipboardAcknowledgement,
@@ -237,6 +257,7 @@ public actor SessionCoordinator {
         .hello,
         .capabilities,
         .pairingChallenge,
+        .pairingVerification,
         .pairingConfirmation,
         .sessionAuthorize,
         .windowList,
@@ -268,12 +289,18 @@ public actor SessionCoordinator {
     private var authorized = false
     private var authorizedWindowGeneration: UInt64?
     private var authorizedCapabilities: Set<Capability> = []
+    private var lastKeyframeRequestNanoseconds: UInt64?
     private var helloSent = false
     private var capabilitiesSent = false
     private var capabilitiesSendInFlight = false
     private var incomingSequence: [Channel: UInt64] = [:]
     private var outgoingSequence: [Channel: UInt64] = [:]
-    private var pendingPing: (nonce: UInt64, sentAt: Date)?
+    private var pendingPing: (
+        nonce: UInt64,
+        sentAt: Date,
+        sentTimestampNanoseconds: UInt64
+    )?
+    private var clockSyncEstimator = ClockSyncEstimator()
     private var nextPingNonce: UInt64 = 1
     private var lastHeartbeatAt: Date?
     private var reconnectGeneration: UInt64 = 0
@@ -320,6 +347,7 @@ public actor SessionCoordinator {
         SessionSnapshot(
             state: state,
             peerIdentity: peerIdentity,
+            peerDeviceName: peerHello?.deviceName,
             negotiatedCapabilities: negotiatedCapabilities,
             authorized: authorized,
             authorizedWindowGeneration: authorizedWindowGeneration,
@@ -339,6 +367,13 @@ public actor SessionCoordinator {
     /// explicit pairing denial from a transient transport failure.
     public func failureReason() -> SessionError? {
         lastFailure
+    }
+
+    /// Returns the bounded authenticated clock estimate collected from the
+    /// session's Ping/Pong exchanges. A nil or ineligible estimate must never
+    /// be used to label one-way production latency as verified.
+    public func clockSyncEstimate() -> ClockSyncEstimate? {
+        clockSyncEstimator.estimate()
     }
 
     /// Drops input records that were buffered before a local Host safety
@@ -395,18 +430,14 @@ public actor SessionCoordinator {
                     // complete silently after both sides exchange the proof.
                     state = .pairingRequired
                     if configuration.role == .host {
-                        let challenge = try await sendPairingChallenge(
+                        // The Host's local trust may auto-consent, but it must
+                        // wait for the Viewer contribution and the Host reveal
+                        // before the final code exists.
+                        _ = try await sendPairingChallenge(
                             to: identity,
                             receiveGeneration: startReceiveGeneration,
                             reconnectGeneration: startReconnectGeneration,
                             authorizationGeneration: startAuthorizationGeneration
-                        )
-                        try await confirmPairing(
-                            confirmationCode: challenge.confirmationCode,
-                            accepted: true,
-                            displayName: configuration.role == .host
-                                ? "MacRemoteApp Viewer"
-                                : "MacRemoteApp Host"
                         )
                     }
                 case .pairingRequired:
@@ -478,6 +509,7 @@ public actor SessionCoordinator {
         guard let challenge = await pairingCoordinator.pendingChallenge() else {
             throw SessionError.pairingFailed
         }
+        let trustedPeerDisplayName = displayName ?? remotePeerDisplayName
         guard isCurrent(
             receiveGeneration: sessionGeneration,
             reconnectGeneration: sessionReconnectGeneration,
@@ -492,7 +524,7 @@ public actor SessionCoordinator {
                 remoteIdentity: peerIdentity,
                 confirmationCode: "",
                 accepted: false,
-                displayName: displayName
+                displayName: trustedPeerDisplayName
             )
             guard isCurrent(
                 receiveGeneration: sessionGeneration,
@@ -533,7 +565,7 @@ public actor SessionCoordinator {
                 remoteIdentity: peerIdentity,
                 confirmationCode: confirmationCode,
                 accepted: true,
-                displayName: displayName
+                displayName: trustedPeerDisplayName
             )
         } catch {
             guard isCurrent(
@@ -730,21 +762,23 @@ public actor SessionCoordinator {
         outboundMutex.release()
     }
 
+    /// Returns `.replacedMedia` when the keyframe-aware media queue discarded
+    /// video; a media sender should then force its next frame to a keyframe.
+    @discardableResult
     public func send(
         _ payload: MessagePayload,
         flags: EnvelopeFlags = [],
         expectedAuthorizationGeneration: UInt64? = nil,
         localAdmission: (@MainActor @Sendable () -> Bool)? = nil
-    ) async throws {
+    ) async throws -> TransportSendResult {
         try validateMessageDirection(for: payload.messageType, incoming: false)
         try validateAuthorization(for: payload)
         guard let localAdmission else {
-            _ = try await sendUnrestricted(
+            return try await sendUnrestricted(
                 payload,
                 flags: flags,
                 expectedAuthorizationGeneration: expectedAuthorizationGeneration
             )
-            return
         }
 
         let operationReceiveGeneration = receiveGeneration
@@ -767,13 +801,44 @@ public actor SessionCoordinator {
             throw SessionError.authorizationChanged
         }
         try validateAuthorization(for: payload)
-        _ = try await sendUnrestrictedAfterAdmission(
+        return try await sendUnrestrictedAfterAdmission(
             payload,
             flags: flags,
             operationGeneration: operationReconnectGeneration,
             operationReceiveGeneration: operationReceiveGeneration,
             operationAuthorizationGeneration: operationAuthorizationGeneration
         )
+    }
+
+    /// Viewer only: asks the Host to encode its next frame as a keyframe.
+    ///
+    /// Best-effort. Returns `false` without sending when the Host did not
+    /// authorize `Capability.keyframeRequest` for the current window, when a
+    /// request was sent within `keyframeRequestMinimumIntervalNanoseconds`,
+    /// or when the send fails. A media sequence gap or a local media discard
+    /// triggers this automatically; the app calls it after a decode failure.
+    @discardableResult
+    public func requestKeyframe(reason: KeyframeRequestReason) async -> Bool {
+        guard configuration.role == .viewer,
+              authorized,
+              authorizedCapabilities.contains(.keyframeRequest),
+              let generation = authorizedWindowGeneration else {
+            return false
+        }
+        let now = DispatchTime.now().uptimeNanoseconds
+        if let last = lastKeyframeRequestNanoseconds,
+           now &- last < Self.keyframeRequestMinimumIntervalNanoseconds {
+            return false
+        }
+        lastKeyframeRequestNanoseconds = now
+        do {
+            _ = try await sendUnrestricted(
+                .keyframeRequest(KeyframeRequestMessage(generation: generation, reason: reason))
+            )
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// Runs the native pasteboard commit while the outbound authorization
@@ -953,7 +1018,9 @@ public actor SessionCoordinator {
         capabilitiesSendInFlight = false
         incomingSequence.removeAll()
         outgoingSequence.removeAll()
+        lastKeyframeRequestNanoseconds = nil
         pendingPing = nil
+        clockSyncEstimator = ClockSyncEstimator()
         lastHeartbeatAt = nil
         outboundMutex.release()
         try await start()
@@ -986,9 +1053,12 @@ public actor SessionCoordinator {
         ) else {
             throw SessionError.reconnectRequired
         }
+        guard let commitment = challenge.commitment, commitment.count == PairingVerificationCode.commitmentByteCount else {
+            throw SessionError.pairingFailed
+        }
         let message = PairingChallengeMessage(
             challengeID: challenge.challengeID,
-            confirmationCode: challenge.confirmationCode
+            commitment: commitment
         )
         _ = try await sendUnrestricted(
             .pairingChallenge(message),
@@ -1024,7 +1094,8 @@ public actor SessionCoordinator {
             protocolVersion: .current,
             role: configuration.role,
             implementationIdentifier: configuration.implementationIdentifier,
-            limits: configuration.limits
+            limits: configuration.limits,
+            deviceName: configuration.deviceName
         )
         _ = try await sendUnrestricted(
             .hello(hello),
@@ -1093,7 +1164,8 @@ public actor SessionCoordinator {
         flags: EnvelopeFlags = [],
         expectedReceiveGeneration: UInt64? = nil,
         expectedReconnectGeneration: UInt64? = nil,
-        expectedAuthorizationGeneration: UInt64? = nil
+        expectedAuthorizationGeneration: UInt64? = nil,
+        timestampNanoseconds: UInt64? = nil
     ) async throws -> TransportSendResult {
         try validateMessageDirection(for: payload.messageType, incoming: false)
         let operationGeneration = expectedReconnectGeneration ?? reconnectGeneration
@@ -1122,7 +1194,8 @@ public actor SessionCoordinator {
             flags: flags,
             operationGeneration: operationGeneration,
             operationReceiveGeneration: operationReceiveGeneration,
-            operationAuthorizationGeneration: operationAuthorizationGeneration
+            operationAuthorizationGeneration: operationAuthorizationGeneration,
+            timestampNanoseconds: timestampNanoseconds
         )
     }
 
@@ -1131,7 +1204,8 @@ public actor SessionCoordinator {
         flags: EnvelopeFlags,
         operationGeneration: UInt64,
         operationReceiveGeneration: UInt64,
-        operationAuthorizationGeneration: UInt64
+        operationAuthorizationGeneration: UInt64,
+        timestampNanoseconds: UInt64? = nil
     ) async throws -> TransportSendResult {
         guard operationReceiveGeneration == receiveGeneration,
               operationGeneration == reconnectGeneration else {
@@ -1151,7 +1225,7 @@ public actor SessionCoordinator {
             channel: channel,
             flags: flags,
             sequence: sequence,
-            timestamp: DispatchTime.now().uptimeNanoseconds,
+            timestamp: timestampNanoseconds ?? DispatchTime.now().uptimeNanoseconds,
             limits: limits
         )
         let targetTransport = transport
@@ -1226,11 +1300,14 @@ public actor SessionCoordinator {
                !envelope.flags.contains(.mustUnderstand) {
                 return
             }
+            let receivedTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
             let message = try envelope.decodedMessage(using: effectiveProtocolLimits())
             try await handle(
                 message,
                 generation: generation,
-                reconnectGeneration: sessionGeneration
+                reconnectGeneration: sessionGeneration,
+                senderTimestampNanoseconds: envelope.timestamp,
+                receivedTimestampNanoseconds: receivedTimestampNanoseconds
             )
         } catch let error as SessionError {
             guard isCurrent(
@@ -1262,7 +1339,9 @@ public actor SessionCoordinator {
     private func handle(
         _ message: MessagePayload,
         generation: UInt64,
-        reconnectGeneration sessionGeneration: UInt64
+        reconnectGeneration sessionGeneration: UInt64,
+        senderTimestampNanoseconds: UInt64,
+        receivedTimestampNanoseconds: UInt64
     ) async throws {
         guard isCurrent(
             receiveGeneration: generation,
@@ -1307,10 +1386,13 @@ public actor SessionCoordinator {
                 reconnectGeneration: sessionGeneration,
                 authorizationGeneration: operationAuthorizationGeneration
             ) else { return }
+            guard let commitment = challenge.commitment else {
+                throw SessionError.pairingFailed
+            }
             let adoptedChallenge = try await pairingCoordinator.adoptRemoteSessionChallenge(
                 challengeID: challenge.challengeID,
                 from: peerIdentity,
-                confirmationCode: challenge.confirmationCode,
+                commitment: commitment,
                 timeout: pairingTimeoutSeconds()
             )
             startPairingDeadline(expiresAt: adoptedChallenge.expiresAt)
@@ -1319,13 +1401,97 @@ public actor SessionCoordinator {
                 reconnectGeneration: sessionGeneration,
                 authorizationGeneration: operationAuthorizationGeneration
             ) else { return }
+            let response = try await pairingCoordinator.sessionResponse(
+                challengeID: adoptedChallenge.challengeID,
+                remoteIdentity: peerIdentity
+            )
+            _ = try await sendUnrestricted(
+                .pairingResponse(
+                    PairingResponseMessage(
+                        challengeID: response.challengeID,
+                        commitment: response.commitment
+                    )
+                ),
+                expectedReceiveGeneration: generation,
+                expectedReconnectGeneration: sessionGeneration,
+                expectedAuthorizationGeneration: operationAuthorizationGeneration
+            )
+        case let .pairingResponse(response):
+            guard state == .pairingRequired,
+                  configuration.role == .host,
+                  let peerIdentity,
+                  let pairingCoordinator else {
+                throw SessionError.pairingFailed
+            }
+            let verification = try await pairingCoordinator.prepareSessionVerification(
+                challengeID: response.challengeID,
+                remoteIdentity: peerIdentity,
+                remoteCommitment: response.commitment
+            )
+            _ = try await sendUnrestricted(
+                .pairingVerification(
+                    PairingVerificationMessage(
+                        challengeID: verification.challengeID,
+                        contribution: verification.contribution
+                    )
+                ),
+                expectedReceiveGeneration: generation,
+                expectedReconnectGeneration: sessionGeneration,
+                expectedAuthorizationGeneration: operationAuthorizationGeneration
+            )
+        case let .pairingVerification(verification):
+            guard state == .pairingRequired,
+                  configuration.role == .viewer,
+                  let peerIdentity,
+                  let pairingCoordinator else {
+                throw SessionError.pairingFailed
+            }
+            let adoptedChallenge = try await pairingCoordinator.adoptRemoteSessionVerification(
+                challengeID: verification.challengeID,
+                from: peerIdentity,
+                remoteContribution: verification.contribution
+            )
+            startPairingDeadline(expiresAt: adoptedChallenge.expiresAt)
+            let reveal = try await pairingCoordinator.sessionReveal(
+                challengeID: adoptedChallenge.challengeID,
+                remoteIdentity: peerIdentity
+            )
+            _ = try await sendUnrestricted(
+                .pairingReveal(
+                    PairingRevealMessage(
+                        challengeID: reveal.challengeID,
+                        contribution: reveal.contribution
+                    )
+                ),
+                expectedReceiveGeneration: generation,
+                expectedReconnectGeneration: sessionGeneration,
+                expectedAuthorizationGeneration: operationAuthorizationGeneration
+            )
             if try await pairingCoordinator.trustDecision(for: peerIdentity) == .trusted {
                 try await confirmPairing(
                     confirmationCode: adoptedChallenge.confirmationCode,
                     accepted: true,
-                    displayName: configuration.role == .host
-                        ? "MacRemoteApp Viewer"
-                        : "MacRemoteApp Host"
+                    displayName: remotePeerDisplayName
+                )
+            }
+        case let .pairingReveal(reveal):
+            guard state == .pairingRequired,
+                  configuration.role == .host,
+                  let peerIdentity,
+                  let pairingCoordinator else {
+                throw SessionError.pairingFailed
+            }
+            let adoptedChallenge = try await pairingCoordinator.adoptRemoteSessionReveal(
+                challengeID: reveal.challengeID,
+                from: peerIdentity,
+                remoteContribution: reveal.contribution
+            )
+            startPairingDeadline(expiresAt: adoptedChallenge.expiresAt)
+            if try await pairingCoordinator.trustDecision(for: peerIdentity) == .trusted {
+                try await confirmPairing(
+                    confirmationCode: adoptedChallenge.confirmationCode,
+                    accepted: true,
+                    displayName: remotePeerDisplayName
                 )
             }
         case let .pairingConfirmation(confirmation):
@@ -1344,15 +1510,52 @@ public actor SessionCoordinator {
             )
         case let .ping(ping):
             _ = try await sendUnrestricted(
-                .pong(PongMessage(nonce: ping.nonce)),
+                .pong(
+                    PongMessage(
+                        nonce: ping.nonce,
+                        receiverTimestampNanoseconds: receivedTimestampNanoseconds
+                    )
+                ),
                 expectedReceiveGeneration: generation,
                 expectedReconnectGeneration: sessionGeneration,
                 expectedAuthorizationGeneration: operationAuthorizationGeneration
             )
         case let .pong(pong):
-            guard pendingPing?.nonce == pong.nonce else { throw SessionError.replayDetected }
+            guard let pendingProbe = pendingPing, pendingProbe.nonce == pong.nonce else {
+                throw SessionError.replayDetected
+            }
             pendingPing = nil
             lastHeartbeatAt = Date()
+            if let remoteReceivedTimestamp = pong.receiverTimestampNanoseconds {
+                let probe: ClockSyncProbe
+                switch configuration.role {
+                case .viewer:
+                    // Viewer initiated the probe:
+                    // Viewer V1 -> Host H2/H3 -> Viewer V4.
+                    // ClockSyncProbe keeps the actual role timestamps and uses
+                    // the direction to select the corresponding validation
+                    // and round-trip formula.
+                    probe = ClockSyncProbe(
+                        hostSentNanoseconds: senderTimestampNanoseconds,
+                        viewerReceivedNanoseconds: receivedTimestampNanoseconds,
+                        viewerSentNanoseconds: pendingProbe.sentTimestampNanoseconds,
+                        hostReceivedNanoseconds: remoteReceivedTimestamp,
+                        direction: .viewerInitiated
+                    )
+                case .host:
+                    // Host initiated the probe:
+                    // Host H1 -> Viewer V2/V3 -> Host H4.
+                    probe = ClockSyncProbe(
+                        hostSentNanoseconds: pendingProbe.sentTimestampNanoseconds,
+                        viewerReceivedNanoseconds: remoteReceivedTimestamp,
+                        viewerSentNanoseconds: senderTimestampNanoseconds,
+                        hostReceivedNanoseconds: receivedTimestampNanoseconds
+                    )
+                }
+                if clockSyncEstimator.probeCount < Self.maximumClockSyncProbes {
+                    _ = clockSyncEstimator.append(probe)
+                }
+            }
         case let .sessionState(sessionState):
             try await handleSessionState(
                 sessionState,
@@ -1709,6 +1912,12 @@ public actor SessionCoordinator {
             guard envelope.sequence > previous else {
                 throw SessionError.replayDetected
             }
+            if envelope.sequence != previous + 1 {
+                // The sender discarded media; its queue skips delta frames
+                // until a keyframe, so ask for one instead of waiting for
+                // the periodic keyframe.
+                noteIncomingMediaGap()
+            }
             incomingSequence[envelope.channel] = envelope.sequence
             return
         }
@@ -1734,6 +1943,8 @@ public actor SessionCoordinator {
             return [.windowSelection]
         case .streamConfig, .videoConfig, .videoFrame:
             return [.h264Video]
+        case .keyframeRequest:
+            return [.h264Video, .keyframeRequest]
         case let .inputEvent(input):
             switch input.kind {
             case .keyDown, .keyUp:
@@ -1758,6 +1969,8 @@ public actor SessionCoordinator {
             return config.generation
         case let .videoFrame(frame):
             return frame.generation
+        case let .keyframeRequest(request):
+            return request.generation
         case let .inputEvent(input):
             return input.windowGeneration
         default:
@@ -1841,13 +2054,33 @@ public actor SessionCoordinator {
         )
     }
 
+    private var remotePeerDisplayName: String {
+        if let deviceName = peerHello?.deviceName,
+           !deviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return deviceName
+        }
+        return configuration.role == .host ? "MacRemoteApp Viewer" : "MacRemoteApp Host"
+    }
+
     private func publish(_ message: MessagePayload) throws {
         do {
-            _ = try incomingMessageStorage.yield(message)
+            let result = try incomingMessageStorage.yield(message)
+            if result == .replacedMedia {
+                noteIncomingMediaGap()
+            }
         } catch TransportError.controlBackpressure {
             throw SessionError.incomingMessageBackpressure(.control)
         } catch TransportError.mediaBackpressure {
             throw SessionError.incomingMessageBackpressure(.media)
+        }
+    }
+
+    /// Sends from a separate task: the receive path must not wait on the
+    /// outbound mutex while it is validating an incoming envelope.
+    private func noteIncomingMediaGap() {
+        guard configuration.role == .viewer else { return }
+        Task { [weak self] in
+            await self?.requestKeyframe(reason: .mediaGap)
         }
     }
 
@@ -2008,13 +2241,19 @@ public actor SessionCoordinator {
         guard pendingPing == nil else { return }
         let nonce = nextPingNonce
         nextPingNonce = nextPingNonce == UInt64.max ? 1 : nextPingNonce + 1
-        pendingPing = (nonce: nonce, sentAt: now)
+        let sentTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
+        pendingPing = (
+            nonce: nonce,
+            sentAt: now,
+            sentTimestampNanoseconds: sentTimestampNanoseconds
+        )
         do {
             _ = try await sendUnrestricted(
                 .ping(PingMessage(nonce: nonce)),
                 expectedReceiveGeneration: sessionReceiveGeneration,
                 expectedReconnectGeneration: sessionReconnectGeneration,
-                expectedAuthorizationGeneration: sessionAuthorizationGeneration
+                expectedAuthorizationGeneration: sessionAuthorizationGeneration,
+                timestampNanoseconds: sentTimestampNanoseconds
             )
         } catch {
             await fail(

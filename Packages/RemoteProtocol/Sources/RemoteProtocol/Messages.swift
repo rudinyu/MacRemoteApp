@@ -9,22 +9,28 @@ public protocol MessagePayloadValue: Equatable, Sendable {
 
 public struct HelloMessage: MessagePayloadValue {
     public static let messageType: MessageType = .hello
+    public static let maximumDeviceNameUTF8Bytes = 63
 
     public let protocolVersion: ProtocolVersion
     public let role: DeviceRole
     public let implementationIdentifier: String
     public let limits: ProtocolLimits
+    /// Untrusted, user-facing peer label. Authentication is always bound to
+    /// the TLS identity, never this display-only value.
+    public let deviceName: String?
 
     public init(
         protocolVersion: ProtocolVersion,
         role: DeviceRole,
         implementationIdentifier: String,
-        limits: ProtocolLimits
+        limits: ProtocolLimits,
+        deviceName: String? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.role = role
         self.implementationIdentifier = implementationIdentifier
         self.limits = limits
+        self.deviceName = deviceName
     }
 
     public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
@@ -50,12 +56,27 @@ public struct HelloMessage: MessagePayloadValue {
         try fields.append(fieldID: 4, mandatory: true, value: WireValue.uint32(UInt32(self.limits.maxPayloadLength)))
         try fields.append(fieldID: 5, mandatory: true, value: WireValue.uint32(UInt32(self.limits.maxControlPayloadLength)))
         try fields.append(fieldID: 6, mandatory: true, value: WireValue.uint32(UInt32(self.limits.maxClipboardTextBytes)))
+        if let deviceName {
+            guard Self.isValidDeviceName(deviceName) else {
+                throw ProtocolError.invalidFieldValue(message: .hello, fieldID: 7)
+            }
+            try fields.append(
+                fieldID: 7,
+                mandatory: false,
+                value: try WireValue.string(
+                    deviceName,
+                    message: .hello,
+                    fieldID: 7,
+                    maximumBytes: Self.maximumDeviceNameUTF8Bytes
+                )
+            )
+        }
         return fields.data
     }
 
     public static func decode(_ data: Data, using limits: ProtocolLimits = .default) throws -> HelloMessage {
         let fields = try MessageFieldReader(data: data, message: .hello, limits: limits)
-        try fields.ensureKnown(Set(1 ... 6))
+        try fields.ensureKnown(Set(1 ... 7))
         let versionData = try fields.required(1)
         guard versionData.count == 2 else {
             throw ProtocolError.invalidFieldValue(message: .hello, fieldID: 1)
@@ -73,6 +94,17 @@ public struct HelloMessage: MessagePayloadValue {
         let maxPayload = Int(try WireValue.decodeUInt32(try fields.required(4), message: .hello, fieldID: 4))
         let maxControlPayload = Int(try WireValue.decodeUInt32(try fields.required(5), message: .hello, fieldID: 5))
         let maxClipboard = Int(try WireValue.decodeUInt32(try fields.required(6), message: .hello, fieldID: 6))
+        let deviceName = try fields.optional(7).map {
+            try WireValue.decodeString(
+                $0,
+                message: .hello,
+                fieldID: 7,
+                maximumBytes: Self.maximumDeviceNameUTF8Bytes
+            )
+        }
+        guard deviceName.map(Self.isValidDeviceName) ?? true else {
+            throw ProtocolError.invalidFieldValue(message: .hello, fieldID: 7)
+        }
         let advertisedLimits = ProtocolLimits(
             maxPayloadLength: maxPayload,
             maxControlPayloadLength: maxControlPayload,
@@ -89,8 +121,17 @@ public struct HelloMessage: MessagePayloadValue {
             protocolVersion: version,
             role: role,
             implementationIdentifier: identifier,
-            limits: advertisedLimits
+            limits: advertisedLimits,
+            deviceName: deviceName
         )
+    }
+
+    private static func isValidDeviceName(_ value: String) -> Bool {
+        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            value.utf8.count <= maximumDeviceNameUTF8Bytes &&
+            value.unicodeScalars.allSatisfy {
+                !CharacterSet.controlCharacters.contains($0)
+            }
     }
 }
 
@@ -171,40 +212,192 @@ public struct PairingChallengeMessage: MessagePayloadValue {
     public static let messageType: MessageType = .pairingChallenge
 
     public let challengeID: UInt64
-    public let confirmationCode: String
+    public let confirmationCode: String?
+    public let commitment: Data?
 
     public init(challengeID: UInt64, confirmationCode: String) {
         self.challengeID = challengeID
         self.confirmationCode = confirmationCode
+        self.commitment = nil
+    }
+
+    public init(challengeID: UInt64, commitment: Data) {
+        self.challengeID = challengeID
+        self.confirmationCode = nil
+        self.commitment = commitment
+    }
+
+    public init(challengeID: UInt64, commitment: Data, confirmationCode: String?) {
+        self.challengeID = challengeID
+        self.confirmationCode = confirmationCode
+        self.commitment = commitment
     }
 
     public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
         var fields = try MessageFieldWriter(message: .pairingChallenge, limits: limits)
         try fields.append(fieldID: 1, mandatory: true, value: WireValue.uint64(challengeID))
-        try fields.append(
-            fieldID: 2,
-            mandatory: true,
-            value: try WireValue.string(
-                confirmationCode,
-                message: .pairingChallenge,
+        if let confirmationCode {
+            try fields.append(
                 fieldID: 2,
-                maximumBytes: limits.maxIdentifierBytes
+                mandatory: commitment == nil,
+                value: try WireValue.string(
+                    confirmationCode,
+                    message: .pairingChallenge,
+                    fieldID: 2,
+                    maximumBytes: limits.maxIdentifierBytes
+                )
             )
-        )
+        }
+        if let commitment {
+            guard commitment.count == 32 else {
+                throw ProtocolError.invalidFieldValue(message: .pairingChallenge, fieldID: 3)
+            }
+            try fields.append(fieldID: 3, mandatory: false, value: commitment)
+        }
+        guard confirmationCode != nil || commitment != nil else {
+            throw ProtocolError.invalidFieldValue(message: .pairingChallenge, fieldID: 2)
+        }
         return fields.data
     }
 
     public static func decode(_ data: Data, using limits: ProtocolLimits = .default) throws -> PairingChallengeMessage {
         let fields = try MessageFieldReader(data: data, message: .pairingChallenge, limits: limits)
-        try fields.ensureKnown(Set(1 ... 2))
-        return PairingChallengeMessage(
-            challengeID: try WireValue.decodeUInt64(try fields.required(1), message: .pairingChallenge, fieldID: 1),
-            confirmationCode: try WireValue.decodeString(
-                try fields.required(2),
+        try fields.ensureKnown(Set(1 ... 3))
+        let confirmationCode = try fields.optional(2).map {
+            try WireValue.decodeString(
+                $0,
                 message: .pairingChallenge,
                 fieldID: 2,
                 maximumBytes: limits.maxIdentifierBytes
             )
+        }
+        let commitment = fields.optional(3)
+        if let commitment, commitment.count != 32 {
+            throw ProtocolError.invalidFieldValue(message: .pairingChallenge, fieldID: 3)
+        }
+        guard confirmationCode != nil || commitment != nil else {
+            throw ProtocolError.invalidFieldValue(message: .pairingChallenge, fieldID: 2)
+        }
+        let challengeID = try WireValue.decodeUInt64(
+            try fields.required(1),
+            message: .pairingChallenge,
+            fieldID: 1
+        )
+        if let commitment {
+            return PairingChallengeMessage(
+                challengeID: challengeID,
+                commitment: commitment,
+                confirmationCode: confirmationCode
+            )
+        }
+        return PairingChallengeMessage(
+            challengeID: challengeID,
+            confirmationCode: confirmationCode ?? ""
+        )
+    }
+}
+
+public struct PairingResponseMessage: MessagePayloadValue {
+    public static let messageType: MessageType = .pairingResponse
+
+    public let challengeID: UInt64
+    public let commitment: Data
+
+    public init(challengeID: UInt64, commitment: Data) {
+        self.challengeID = challengeID
+        self.commitment = commitment
+    }
+
+    public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
+        guard commitment.count == 32 else {
+            throw ProtocolError.invalidFieldValue(message: .pairingResponse, fieldID: 2)
+        }
+        var fields = try MessageFieldWriter(message: .pairingResponse, limits: limits)
+        try fields.append(fieldID: 1, mandatory: true, value: WireValue.uint64(challengeID))
+        try fields.append(fieldID: 2, mandatory: true, value: commitment)
+        return fields.data
+    }
+
+    public static func decode(_ data: Data, using limits: ProtocolLimits = .default) throws -> PairingResponseMessage {
+        let fields = try MessageFieldReader(data: data, message: .pairingResponse, limits: limits)
+        try fields.ensureKnown(Set([1, 2]))
+        let commitment = try fields.required(2)
+        guard commitment.count == 32 else {
+            throw ProtocolError.invalidFieldValue(message: .pairingResponse, fieldID: 2)
+        }
+        return PairingResponseMessage(
+            challengeID: try WireValue.decodeUInt64(try fields.required(1), message: .pairingResponse, fieldID: 1),
+            commitment: commitment
+        )
+    }
+}
+
+public struct PairingVerificationMessage: MessagePayloadValue {
+    public static let messageType: MessageType = .pairingVerification
+
+    public let challengeID: UInt64
+    public let contribution: Data
+
+    public init(challengeID: UInt64, contribution: Data) {
+        self.challengeID = challengeID
+        self.contribution = contribution
+    }
+
+    public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
+        guard contribution.count == 32 else {
+            throw ProtocolError.invalidFieldValue(message: .pairingVerification, fieldID: 2)
+        }
+        var fields = try MessageFieldWriter(message: .pairingVerification, limits: limits)
+        try fields.append(fieldID: 1, mandatory: true, value: WireValue.uint64(challengeID))
+        try fields.append(fieldID: 2, mandatory: true, value: contribution)
+        return fields.data
+    }
+
+    public static func decode(_ data: Data, using limits: ProtocolLimits = .default) throws -> PairingVerificationMessage {
+        let fields = try MessageFieldReader(data: data, message: .pairingVerification, limits: limits)
+        try fields.ensureKnown(Set([1, 2]))
+        let contribution = try fields.required(2)
+        guard contribution.count == 32 else {
+            throw ProtocolError.invalidFieldValue(message: .pairingVerification, fieldID: 2)
+        }
+        return PairingVerificationMessage(
+            challengeID: try WireValue.decodeUInt64(try fields.required(1), message: .pairingVerification, fieldID: 1),
+            contribution: contribution
+        )
+    }
+}
+
+public struct PairingRevealMessage: MessagePayloadValue {
+    public static let messageType: MessageType = .pairingReveal
+
+    public let challengeID: UInt64
+    public let contribution: Data
+
+    public init(challengeID: UInt64, contribution: Data) {
+        self.challengeID = challengeID
+        self.contribution = contribution
+    }
+
+    public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
+        guard contribution.count == 32 else {
+            throw ProtocolError.invalidFieldValue(message: .pairingReveal, fieldID: 2)
+        }
+        var fields = try MessageFieldWriter(message: .pairingReveal, limits: limits)
+        try fields.append(fieldID: 1, mandatory: true, value: WireValue.uint64(challengeID))
+        try fields.append(fieldID: 2, mandatory: true, value: contribution)
+        return fields.data
+    }
+
+    public static func decode(_ data: Data, using limits: ProtocolLimits = .default) throws -> PairingRevealMessage {
+        let fields = try MessageFieldReader(data: data, message: .pairingReveal, limits: limits)
+        try fields.ensureKnown(Set([1, 2]))
+        let contribution = try fields.required(2)
+        guard contribution.count == 32 else {
+            throw ProtocolError.invalidFieldValue(message: .pairingReveal, fieldID: 2)
+        }
+        return PairingRevealMessage(
+            challengeID: try WireValue.decodeUInt64(try fields.required(1), message: .pairingReveal, fieldID: 1),
+            contribution: contribution
         )
     }
 }
@@ -971,24 +1164,84 @@ public struct PingMessage: MessagePayloadValue {
     }
 }
 
+/// Viewer request for the Host to encode its next frame as a keyframe.
+/// Sent only when both endpoints negotiated `Capability.keyframeRequest`;
+/// the Host rate-limits honored requests.
+public struct KeyframeRequestMessage: MessagePayloadValue {
+    public static let messageType: MessageType = .keyframeRequest
+    /// Selected-window generation of the stream the Viewer is decoding.
+    public let generation: UInt64
+    public let reason: KeyframeRequestReason
+
+    public init(generation: UInt64, reason: KeyframeRequestReason) {
+        self.generation = generation
+        self.reason = reason
+    }
+
+    public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
+        var fields = try MessageFieldWriter(message: .keyframeRequest, limits: limits)
+        try fields.append(fieldID: 1, mandatory: true, value: WireValue.uint64(generation))
+        try fields.append(
+            fieldID: 2,
+            mandatory: true,
+            value: WireValue.byte(reason.rawValue, message: .keyframeRequest, fieldID: 2)
+        )
+        return fields.data
+    }
+
+    public static func decode(
+        _ data: Data,
+        using limits: ProtocolLimits = .default
+    ) throws -> KeyframeRequestMessage {
+        let fields = try MessageFieldReader(data: data, message: .keyframeRequest, limits: limits)
+        try fields.ensureKnown(Set([1, 2]))
+        guard let reason = KeyframeRequestReason(
+            rawValue: try WireValue.decodeByte(try fields.required(2), message: .keyframeRequest, fieldID: 2)
+        ) else {
+            throw ProtocolError.invalidFieldValue(message: .keyframeRequest, fieldID: 2)
+        }
+        return KeyframeRequestMessage(
+            generation: try WireValue.decodeUInt64(try fields.required(1), message: .keyframeRequest, fieldID: 1),
+            reason: reason
+        )
+    }
+}
+
 public struct PongMessage: MessagePayloadValue {
     public static let messageType: MessageType = .pong
     public let nonce: UInt64
+    /// Monotonic timestamp taken by the receiver of the corresponding Ping.
+    /// It is optional for compatibility with older peers; a four-timestamp
+    /// clock probe is only accepted when this field is present.
+    public let receiverTimestampNanoseconds: UInt64?
 
-    public init(nonce: UInt64) {
+    public init(nonce: UInt64, receiverTimestampNanoseconds: UInt64? = nil) {
         self.nonce = nonce
+        self.receiverTimestampNanoseconds = receiverTimestampNanoseconds
     }
 
     public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
         var fields = try MessageFieldWriter(message: .pong, limits: limits)
         try fields.append(fieldID: 1, mandatory: true, value: WireValue.uint64(nonce))
+        if let receiverTimestampNanoseconds {
+            try fields.append(
+                fieldID: 2,
+                mandatory: false,
+                value: WireValue.uint64(receiverTimestampNanoseconds)
+            )
+        }
         return fields.data
     }
 
     public static func decode(_ data: Data, using limits: ProtocolLimits = .default) throws -> PongMessage {
         let fields = try MessageFieldReader(data: data, message: .pong, limits: limits)
-        try fields.ensureKnown(Set([1]))
-        return PongMessage(nonce: try WireValue.decodeUInt64(try fields.required(1), message: .pong, fieldID: 1))
+        try fields.ensureKnown(Set([1, 2]))
+        return PongMessage(
+            nonce: try WireValue.decodeUInt64(try fields.required(1), message: .pong, fieldID: 1),
+            receiverTimestampNanoseconds: try fields.optional(2).map {
+                try WireValue.decodeUInt64($0, message: .pong, fieldID: 2)
+            }
+        )
     }
 }
 
@@ -1145,6 +1398,9 @@ public enum MessagePayload: Equatable, Sendable {
     case capabilities(CapabilitiesMessage)
     case pairingChallenge(PairingChallengeMessage)
     case pairingConfirmation(PairingConfirmationMessage)
+    case pairingResponse(PairingResponseMessage)
+    case pairingVerification(PairingVerificationMessage)
+    case pairingReveal(PairingRevealMessage)
     case sessionAuthorize(SessionAuthorizeMessage)
     case windowList(WindowListMessage)
     case windowSelection(WindowSelectionMessage)
@@ -1160,6 +1416,7 @@ public enum MessagePayload: Equatable, Sendable {
     case sessionState(SessionStateMessage)
     case error(ErrorMessage)
     case close(CloseMessage)
+    case keyframeRequest(KeyframeRequestMessage)
 
     public var messageType: MessageType {
         switch self {
@@ -1167,6 +1424,9 @@ public enum MessagePayload: Equatable, Sendable {
         case .capabilities: return .capabilities
         case .pairingChallenge: return .pairingChallenge
         case .pairingConfirmation: return .pairingConfirmation
+        case .pairingResponse: return .pairingResponse
+        case .pairingVerification: return .pairingVerification
+        case .pairingReveal: return .pairingReveal
         case .sessionAuthorize: return .sessionAuthorize
         case .windowList: return .windowList
         case .windowSelection: return .windowSelection
@@ -1182,6 +1442,7 @@ public enum MessagePayload: Equatable, Sendable {
         case .sessionState: return .sessionState
         case .error: return .error
         case .close: return .close
+        case .keyframeRequest: return .keyframeRequest
         }
     }
 
@@ -1191,6 +1452,9 @@ public enum MessagePayload: Equatable, Sendable {
         case let .capabilities(value): return try value.encoded(using: limits)
         case let .pairingChallenge(value): return try value.encoded(using: limits)
         case let .pairingConfirmation(value): return try value.encoded(using: limits)
+        case let .pairingResponse(value): return try value.encoded(using: limits)
+        case let .pairingVerification(value): return try value.encoded(using: limits)
+        case let .pairingReveal(value): return try value.encoded(using: limits)
         case let .sessionAuthorize(value): return try value.encoded(using: limits)
         case let .windowList(value): return try value.encoded(using: limits)
         case let .windowSelection(value): return try value.encoded(using: limits)
@@ -1206,6 +1470,7 @@ public enum MessagePayload: Equatable, Sendable {
         case let .sessionState(value): return try value.encoded(using: limits)
         case let .error(value): return try value.encoded(using: limits)
         case let .close(value): return try value.encoded(using: limits)
+        case let .keyframeRequest(value): return try value.encoded(using: limits)
         }
     }
 
@@ -1219,6 +1484,9 @@ public enum MessagePayload: Equatable, Sendable {
         case .capabilities: return .capabilities(try CapabilitiesMessage.decode(data, using: limits))
         case .pairingChallenge: return .pairingChallenge(try PairingChallengeMessage.decode(data, using: limits))
         case .pairingConfirmation: return .pairingConfirmation(try PairingConfirmationMessage.decode(data, using: limits))
+        case .pairingResponse: return .pairingResponse(try PairingResponseMessage.decode(data, using: limits))
+        case .pairingVerification: return .pairingVerification(try PairingVerificationMessage.decode(data, using: limits))
+        case .pairingReveal: return .pairingReveal(try PairingRevealMessage.decode(data, using: limits))
         case .sessionAuthorize: return .sessionAuthorize(try SessionAuthorizeMessage.decode(data, using: limits))
         case .windowList: return .windowList(try WindowListMessage.decode(data, using: limits))
         case .windowSelection: return .windowSelection(try WindowSelectionMessage.decode(data, using: limits))
@@ -1235,6 +1503,7 @@ public enum MessagePayload: Equatable, Sendable {
         case .sessionState: return .sessionState(try SessionStateMessage.decode(data, using: limits))
         case .error: return .error(try ErrorMessage.decode(data, using: limits))
         case .close: return .close(try CloseMessage.decode(data, using: limits))
+        case .keyframeRequest: return .keyframeRequest(try KeyframeRequestMessage.decode(data, using: limits))
         case let .unknown(rawValue): throw ProtocolError.unsupportedMessageType(rawValue: rawValue)
         }
     }

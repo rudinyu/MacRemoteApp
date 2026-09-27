@@ -81,8 +81,11 @@ replacing it.
 - The DMG uninstall helper uses the same per-role lifecycle lock as the
   installer, verifies the exact bundle identity, cryptographic signature,
   pinned MacRemoteApp Developer ID publisher, and Gatekeeper acceptance before
-  moving the per-user app to `~/.Trash`. It rejects symlinked Applications or
-  Trash paths and never removes Keychain, TCC, or repository test state.
+  clearing both roles' exact app data, shared MacRemoteApp trust/generated
+  identity, and moving the selected per-user app to `~/.Trash`. It rejects
+  symlinked Applications or Trash paths, does not touch unrelated Keychain
+  records, and leaves macOS TCC grants for System Settings or the
+  repository-only development cleanup script.
 - `scripts/uninstall-device-apps.sh` removes only the exact selected app
   bundle paths and requires confirmation for non-interactive removal. Its
   explicit `--clean-testing --yes` mode also removes `build/testing/`, `.build`,
@@ -138,8 +141,8 @@ replacing it.
 - Trust records and locally generated TLS identity material remain in
   Keychain-backed `SecurityCore`; no file-based secret store is added. The
   repository cleanup path removes the default generated local identity along
-  with testing trust records, while normal uninstall leaves Keychain state for
-  an explicit clean/re-pair decision.
+  with testing trust records. In-app pairing reset preserves the local
+  identity; the DMG uninstall is the explicit full MacRemoteApp data reset.
 
 ## Residual risks and owners
 

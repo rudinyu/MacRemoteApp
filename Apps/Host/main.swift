@@ -2,6 +2,7 @@ import AppKit
 import Darwin
 import CaptureCore
 import CodecCore
+import Foundation
 import InputCore
 import os
 import RemoteProtocol
@@ -23,7 +24,8 @@ struct HostApp {
         contextProvider: any HostInputContextProvider,
         injectionAdapter: any HostInputInjectionAdapter,
         onNonInputMessage: @escaping @Sendable (MessagePayload) async -> Void,
-        onSessionLifecycleReset: @escaping @Sendable () async -> Void = {}
+        onSessionLifecycleReset: @escaping @Sendable () async -> Void = {},
+        onInputStatusChange: @escaping @Sendable (HostInputStatus) async -> Void = { _ in }
     ) async -> HostInputSessionRuntime {
         let clipboardController = await MainActor.run {
             HostClipboardSessionController(session: session)
@@ -48,6 +50,7 @@ struct HostApp {
                 await clipboardController.resetForSessionLifecycleIfStale(snapshot)
                 await onSessionLifecycleReset()
             },
+            onInputStatusChange: onInputStatusChange,
             setClipboardEnabled: { enabled in
                 try await clipboardController.setEnabled(enabled)
             },
@@ -59,7 +62,18 @@ struct HostApp {
         return runtime
     }
 
+    @MainActor
     static func main() async {
+        if CommandLine.arguments.contains("--remove-all-data") {
+            do {
+                try await removeAllLocalData()
+            } catch {
+                fputs("MacRemoteApp Host data cleanup failed: \(error)\n", stderr)
+                exit(EXIT_FAILURE)
+            }
+            return
+        }
+
 #if DEBUG
         if CommandLine.arguments.contains("--m3-list-windows") {
             await MainActor.run {
@@ -93,22 +107,21 @@ struct HostApp {
 
         do {
             let runtime = try HostRuntime(configuration: .load())
-            await MainActor.run {
-                let application = NSApplication.shared
-                application.setActivationPolicy(.accessory)
-                let delegate = HostApplicationDelegate(runtime: runtime)
-                application.delegate = delegate
-                // NSApplication.delegate is weak. Keep the concrete delegate
-                // alive for the whole event loop so launch/termination
-                // callbacks cannot be lost before application.run() returns.
-                withExtendedLifetime(delegate) {
-                    application.run()
-                }
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            let delegate = HostApplicationDelegate(runtime: runtime)
+            application.delegate = delegate
+            // NSApplication.delegate is weak. Keep the concrete delegate
+            // alive for the whole event loop so launch/termination
+            // callbacks cannot be lost before application.run() returns.
+            // The AppKit loop is the application's MainActor lifecycle; do
+            // not hide this synchronous loop inside MainActor.run from an
+            // async entry point.
+            withExtendedLifetime(delegate) {
+                application.run()
             }
         } catch {
-            await MainActor.run {
-                presentHostStartupFailure(error)
-            }
+            presentHostStartupFailure(error)
             macRemoteAppStartupLogger.error(
                 "MacRemoteApp Host startup failed (code: \(hostStartupErrorCode(error), privacy: .public))"
             )
@@ -143,6 +156,17 @@ struct HostApp {
 #endif
 }
 
+private func removeAllLocalData() async throws {
+    try await KeychainTrustStore(
+        service: HostRuntime.Configuration.defaultTrustStoreService
+    ).removeAll()
+    try await KeychainIdentityProvider(
+        label: HostRuntime.Configuration.defaultIdentityLabel
+    ).removeGeneratedIdentity()
+    UserDefaults.standard.removePersistentDomain(forName: "com.rudinyu.MacRemoteApp.Host")
+    UserDefaults.standard.synchronize()
+}
+
 @MainActor
 private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
     private let runtime: HostRuntime
@@ -150,6 +174,9 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
     private var statusTask: Task<Void, Never>?
     private var statusItem: NSStatusItem?
     private var statusMenuItem: NSMenuItem?
+    private var renameHostMenuItem: NSMenuItem?
+    private var pairingCodeMenuItem: NSMenuItem?
+    private var forgetPairingsMenuItem: NSMenuItem?
     private var retryItem: NSMenuItem?
     private var terminationRequested = false
 
@@ -160,6 +187,42 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
+        macRemoteAppStartupLogger.info("Host application did finish launching")
+        // NSApplication.run() is a synchronous AppKit run loop entered from
+        // main(). A normal Task created here inherits MainActor isolation and
+        // can remain queued behind that run loop, preventing HostRuntime from
+        // ever reaching its permission startup stages. Start the resident
+        // runtime task before any synchronous accessory-app UI setup, keep it
+        // off MainActor, and only hop back for UI and termination actions.
+        // This ordering also leaves a task-start marker if an AppKit status
+        // item or activation call stalls during launch.
+        runtimeTask = Task.detached(priority: .userInitiated) { [runtime] in
+            macRemoteAppStartupLogger.info("Host runtime task starting")
+            do {
+                try await runtime.run()
+            } catch is CancellationError {
+                await runtime.stop()
+                await MainActor.run {
+                    NSApplication.shared.stop(nil)
+                }
+            } catch {
+                await MainActor.run {
+                    presentHostStartupFailure(error)
+                }
+                macRemoteAppStartupLogger.error(
+                    "MacRemoteApp Host startup failed (code: \(hostStartupErrorCode(error), privacy: .public))"
+                )
+                fputs("MacRemoteApp Host failed: \(error)\n", stderr)
+                await runtime.stop()
+                await MainActor.run {
+                    NSApplication.shared.stop(nil)
+                }
+                exit(EXIT_FAILURE)
+            }
+            await MainActor.run {
+                NSApplication.shared.stop(nil)
+            }
+        }
         installStatusItem()
         // Host is an accessory app, but permission consent belongs to the
         // signed application bundle rather than a shell or its terminal. Make
@@ -171,24 +234,6 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
             while !Task.isCancelled, let status = await iterator.next() {
                 self?.apply(status: status)
             }
-        }
-        runtimeTask = Task { [runtime] in
-            do {
-                try await runtime.run()
-            } catch is CancellationError {
-                await runtime.stop()
-                NSApplication.shared.stop(nil)
-            } catch {
-                presentHostStartupFailure(error)
-                macRemoteAppStartupLogger.error(
-                    "MacRemoteApp Host startup failed (code: \(hostStartupErrorCode(error), privacy: .public))"
-                )
-                fputs("MacRemoteApp Host failed: \(error)\n", stderr)
-                await runtime.stop()
-                NSApplication.shared.stop(nil)
-                exit(EXIT_FAILURE)
-            }
-            NSApplication.shared.stop(nil)
         }
     }
 
@@ -225,6 +270,31 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         status.isEnabled = false
         menu.addItem(status)
         statusMenuItem = status
+        let renameItem = NSMenuItem(
+            title: "Rename Host…",
+            action: #selector(renameHost),
+            keyEquivalent: ""
+        )
+        renameItem.target = self
+        menu.addItem(renameItem)
+        renameHostMenuItem = renameItem
+        let pairingCode = NSMenuItem(
+            title: "Pairing code: —",
+            action: nil,
+            keyEquivalent: ""
+        )
+        pairingCode.isEnabled = false
+        pairingCode.isHidden = true
+        menu.addItem(pairingCode)
+        pairingCodeMenuItem = pairingCode
+        let forgetPairings = NSMenuItem(
+            title: "Forget saved pairings…",
+            action: #selector(forgetSavedPairings),
+            keyEquivalent: ""
+        )
+        forgetPairings.target = self
+        menu.addItem(forgetPairings)
+        forgetPairingsMenuItem = forgetPairings
         let retry = NSMenuItem(
             title: "Retry setup",
             action: #selector(retrySetup),
@@ -249,14 +319,27 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
 
     private func apply(status: HostRuntimeStatus) {
         statusMenuItem?.title = "Host: \(status.description)"
+        if case let .pairing(code) = status {
+            pairingCodeMenuItem?.title = "Pairing code: \(code)"
+            pairingCodeMenuItem?.isHidden = false
+        } else {
+            pairingCodeMenuItem?.isHidden = true
+        }
         let canRetry: Bool
         switch status {
         case .needsScreenRecording, .needsLocalNetwork, .listenerFailed, .failed:
             canRetry = true
-        case .starting, .connected, .listening, .stopped:
+        case .starting, .connected, .sharing, .pairing, .listening, .stopped:
             canRetry = false
         }
         retryItem?.isEnabled = canRetry
+        // Remote viewing/control is visible in the menu bar without opening
+        // the menu, alongside macOS's own screen-recording indicator.
+        if case .sharing = status {
+            statusItem?.button?.contentTintColor = .systemOrange
+        } else {
+            statusItem?.button?.contentTintColor = nil
+        }
         statusItem?.button?.toolTip = "MacRemoteApp Host — \(status.description)"
     }
 
@@ -266,8 +349,76 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func renameHost() {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Rename this MacRemoteApp Host?"
+        alert.informativeText =
+            "This name is visible to Viewers and other devices that browse MacRemoteApp on the local network. It is not the Host's security identity."
+        let field = NSTextField(string: HostPreferences.load())
+        field.placeholderString = HostPreferences.defaultServiceName
+        field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        guard let name = HostPreferences.validatedServiceName(field.stringValue) else {
+            showHostSettingsError(
+                "Host name must contain visible characters and be at most 63 UTF-8 bytes."
+            )
+            return
+        }
+
+        HostPreferences.save(name)
+        renameHostMenuItem?.title = "Rename Host…"
+        statusItem?.button?.toolTip = "MacRemoteApp Host — \(name)"
+        Task { [runtime] in
+            do {
+                try await runtime.updateServiceName(name)
+            } catch {
+                await MainActor.run {
+                    showHostSettingsError("The Host name could not be applied. The previous advertised name remains active.")
+                }
+            }
+        }
+    }
+
+    @objc private func forgetSavedPairings() {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Forget all saved pairings?"
+        alert.informativeText =
+            "This removes saved Viewer trust records from this Mac and stops the active session. The Host's own TLS identity, permissions, and Host name remain unchanged. The next connection must be paired again."
+        alert.addButton(withTitle: "Forget Pairings")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        Task { @MainActor [weak self, runtime] in
+            do {
+                let count = try await runtime.forgetAllPairings()
+                self?.statusMenuItem?.title = "Host: Listening for a paired Viewer"
+                self?.statusItem?.button?.toolTip =
+                    count == 0
+                    ? "MacRemoteApp Host — no saved pairings"
+                    : "MacRemoteApp Host — saved pairings cleared"
+            } catch {
+                self?.showHostSettingsError("Saved pairings could not be cleared. Check Keychain access and try again.")
+            }
+        }
+    }
+
     @objc private func stopSessionAndQuit() {
         NSApplication.shared.terminate(nil)
+    }
+
+    private func showHostSettingsError(_ message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "MacRemoteApp Host"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 }
 

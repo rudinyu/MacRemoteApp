@@ -67,7 +67,7 @@ final class TransportCoreTests: XCTestCase {
         XCTAssertEqual(message, .ping(PingMessage(nonce: 7)))
     }
 
-    func testBoundedQueuesPrioritizeControlAndDropOnlyDiscardableMedia() async throws {
+    func testBoundedQueuesPrioritizeControlAndDropMediaOnlyUntilNextKeyframe() async throws {
         let queue = try BoundedFrameQueue(maxControlFrames: 2, maxMediaFrames: 2)
         let control = try Envelope(
             channel: .control,
@@ -78,13 +78,14 @@ final class TransportCoreTests: XCTestCase {
         let mediaOne = try makeVideoEnvelope(sequence: 0, keyframe: false)
         let mediaTwo = try makeVideoEnvelope(sequence: 1, keyframe: false)
         let mediaThree = try makeVideoEnvelope(sequence: 2, keyframe: false)
-        let keyframe = try makeVideoEnvelope(sequence: 3, keyframe: true)
+        let mediaFour = try makeVideoEnvelope(sequence: 3, keyframe: false)
+        let keyframe = try makeVideoEnvelope(sequence: 4, keyframe: true)
         let videoConfig = try Envelope(
             message: .videoConfig(
                 VideoConfigMessage(generation: 9, decoderConfiguration: Data([0x01]))
             ),
-            sequence: 4,
-            timestamp: 4
+            sequence: 5,
+            timestamp: 5
         )
 
         let firstResult = try await queue.enqueue(mediaOne)
@@ -93,30 +94,72 @@ final class TransportCoreTests: XCTestCase {
         let controlResult = try await queue.enqueue(control)
         XCTAssertEqual(firstResult, .queued)
         XCTAssertEqual(secondResult, .queued)
-        XCTAssertEqual(droppedResult, .replacedOldestMedia)
+        // The incoming delta frame is dropped, never a queued one, so the
+        // queued frames still decode.
+        XCTAssertEqual(droppedResult, .discardedMedia)
         XCTAssertEqual(controlResult, .queued)
 
-        do {
-            _ = try await queue.enqueue(keyframe)
-            XCTFail("keyframes must not be dropped when media capacity is full")
-        } catch TransportError.mediaBackpressure {
-            // Expected.
-        }
-        do {
-            _ = try await queue.enqueue(videoConfig)
-            XCTFail("video configuration must not be dropped when media capacity is full")
-        } catch TransportError.mediaBackpressure {
-            // Expected.
-        }
-
+        // After a drop, delta frames are skipped until a keyframe even though
+        // the queue now has room.
         let firstDequeued = await queue.dequeue()
         let secondDequeued = await queue.dequeue()
-        let thirdDequeued = await queue.dequeue()
-        let emptyDequeued = await queue.dequeue()
         XCTAssertEqual(firstDequeued, control)
-        XCTAssertEqual(secondDequeued, mediaTwo)
-        XCTAssertEqual(thirdDequeued, mediaThree)
+        XCTAssertEqual(secondDequeued, mediaOne)
+        let skippedResult = try await queue.enqueue(mediaFour)
+        XCTAssertEqual(skippedResult, .discardedMedia)
+
+        // A keyframe supersedes the queued delta frame and ends the gap. It
+        // reports `.queued` so the sender does not force yet another keyframe.
+        let keyframeResult = try await queue.enqueue(keyframe)
+        XCTAssertEqual(keyframeResult, .queued)
+        let configResult = try await queue.enqueue(videoConfig)
+        XCTAssertEqual(configResult, .queued)
+
+        let thirdDequeued = await queue.dequeue()
+        let fourthDequeued = await queue.dequeue()
+        let emptyDequeued = await queue.dequeue()
+        XCTAssertEqual(thirdDequeued, keyframe)
+        XCTAssertEqual(fourthDequeued, videoConfig)
         XCTAssertNil(emptyDequeued)
+    }
+
+    func testBoundedQueueFailsExplicitlyWhenRequiredMediaHasNoRoom() async throws {
+        let queue = try BoundedFrameQueue(maxControlFrames: 1, maxMediaFrames: 1)
+        let firstKeyframe = try makeVideoEnvelope(sequence: 0, keyframe: true)
+        let secondKeyframe = try makeVideoEnvelope(sequence: 1, keyframe: true)
+        let delta = try makeVideoEnvelope(sequence: 2, keyframe: false)
+
+        let firstResult = try await queue.enqueue(firstKeyframe)
+        XCTAssertEqual(firstResult, .queued)
+        do {
+            _ = try await queue.enqueue(secondKeyframe)
+            XCTFail("a keyframe must not evict another keyframe")
+        } catch TransportError.mediaBackpressure {
+            // Expected.
+        }
+        // The rejected keyframe cannot be referenced, so later delta frames
+        // are skipped even after room becomes available.
+        _ = await queue.dequeue()
+        let deltaResult = try await queue.enqueue(delta)
+        XCTAssertEqual(deltaResult, .discardedMedia)
+        let emptyDequeued = await queue.dequeue()
+        XCTAssertNil(emptyDequeued)
+    }
+
+    func testBoundedQueueSkipsDeltaFramesAfterProtectedMediaInvalidation() async throws {
+        let queue = try BoundedFrameQueue(maxControlFrames: 1, maxMediaFrames: 3)
+        let keyframe = try makeVideoEnvelope(sequence: 0, keyframe: true)
+        let delta = try makeVideoEnvelope(sequence: 1, keyframe: false)
+        let nextKeyframe = try makeVideoEnvelope(sequence: 2, keyframe: true)
+
+        _ = try await queue.enqueue(keyframe)
+        await queue.removeProtectedMessages()
+        let deltaResult = try await queue.enqueue(delta)
+        XCTAssertEqual(deltaResult, .discardedMedia)
+        let keyframeResult = try await queue.enqueue(nextKeyframe)
+        XCTAssertEqual(keyframeResult, .queued)
+        let dequeued = await queue.dequeue()
+        XCTAssertEqual(dequeued, nextKeyframe)
     }
 
     func testMessageStreamPreservesReliableMessagesAndUsesSafeMediaReplacement() async throws {
@@ -178,8 +221,11 @@ final class TransportCoreTests: XCTestCase {
         )
         _ = try output.storage.yield(firstFrame)
         _ = try output.storage.yield(secondFrame)
+        // Required media purges the queued delta frames and starts a keyframe
+        // wait; a delta frame before the keyframe is skipped.
         XCTAssertEqual(try output.storage.yield(configuration), .replacedMedia)
-        XCTAssertEqual(try output.storage.yield(keyframe), .replacedMedia)
+        XCTAssertEqual(try output.storage.yield(firstFrame), .replacedMedia)
+        XCTAssertEqual(try output.storage.yield(keyframe), .queued)
 
         let first = try await output.storage.next()
         let second = try await output.storage.next()
@@ -460,6 +506,8 @@ final class TransportCoreTests: XCTestCase {
         let replacement = try await mediaPair.first.send(
             try makeVideoEnvelope(sequence: 2, keyframe: false)
         )
+        // The receiver drops the incoming delta frame rather than a queued
+        // one, so the delivered frames remain a decodable prefix.
         XCTAssertEqual(replacement, .replacedMedia)
         let iteratorTask = Task { () async throws -> [UInt64] in
             var iterator = mediaPair.second.incoming.makeAsyncIterator()
@@ -470,7 +518,7 @@ final class TransportCoreTests: XCTestCase {
             return [first.sequence, second.sequence]
         }
         let deliveredSequences = try await iteratorTask.value
-        XCTAssertEqual(deliveredSequences, [1, 2])
+        XCTAssertEqual(deliveredSequences, [0, 1])
     }
 
     func testSessionNegotiatesAndBlocksProtectedContentUntilAuthorization() async throws {
@@ -580,6 +628,135 @@ final class TransportCoreTests: XCTestCase {
         await host.stop()
         let stoppedHostSnapshot = await host.snapshot()
         XCTAssertFalse(stoppedHostSnapshot.authorized)
+    }
+
+    func testViewerKeyframeRequestIsCapabilityGatedAndThrottled() async throws {
+        let (host, viewer) = try await makeAuthorizedVideoSessions(
+            capabilities: [.pingPong, .h264Video, .keyframeRequest],
+            authorized: [.h264Video, .keyframeRequest]
+        )
+        let firstRequest = await viewer.requestKeyframe(reason: .decodeFailure)
+        let throttledRequest = await viewer.requestKeyframe(reason: .decodeFailure)
+        XCTAssertTrue(firstRequest)
+        XCTAssertFalse(throttledRequest, "requests inside the minimum interval must be coalesced")
+        let hostRequest = await host.requestKeyframe(reason: .decodeFailure)
+        XCTAssertFalse(hostRequest, "only the Viewer sends keyframe requests")
+
+        let received = try await firstKeyframeRequest(from: host)
+        XCTAssertEqual(received, KeyframeRequestMessage(generation: 9, reason: .decodeFailure))
+        await host.stop()
+        await viewer.stop()
+    }
+
+    func testViewerKeyframeRequestRequiresAuthorizedCapability() async throws {
+        let (host, viewer) = try await makeAuthorizedVideoSessions(
+            capabilities: [.pingPong, .h264Video],
+            authorized: [.h264Video]
+        )
+        let request = await viewer.requestKeyframe(reason: .mediaGap)
+        XCTAssertFalse(request, "a peer that did not negotiate the capability never receives the message")
+        await host.stop()
+        await viewer.stop()
+    }
+
+    func testViewerRequestsKeyframeAfterLocalMediaDiscard() async throws {
+        let (host, viewer) = try await makeAuthorizedVideoSessions(
+            capabilities: [.pingPong, .h264Video, .keyframeRequest],
+            authorized: [.h264Video, .keyframeRequest]
+        )
+        // Nobody consumes the Viewer's messages, so its bounded media stream
+        // fills and discards the fourth frame.
+        for index in 0 ..< 5 {
+            try await host.send(
+                .videoFrame(
+                    VideoFrameMessage(
+                        generation: 9,
+                        captureTimestamp: UInt64(index),
+                        presentationTimestamp: UInt64(index),
+                        width: 1,
+                        height: 1,
+                        keyframe: index == 0,
+                        accessUnit: Data([UInt8(index)])
+                    )
+                ),
+                flags: index == 0 ? .keyframe : []
+            )
+        }
+        let received = try await firstKeyframeRequest(from: host)
+        XCTAssertEqual(received, KeyframeRequestMessage(generation: 9, reason: .mediaGap))
+        await host.stop()
+        await viewer.stop()
+    }
+
+    private func makeAuthorizedVideoSessions(
+        capabilities: Set<Capability>,
+        authorized: Set<Capability>
+    ) async throws -> (host: SessionCoordinator, viewer: SessionCoordinator) {
+        let hostIdentity = try PeerIdentity(publicKeyRepresentation: Data("keyframe-host".utf8))
+        let viewerIdentity = try PeerIdentity(publicKeyRepresentation: Data("keyframe-viewer".utf8))
+        let pair = InMemoryTransport.makePair(
+            firstAuthentication: .trusted(viewerIdentity),
+            secondAuthentication: .trusted(hostIdentity)
+        )
+        try await pair.first.start()
+        try await pair.second.start()
+        let host = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .host,
+                implementationIdentifier: "keyframe-host",
+                capabilities: capabilities,
+                mandatoryCapabilities: [.pingPong]
+            ),
+            transport: pair.first
+        )
+        let viewer = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .viewer,
+                implementationIdentifier: "keyframe-viewer",
+                capabilities: capabilities,
+                mandatoryCapabilities: [.pingPong]
+            ),
+            transport: pair.second
+        )
+        async let hostStart: Void = host.start()
+        async let viewerStart: Void = viewer.start()
+        try await hostStart
+        try await viewerStart
+        for _ in 0 ..< 200 {
+            if (await host.snapshot()).state == .capabilitiesNegotiated,
+               (await viewer.snapshot()).state == .capabilitiesNegotiated {
+                break
+            }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        try await host.authorize(windowGeneration: 9, capabilities: authorized)
+        for _ in 0 ..< 200 {
+            if (await viewer.snapshot()).authorized { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let viewerAuthorized = await viewer.snapshot().authorized
+        XCTAssertTrue(viewerAuthorized)
+        return (host, viewer)
+    }
+
+    private func firstKeyframeRequest(from host: SessionCoordinator) async throws -> KeyframeRequestMessage {
+        let reader = Task { () throws -> KeyframeRequestMessage? in
+            for try await message in host.incomingMessages {
+                if case let .keyframeRequest(request) = message {
+                    return request
+                }
+            }
+            return nil
+        }
+        let timeout = Task {
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            reader.cancel()
+        }
+        defer { timeout.cancel() }
+        guard let request = try await reader.value else {
+            throw TransportError.connectionFailed("no keyframe request received")
+        }
+        return request
     }
 
     func testClipboardAcknowledgementUsesAuthenticatedCapabilityGate() async throws {
@@ -1122,12 +1299,22 @@ final class TransportCoreTests: XCTestCase {
 
         let capabilities: Set<Capability> = [.pingPong]
         let host = SessionCoordinator(
-            configuration: SessionConfiguration(role: .host, implementationIdentifier: "pairing-host", capabilities: capabilities),
+            configuration: SessionConfiguration(
+                role: .host,
+                implementationIdentifier: "pairing-host",
+                deviceName: "Intel-Test-Host",
+                capabilities: capabilities
+            ),
             transport: pair.first,
             pairingCoordinator: hostPairing
         )
         let viewer = SessionCoordinator(
-            configuration: SessionConfiguration(role: .viewer, implementationIdentifier: "pairing-viewer", capabilities: capabilities),
+            configuration: SessionConfiguration(
+                role: .viewer,
+                implementationIdentifier: "pairing-viewer",
+                deviceName: "Apple-Silicon-Test-Viewer",
+                capabilities: capabilities
+            ),
             transport: pair.second,
             pairingCoordinator: viewerPairing
         )
@@ -1140,14 +1327,14 @@ final class TransportCoreTests: XCTestCase {
         var viewerChallenge: PairingChallenge?
         for _ in 0 ..< 100 {
             viewerChallenge = await viewerPairing.pendingChallenge()
-            if viewerChallenge != nil { break }
+            if viewerChallenge?.isVerificationReady == true { break }
             try await Task.sleep(nanoseconds: 1_000_000)
         }
         let challenge = try XCTUnwrap(viewerChallenge)
         var hostChallenge: PairingChallenge?
         for _ in 0 ..< 100 {
             hostChallenge = await hostPairing.pendingChallenge()
-            if hostChallenge != nil { break }
+            if hostChallenge?.isVerificationReady == true { break }
             try await Task.sleep(nanoseconds: 1_000_000)
         }
         let hostChallengeValue = try XCTUnwrap(hostChallenge)
@@ -1176,8 +1363,14 @@ final class TransportCoreTests: XCTestCase {
         let viewerTrustDecision = try await viewerPairing.trustDecision(for: hostIdentity)
         XCTAssertEqual(hostSnapshot.state, .capabilitiesNegotiated)
         XCTAssertEqual(viewerSnapshot.state, .capabilitiesNegotiated)
+        XCTAssertEqual(hostSnapshot.peerDeviceName, "Apple-Silicon-Test-Viewer")
+        XCTAssertEqual(viewerSnapshot.peerDeviceName, "Intel-Test-Host")
         XCTAssertEqual(hostTrustDecision, .trusted)
         XCTAssertEqual(viewerTrustDecision, .trusted)
+        let hostTrustedPeers = try await hostTrustStore.allTrustedPeers()
+        let viewerTrustedPeers = try await viewerTrustStore.allTrustedPeers()
+        XCTAssertEqual(hostTrustedPeers.first?.displayName, "Apple-Silicon-Test-Viewer")
+        XCTAssertEqual(viewerTrustedPeers.first?.displayName, "Intel-Test-Host")
     }
 
     func testPairingBootstrapReusesMatchingTrustWithoutShowingPairingUI() async throws {
@@ -1264,7 +1457,7 @@ final class TransportCoreTests: XCTestCase {
         var viewerChallenge: PairingChallenge?
         for _ in 0 ..< 100 {
             viewerChallenge = await viewerPairing.pendingChallenge()
-            if viewerChallenge != nil { break }
+            if viewerChallenge?.isVerificationReady == true { break }
             try await Task.sleep(nanoseconds: 1_000_000)
         }
         let challenge = try XCTUnwrap(viewerChallenge)
@@ -3049,5 +3242,33 @@ private final class MessageStreamRegistrationGate: @unchecked Sendable {
 
         entered.signal()
         release.wait()
+    }
+}
+
+final class LatencyBudgetTests: XCTestCase {
+    func testStageCollectorSkipsWarmupBoundsSamplesAndIgnoresNegativeIntervals() {
+        var collector = BoundedStageLatencyCollector(warmupSampleCount: 2, maximumSamples: 3)
+        collector.append(startNanoseconds: 0, endNanoseconds: 999)
+        collector.append(startNanoseconds: 0, endNanoseconds: 999)
+        collector.append(startNanoseconds: 10, endNanoseconds: 5)
+        for interval: UInt64 in [10, 20, 30, 40] {
+            collector.append(startNanoseconds: 100, endNanoseconds: 100 + interval)
+        }
+        XCTAssertEqual(collector.retainedSampleCount, 3)
+        let summary = collector.summary()
+        XCTAssertEqual(summary?.minimumNanoseconds, 10)
+        XCTAssertEqual(summary?.maximumNanoseconds, 30)
+        collector.reset()
+        XCTAssertNil(collector.summary())
+    }
+
+    func testV1BudgetSumsToEndToEndTargetAndEvaluatesP95() throws {
+        XCTAssertEqual(LatencyBudget.v1.endToEndNanoseconds, 50_000_000)
+        let fast = try XCTUnwrap(PercentileSummary(samples: [5_000_000, 8_000_000]))
+        let slow = try XCTUnwrap(PercentileSummary(samples: [5_000_000, 30_000_000]))
+        let budget = LatencyBudget.v1.hostCaptureToSendNanoseconds
+        XCTAssertEqual(LatencyBudget.isWithinBudget(fast, budget: budget), true)
+        XCTAssertEqual(LatencyBudget.isWithinBudget(slow, budget: budget), false)
+        XCTAssertNil(LatencyBudget.isWithinBudget(nil, budget: budget))
     }
 }
