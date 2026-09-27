@@ -3,7 +3,7 @@ import Foundation
 public actor WindowCaptureSession {
     public nonisolated let frames: CapturedFrameStream
 
-    private let frameContinuation: AsyncThrowingStream<CapturedFrame, Error>.Continuation
+    private let frameChannel: CapturedFrameChannel
     private let frameGenerationGate: CapturedFrameGenerationGate
     private let windowProvider: any WindowDiscoveryProvider
     private let engineFactory: any WindowCaptureEngineFactory
@@ -23,12 +23,10 @@ public actor WindowCaptureSession {
         engineFactory: (any WindowCaptureEngineFactory)? = nil,
         configuration: CaptureConfiguration = .default
     ) {
-        let output = AsyncThrowingStream<CapturedFrame, Error>.makeStream(
-            bufferingPolicy: .bufferingNewest(max(1, configuration.outputBufferCount))
-        )
+        let channel = CapturedFrameChannel(bufferCount: configuration.outputBufferCount)
         let generationGate = CapturedFrameGenerationGate()
-        self.frames = CapturedFrameStream(stream: output.stream, generationGate: generationGate)
-        self.frameContinuation = output.continuation
+        self.frames = CapturedFrameStream(channel: channel, generationGate: generationGate)
+        self.frameChannel = channel
         self.frameGenerationGate = generationGate
         self.windowProvider = windowProvider
         self.configuration = configuration
@@ -38,7 +36,7 @@ public actor WindowCaptureSession {
     deinit {
         relayTask?.cancel()
         monitorTask?.cancel()
-        frameContinuation.finish()
+        frameChannel.close()
     }
 
     public func snapshot() -> CaptureSessionSnapshot {
@@ -96,6 +94,9 @@ public actor WindowCaptureSession {
         await stop()
         generation &+= 1
         let sessionGeneration = generation
+        // A fresh stream per generation: a consumer cancelled during the
+        // previous pipeline must not terminate frame delivery for this one.
+        frameChannel.replace()
         let newEngine = engineFactory.makeEngine()
         let relayTermination = CaptureRelayTermination()
         selectedWindow = window
@@ -249,7 +250,7 @@ public actor WindowCaptureSession {
               frame.windowIdentifier == windowIdentifier else {
             return
         }
-        _ = frameContinuation.yield(frame)
+        frameChannel.yield(frame)
     }
 
     private func engineEnded(
@@ -333,10 +334,10 @@ public actor WindowCaptureSession {
         await activeEngine?.stop()
         selectedWindow = nil
         outputDimensions = nil
-        // `frames` is a reusable Host pipeline stream. Finishing it here
-        // would strand a long-lived Host after a recoverable permission,
-        // provider, or capture-engine failure; deinit is the only terminal
-        // owner shutdown that finishes the stream.
+        // End only this generation's stream so a waiting consumer observes
+        // the failure instead of waiting forever. `frames` stays reusable:
+        // the next start installs a fresh generation stream.
+        frameChannel.finishCurrent(throwing: CaptureCoreError.sessionFailed(failure))
     }
 }
 

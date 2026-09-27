@@ -49,6 +49,48 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertEqual(stoppedSnapshot.state, .stopped(.cancelled))
     }
 
+    /// Regression: the Host cancels its capture task on every pipeline stop
+    /// or window replacement. Swift terminates an `AsyncThrowingStream` when
+    /// its waiting consumer is cancelled, so a shared stream delivered no
+    /// frames after the first restart and the Viewer froze on the last frame.
+    func testCancelledConsumerDoesNotStopFramesForNextGeneration() async throws {
+        let window = makeWindow(identifier: 44)
+        let provider = FakeWindowProvider(windows: [window], permission: .authorized)
+        let firstEngine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        let secondEngine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: SequencedCaptureEngineFactory(engines: [firstEngine, secondEngine]),
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 0)
+        )
+
+        try await session.start(windowIdentifier: window.identifier)
+        let firstConsumer = Task { () -> Int in
+            var count = 0
+            var iterator = session.frames.makeAsyncIterator()
+            while (try? await iterator.next()) != nil {
+                count += 1
+            }
+            return count
+        }
+        firstEngine.emit(try makeFrame(windowIdentifier: window.identifier, generation: 1))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        // The Host's stopVideoPipeline(): cancel while the consumer waits.
+        firstConsumer.cancel()
+        let firstCount = await firstConsumer.value
+        XCTAssertEqual(firstCount, 1)
+
+        try await session.start(windowIdentifier: window.identifier)
+        let secondConsumer = Task { () -> CapturedFrame? in
+            var iterator = session.frames.makeAsyncIterator()
+            return try await iterator.next()
+        }
+        secondEngine.emit(try makeFrame(windowIdentifier: window.identifier, generation: 2))
+        let received = try await secondConsumer.value
+        XCTAssertEqual(received?.generation, 2, "the next generation must still deliver frames")
+        await session.stop()
+    }
+
     func testSupersededStartFailureDoesNotFailNewerGeneration() async throws {
         let window = makeWindow(identifier: 43)
         let provider = FakeWindowProvider(windows: [window], permission: .authorized)

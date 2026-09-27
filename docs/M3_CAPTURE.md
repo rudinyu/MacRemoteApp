@@ -79,6 +79,18 @@ match the active selection.
 The output stream uses a bounded newest-frame buffer. This is a capture-stage
 bound only; M8 owns end-to-end frame pacing and performance measurement.
 
+`WindowCaptureSession.frames` is reusable across selections, but each
+generation is backed by its own bounded stream. Swift terminates an
+`AsyncThrowingStream` permanently when the task awaiting it is cancelled, and
+the Host cancels its capture task whenever it stops or replaces the video
+pipeline. With one shared stream, every capture after the first pipeline
+restart delivered no frames and the Viewer froze on the last picture. `start`
+now installs a fresh stream, so cancelling a consumer ends only its own
+generation. A capture failure finishes that generation's stream with the
+failure, so the Host's capture loop ends instead of waiting indefinitely.
+`testCancelledConsumerDoesNotStopFramesForNextGeneration` covers the restart
+sequence.
+
 ## Verification
 
 Deterministic tests use fake window and capture providers to cover:

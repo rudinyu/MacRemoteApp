@@ -244,53 +244,141 @@ public struct CapturedFrame: @unchecked Sendable {
     }
 }
 
-/// A reusable capture-session stream. The underlying stream remains alive when
-/// a selection stops or a recoverable capture failure occurs, while the
-/// generation gate discards frames buffered by a previous selection before
-/// they reach the next consumer. The stream finishes only when its owning
-/// WindowCaptureSession is deallocated.
+/// A reusable capture-session stream.
+///
+/// Each capture generation gets its own underlying `AsyncThrowingStream`.
+/// Swift terminates an `AsyncThrowingStream` permanently when the task
+/// awaiting it is cancelled, and the Host cancels its capture task whenever it
+/// stops or replaces the video pipeline. A single shared stream would therefore
+/// deliver no frames after the first pipeline restart. The channel replaces
+/// the stream on every `start`, so a cancelled consumer only ends its own
+/// generation. The generation gate still discards frames buffered by a
+/// previous selection.
+///
+/// An iterator binds to the current generation on its first `next()`. If that
+/// generation is replaced while the iterator is waiting, it follows the
+/// replacement; if the generation is stopped or fails without a replacement,
+/// the iterator ends (a failure is thrown). The channel closes only when its
+/// owning WindowCaptureSession is deallocated.
 public struct CapturedFrameStream: AsyncSequence, Sendable {
     public typealias Element = CapturedFrame
     public typealias Failure = Error
 
     public struct AsyncIterator: AsyncIteratorProtocol {
-        private var iterator: AsyncThrowingStream<CapturedFrame, Error>.AsyncIterator
+        private let channel: CapturedFrameChannel
         private let generationGate: CapturedFrameGenerationGate
+        private var iterator: AsyncThrowingStream<CapturedFrame, Error>.AsyncIterator?
+        private var boundStreamID: UInt64?
 
         fileprivate init(
-            iterator: AsyncThrowingStream<CapturedFrame, Error>.AsyncIterator,
+            channel: CapturedFrameChannel,
             generationGate: CapturedFrameGenerationGate
         ) {
-            self.iterator = iterator
+            self.channel = channel
             self.generationGate = generationGate
         }
 
         public mutating func next() async throws -> CapturedFrame? {
-            while let frame = try await iterator.next() {
-                if generationGate.accepts(frame.generation) {
-                    return frame
+            while true {
+                if iterator == nil {
+                    let current = channel.current()
+                    iterator = current.stream.makeAsyncIterator()
+                    boundStreamID = current.id
                 }
+                if let frame = try await iterator?.next() {
+                    if generationGate.accepts(frame.generation) {
+                        return frame
+                    }
+                    continue
+                }
+                // The bound generation ended. Follow a replacement that was
+                // installed while this iterator was waiting; otherwise end.
+                guard !Task.isCancelled,
+                      let boundStreamID,
+                      channel.hasReplaced(streamID: boundStreamID) else {
+                    return nil
+                }
+                iterator = nil
             }
-            return nil
         }
     }
 
-    private let stream: AsyncThrowingStream<CapturedFrame, Error>
+    private let channel: CapturedFrameChannel
     private let generationGate: CapturedFrameGenerationGate
 
     init(
-        stream: AsyncThrowingStream<CapturedFrame, Error>,
+        channel: CapturedFrameChannel,
         generationGate: CapturedFrameGenerationGate
     ) {
-        self.stream = stream
+        self.channel = channel
         self.generationGate = generationGate
     }
 
     public func makeAsyncIterator() -> AsyncIterator {
-        AsyncIterator(
-            iterator: stream.makeAsyncIterator(),
-            generationGate: generationGate
-        )
+        AsyncIterator(channel: channel, generationGate: generationGate)
+    }
+}
+
+/// Owns the per-generation frame stream behind `CapturedFrameStream`.
+final class CapturedFrameChannel: @unchecked Sendable {
+    typealias Stream = AsyncThrowingStream<CapturedFrame, Error>
+
+    private let lock = NSLock()
+    private let bufferCount: Int
+    private var stream: Stream
+    private var continuation: Stream.Continuation
+    private var streamID: UInt64 = 0
+    private var isClosed = false
+
+    init(bufferCount: Int) {
+        self.bufferCount = max(1, bufferCount)
+        (stream, continuation) = Self.makeStream(bufferCount: self.bufferCount)
+    }
+
+    func current() -> (stream: Stream, id: UInt64) {
+        lock.withLock { (stream, streamID) }
+    }
+
+    func hasReplaced(streamID candidate: UInt64) -> Bool {
+        lock.withLock { !isClosed && streamID != candidate }
+    }
+
+    /// Installs a fresh stream for a new capture generation and ends the
+    /// previous one.
+    func replace() {
+        let previous: Stream.Continuation? = lock.withLock {
+            guard !isClosed else { return nil }
+            let previous = continuation
+            (stream, continuation) = Self.makeStream(bufferCount: bufferCount)
+            streamID &+= 1
+            return previous
+        }
+        previous?.finish()
+    }
+
+    @discardableResult
+    func yield(_ frame: CapturedFrame) -> Stream.Continuation.YieldResult {
+        let target = lock.withLock { continuation }
+        return target.yield(frame)
+    }
+
+    /// Ends the current generation without installing a replacement.
+    func finishCurrent(throwing error: Error? = nil) {
+        let target = lock.withLock { continuation }
+        target.finish(throwing: error)
+    }
+
+    func close() {
+        let target: Stream.Continuation = lock.withLock {
+            isClosed = true
+            return continuation
+        }
+        target.finish()
+    }
+
+    private static func makeStream(bufferCount: Int) -> (Stream, Stream.Continuation) {
+        let output = Stream.makeStream(bufferingPolicy: .bufferingNewest(bufferCount))
+        return (output.stream, output.continuation)
     }
 }
 
