@@ -330,3 +330,9 @@ documented compatibility matrix:
 - Clipboard size limit, conflict policy, and text encoding edge cases — resolved
   in M7: 65,515 UTF-8 bytes, Offer/ACK/Text ordering, and deterministic
   arrival-order conflict handling.
+- Host cursor shape on the Viewer (the capture currently hides the cursor, and
+  no message carries its shape) — post-V1, not an M0–M10 requirement; option
+  (b), an optional enumerated `CursorState` message, was chosen and is pending
+  its P0.5 milestone definition.
+  The options and security notes are in
+  [the post-V1 roadmap](POST_V1_ROADMAP.md#open-decision-host-cursor-shape).
