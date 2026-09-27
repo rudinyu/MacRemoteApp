@@ -164,46 +164,12 @@ Additional rules:
   `ViewerInputTransport`, and `TransportCore.SessionCoordinator` is the
   authenticated capability/window-generation delivery gate. No M5 component
   calls CoreGraphics or Accessibility APIs.
-- In M6, `Apps/Host/HostInputMessageHandler` maps the authenticated input
-  message to an `InputCore.InputEventRecord`. `InputCore.HostInputController`
-  rechecks session/window/capability facts and asks the
-  `CoreGraphicsAccessibilityContextProvider` for current permission and
-  foreground identity and current geometry before calling the typed
-  `CoreGraphicsAccessibilityInputAdapter`. Each command carries the selected
-  window identity, owning application identifier, and generation, and the
-  adapter repeats that target/focus/owning-application check immediately before
-  target-bound process posting. `HostInputSessionLoop` is the single-consumer
-  stream dispatcher: it forwards non-input messages to the app dispatcher
-  instead of dropping them. The adapter is the only M6 code that
-  constructs/posts `CGEvent` values; it never activates background windows.
-  `TransportCore.SessionCoordinator.withIncomingInputAdmission` keeps an input
-  already delivered directly to the stream waiter in the same non-reentrant
-  authorization fence as local revoke, reconnect, and stop transitions.
-  `HostInputSessionRuntime`, started by the Host app's per-session composition
-  entry point, owns the loop lifetime and resets it on authorization/reconnect
-  transitions. Host lifecycle code uses `withSelectionReplacement()` (or pairs
-  `selectionWillChange()`/`selectionDidChange()`) while changing CaptureCore's
-  selected-window provider; the admission barrier remains held until the
-  replacement is published. The loop has a polling
-  backstop and closes the session if a missed transition cannot safely release
-  the old target. A detected secure-input or unknown console state remains
-  fail-closed; an unavailable optional AX secure-input signal does not replace
-  the independent foreground/window checks, and controller-owned state
-  releases retain a restricted target-bound path
-  after authorization loss or a known focus loss. A local selection
-  transition should be announced before the provider changes; if it is missed,
-  the provider must still be able to identify the old target for a safe release
-  or the session is closed. Permission loss leaves cleanup pending and visible
-  as unavailable until a safe snapshot permits retry. Local safety transitions also discard queued input messages, and a
-  stream-ending runtime retains a target-bound cleanup retry until safe
-  target-bound recovery, even when the runtime handle is released. If
-  CaptureCore has already published a replacement selection, the provider
-  supplies a live release context for the originally admitted target; the new
-  selection is never reused to release old state. Lifecycle stop/replacement
-  waits for that safe recovery before a replacement Host session can reuse the
-  selected target. A permission/focus outage can therefore temporarily block
-  reconnection; cancelling the cleanup lease could leave an OS key/button
-  pressed indefinitely.
+- In M6, `Apps/Host` owns the input-message bridge and per-session input loop,
+  `InputCore.HostInputController` performs the final per-event check, and the
+  typed `CoreGraphicsAccessibilityInputAdapter` is the only M6 code that
+  constructs/posts `CGEvent` values. The admission and held-input cleanup
+  rules are specified as a state machine in
+  [Host input admission and cleanup](#host-input-admission-and-cleanup).
 - In M10, `Apps/Host/HostRuntime` composes first-run permission onboarding, the
   listener, `CaptureCore`,
   `CodecCore`, `InputCore`, clipboard bridges, and `SessionCoordinator` for
@@ -355,6 +321,107 @@ with keyframe and timestamp metadata. It owns no socket or session identity.
 coordinates to the selected window's current geometry, and invokes a
 permission-aware CoreGraphics/Accessibility adapter. It must fail closed when
 the selected window is no longer eligible or foreground-controlled.
+
+### Host input admission and cleanup
+
+M6 splits Host input handling across these owners:
+
+- `TransportCore.SessionCoordinator` admits the authenticated message.
+  `withIncomingInputAdmission` is a non-reentrant authorization fence around
+  input already delivered directly to the sole stream waiter.
+- `Apps/Host/HostInputMessageHandler` maps the message to an
+  `InputCore.InputEventRecord`; `Apps/Host` supplies the current session and
+  selected-window facts.
+- `HostInputSessionLoop` is the single-consumer stream dispatcher. It forwards
+  non-input messages to the app dispatcher instead of dropping them.
+- `HostInputSessionRuntime`, started by the Host app's per-session
+  composition entry point, owns the loop lifetime and resets it on
+  authorization/reconnect transitions.
+- `InputCore.HostInputController` performs the final per-event check.
+  `CoreGraphicsAccessibilityContextProvider` supplies current PostEvent
+  permission, optional AX secure-input state, current bounds/geometry,
+  on-screen window identity, foreground ordering/identity, and lock state.
+- `CoreGraphicsAccessibilityInputAdapter` is the only M6 code that
+  constructs/posts `CGEvent` values.
+
+The state of admitted pressed input (held keys and buttons) for one selected
+target moves through these states:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Admitted: down event passes admission fence and per-event checks
+    Idle --> Idle: unmatched release rejected
+    Admitted --> Admitted: further input passes per-event checks
+    Admitted --> Released: matching release on the normal input path
+    Admitted --> CleanupPending: revoke, reconnect, stop, focus loss, permission loss, selection change, or stream end
+    CleanupPending --> Released: target-bound release while identity, generation, bounds, and permission match
+    CleanupPending --> CleanupPending: permission unavailable, retry when a safe snapshot returns
+    CleanupPending --> SessionClosed: old target cannot be identified for a safe release
+    Released --> Idle: state cleared, sequence and rate state reset
+    SessionClosed --> [*]
+```
+
+Invariants:
+
+1. **Layered per-event checks.** Every command carries the selected window
+   identity, owning application identifier, process, and generation. The
+   controller rechecks session/window/capability facts and current
+   permission, foreground identity, and geometry; the adapter repeats the
+   complete target/focus/owning-application/permission check immediately
+   before target-bound process posting. A `TransportCore` authorization
+   decision alone never authorizes an OS event.
+2. **No background activation.** The adapter never activates a background
+   window. No private API or bypass is used.
+3. **Fail-closed secure input.** A detected secure-input field or an unknown
+   console state is rejected. When the optional AX secure-input signal is
+   unavailable, it does not replace the independent foreground/window checks,
+   which still protect the base PostEvent path.
+4. **Admission fence.** Local revoke, reconnect, and stop cannot invalidate
+   authorization between the admission check and the Host injection call,
+   because input handed to the stream waiter runs inside
+   `withIncomingInputAdmission`.
+5. **Queued input is discarded** on local authorization, permission, focus,
+   and selection transitions (local safety transitions).
+6. **Release before clear.** Host reset attempts a safe release of admitted
+   pressed state before clearing it and uses a reserved state-ending rate
+   lane. Unmatched releases are rejected.
+7. **Target-bound release.** Controller-owned state releases retain a
+   restricted target-bound path after authorization loss or a known focus
+   loss. After authorization is revoked, cleanup may only release
+   controller-admitted state while the same window identity, generation,
+   current bounds, and permission still match. A target known to be not
+   foreground is allowed only for this release path; normal input still
+   requires eligible foreground focus.
+8. **Selection-change ordering.** Host lifecycle code uses
+   `withSelectionReplacement()` (or pairs `selectionWillChange()`/
+   `selectionDidChange()`) so the transition is announced before CaptureCore's
+   selected-window provider changes; the admission barrier stays held until
+   the replacement is published, and the old target is released while it is
+   still selected. If CaptureCore has already published a replacement, the
+   provider supplies a live release context for the originally admitted
+   target; the new selection is never reused to release old state.
+9. **Missed transitions close the session.** If the ordering is missed and the
+   provider cannot identify the old target, the stale release is rejected and
+   the Host closes the session rather than carrying pressed state into the
+   replacement target. The loop's polling backstop also closes the session if
+   a missed transition cannot safely release the old target.
+10. **Permission-loss pending cleanup.** If permission temporarily disappears,
+    cleanup remains pending and is surfaced as unavailable until a safe
+    snapshot permits a retry.
+11. **Cleanup outlives the stream.** If the session stream ends first, the
+    stream-ending runtime retains a target-bound cleanup retry until safe
+    target-bound recovery or target replacement, even when the runtime handle
+    is released.
+12. **Replacement waits for recovery.** Lifecycle stop/replacement waits for
+    that safe recovery before a replacement Host session can reuse the
+    selected target. A permission/focus outage can therefore temporarily block
+    reconnection; cancelling the cleanup lease could leave an OS key/button
+    pressed indefinitely.
+
+The wire-level binding for these rules is
+[ADR-0005](decisions/0005-m6-host-input-binding.md); the security framing is
+in [Input safety](SECURITY.md#input-safety).
 
 ## Viewer architecture
 
@@ -520,68 +587,14 @@ clipboard conflict and size policy. M8 must record benchmark evidence before
 any performance-driven transport change. These are decisions, not permission
 to add speculative features.
 
-## M8 decisions
+Recorded decisions are kept as short records in [`docs/decisions/`](decisions/README.md):
 
-- The baseline remains one authenticated Network.framework TCP stream with
-  separate bounded control/media queues. No alternate transport is enabled
-  without physical evidence that the baseline misses the target.
-- The benchmark exchanges at least 20 authenticated four-timestamp probes,
-  selects the minimum-RTT offset, reports residual uncertainty and drift, and
-  refuses to label one-way latency verified when uncertainty exceeds 5 ms.
-- Video queue capacity remains three. The Host outgoing queue and both Viewer
-  incoming queues share `KeyframeAwareMediaAdmission`: a discarded delta frame
-  starts a skip-until-keyframe state so no delta frame is ever decoded against
-  a missing reference, and protected-media invalidation starts the same wait.
-  `SessionCoordinator.send` reports `.replacedMedia` only when the queue
-  enters that wait (a keyframe purging superseded delta frames does not), and
-  the Host forces its next encode to a keyframe. A Viewer-side gap or decode
-  failure sends the rate-limited `KeyframeRequest` described in
-  `docs/PROTOCOL.md`.
-- Encoder output reaches the wire through one FIFO relay
-  (`Apps/Host/HostEncodedFrameRelay`) instead of one unstructured task per
-  frame, so frames cannot be reordered before sequence numbers are assigned.
-  Its bounded buffer follows the same skip-until-keyframe rule on overflow.
-- Capture defaults to 4:2:0 bi-planar video-range pixels tagged BT.709, the
-  encoder's native input, removing a per-frame BGRA conversion on the Host.
-- The p95 latency budget is split per stage in `LatencyBudget.v1`: Host
-  capture-to-send 12 ms, network transit 18 ms, Viewer receive-to-present
-  20 ms, summing to the 50 ms target. Host and Viewer log sanitized per-stage
-  p50/p95 aggregates so a miss can be attributed to one stage.
-  Control/input ordering and authorization gates are never traded for a
-  latency optimization.
-- The encoder disables B-frame reordering and applies a best-effort
-  one-second `DataRateLimits` cap at 1.5x the average bitrate. The TCP binding
-  sets `noDelay` so small control/input envelopes are not held by Nagle
-  coalescing behind video segments.
+- M2 discovery, stream binding, and trust bootstrap —
+  [ADR-0001](decisions/0001-m2-discovery-transport-and-trust-bootstrap.md).
+- M3 window capture scope and generations —
+  [ADR-0003](decisions/0003-m3-window-capture-scope.md).
+- M8 transport baseline, clock-sync probes, and video queue —
+  [ADR-0006](decisions/0006-m8-transport-baseline-and-benchmark.md).
 
-## M2 decisions
-
-- Bonjour uses `_macremote._tcp` in `local.`. Discovery results are treated as
-  untrusted endpoint hints and contain no pairing secret or captured content.
-- The initial connection binding is one ordered Network.framework TCP byte
-  stream carrying the M1 control/media channels. `TransportCore` keeps bounded
-  control and media queues separate so stale media cannot starve control.
-- TLS requires version 1.3 or newer and peer authentication on every
-  connection. `SecurityCore` identifies a peer by the SHA-256 fingerprint of
-  the leaf certificate public-key representation and compares it with a
-  Keychain trust record.
-- Unknown peers use a certificate-presented bootstrap session followed by
-  explicit two-sided local-consent pairing. Trust does not imply window
-  authorization; the Host must separately authorize the session after
-  capability negotiation.
-- A matching local trust record auto-consents to the bootstrap challenge and
-  suppresses that endpoint's prompt, but the Host still sends the challenge and
-  both consent messages must complete. This keeps one-sided Keychain state from
-  deadlocking or silently bypassing consent on the endpoint that needs repair.
-
-## M3 decisions
-
-- The Host uses ScreenCaptureKit's desktop-independent-window filter and does
-  not fall back to whole-display capture.
-- Window discovery requires Screen Recording authorization, an on-screen
-  zero-layer window, a non-empty application bundle identifier, and positive
-  bounds. Titles remain optional metadata and are not treated as credentials.
-- `WindowCaptureSession` assigns a new generation per selection, accepts only
-  matching window/generation frames, and uses a bounded newest-frame output.
-  Permission loss, window disappearance, capture error, EOF, or cancellation
-  invalidates the active capture before later codec or transport work.
+M4 codec defaults and M7 clipboard policy are recorded in
+[M4 codec](M4_CODEC.md) and [M7 clipboard and UX](M7_CLIPBOARD_UX.md).

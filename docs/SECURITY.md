@@ -210,38 +210,28 @@ The app name is local UI only; it is not logged or sent to the Viewer.
 - A malformed input event must fail closed without partially applying a
   sequence of unrelated events.
 
-M6 enforcement is split explicitly: `TransportCore` admits the authenticated
-  message, `Apps/Host` supplies the current session and selected-window facts,
-  and `InputCore.HostInputController` performs the final per-event check.
-  `CoreGraphicsAccessibilityContextProvider` rechecks PostEvent permission,
-  optional AX secure-input state, current bounds, on-screen window identity, foreground ordering,
-  and lock state; each typed command carries the target window, owning
-  application identifier, process, and generation, and
-  `CoreGraphicsAccessibilityInputAdapter` repeats the complete target/focus/
-  permission check immediately before posting. The adapter never activates a
-  background window. A known secure-input field is rejected; when the optional
-  Accessibility signal is unavailable, the independent foreground/window
-  checks still protect the base PostEvent path. No private API or bypass is
-  used. Host reset attempts safe release of admitted pressed
-  state before clearing it and uses a reserved state-ending rate lane. If
-  session authorization has already been revoked, that cleanup path may only
-  release controller-admitted state while the same window identity,
-  generation, current bounds, and permission still match. A selected target
-  that is known to be not foreground is allowed only for this target-bound
-  release path; normal input still requires eligible foreground focus. A local
-  selection transition must be announced before the provider changes so the
-  old target can be released while it is still selected. If the ordering is
-  missed, the stale release is rejected and the Host closes the session rather
-  than carrying pressed state into the replacement target. If permission
-  temporarily disappears, cleanup remains pending and is surfaced as
-  unavailable until a safe snapshot returns; if the session stream ends first,
-  the Host retains a target-bound cleanup retry until recovery or target
-  replacement. Queued input is discarded on local authorization, permission,
-  focus, and selection transitions. Input already handed directly to the sole
-  stream waiter is additionally fenced by the non-reentrant
-  `SessionCoordinator.withIncomingInputAdmission` operation, so local revoke,
-  reconnect, or stop cannot invalidate authorization between the check and the
-  Host injection call. Unmatched releases are rejected.
+M6 enforcement is split explicitly:
+
+- `TransportCore` admits the authenticated message, `Apps/Host` supplies the
+  current session and selected-window facts, and
+  `InputCore.HostInputController` performs the final per-event check.
+- `CoreGraphicsAccessibilityContextProvider` rechecks PostEvent permission,
+  optional AX secure-input state, current bounds, on-screen window identity,
+  foreground ordering, and lock state.
+- Each typed command carries the target window, owning application
+  identifier, process, and generation.
+  `CoreGraphicsAccessibilityInputAdapter` repeats the complete
+  target/focus/permission check immediately before posting and never
+  activates a background window.
+- A known secure-input field is rejected. When the optional Accessibility
+  signal is unavailable, the independent foreground/window checks still
+  protect the base PostEvent path. No private API or bypass is used.
+
+Held-input cleanup (release-before-clear, target-bound release after
+revocation, selection-change ordering, permission-loss pending cleanup,
+cleanup retry after stream end, queued-input discard, and the admission
+fence) is specified as a state diagram with numbered invariants in
+[Host input admission and cleanup](ARCHITECTURE.md#host-input-admission-and-cleanup).
 
 ## Clipboard privacy
 
@@ -324,40 +314,12 @@ that the implementation does not provide.
 Any missed control, unverified cryptographic configuration, or environment-only
 test limitation must be recorded as an open security risk before V1 release.
 
-## M2 implementation decisions and open validation
+## Decision records
 
-M2 uses TLS 1.3 through Network.framework and derives the peer identifier from
-the SHA-256 fingerprint of the leaf certificate public-key representation.
-Peer authentication is required on both client and server paths. Known peers
-are compared against `SecurityCore` trust records stored in the macOS
-Keychain. A certificate that does not match the stored identity is rejected;
-an unknown but presented identity may enter the protected bootstrap flow but
-cannot send or receive protected session content until pairing and Host
-authorization complete.
-
-The Host initiates pairing with a commitment to a fresh random contribution.
-The Viewer commits its own fresh contribution, the Host reveals its committed
-value, and the Viewer verifies and reveals its contribution. `SecurityCore`
-derives the confirmation value from the challenge ID, both presented public
-identities, and both contributions; either endpoint rejects a reveal that does
-not match the corresponding commitment. Each endpoint records an explicit
-local consent event, and a remote confirmation is accepted only as the other
-side's consent for the same challenge. Both sides persist the peer identity
-only after the two-sided state is complete. Revocation deletes
-the trust record and requires pairing again. Reconnect clears session
-authorization, window scope, capability scope, and channel sequence state.
-
-The local device key is retained by Keychain-backed `SecurityCore`; the TLS
-adapter receives a platform `SecIdentity` loaded from Keychain or assembled
-from the locally generated Keychain key and certificate. PKCS#12 import is
-restricted to the explicit debug physical-smoke path. P-256 certificate and
-Network.framework peer-key representations are canonicalized before
-fingerprint comparison. Generated key/certificate continuity is fail-closed;
-missing or mismatched material is reported instead of silently rotating a
-trusted identity. Reinstall/rotation behavior, locked-Keychain failure, and
-access-control configuration remain deployment-specific. The M5 environment has now passed
-real loopback mutual-TLS/session startup with temporary identities; that is not
-evidence of physical Intel Host to Apple Silicon Viewer Bonjour/TLS
-interoperability, which remains an environment validation item. M6
-deterministic authorization and adapter gates now pass; real OS input posting
-still requires the documented disposable-application manual test.
+The M2 TLS identity, commit/reveal pairing, key-provisioning, and revocation
+decisions, including the deployment-specific key-handling items that remain
+open validation, are recorded in
+[ADR-0002](decisions/0002-m2-tls-identity-and-pairing.md). The M6 Host input
+binding is [ADR-0005](decisions/0005-m6-host-input-binding.md). Loopback,
+deterministic, and physical evidence status is tracked in
+[the status page](STATUS.md).

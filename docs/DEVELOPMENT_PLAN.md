@@ -7,50 +7,8 @@ primary outcome, explicit boundaries, exit criteria, and verification work. A
 milestone is complete only when its exit criteria and tests are satisfied or a
 documented exception is explicitly accepted by the user.
 
-The repository contains the completed M0 foundation and M1 RemoteProtocol
-contract, an M2 secure-session implementation with real loopback mutual-TLS
-verification, an M3 CaptureCore foundation with deterministic fake-provider
-tests, and the M4 CodecCore/Viewer presentation foundation. M2 code gates are
-complete and a repeatable two-machine Bonjour/TLS smoke harness is available;
-the physical Intel-to-Apple-Silicon pass remains an environment evidence item.
-M3's live frame evidence is verified on the
-current M5 logged-in window-server session. M4's deterministic gates are
-complete; its VideoToolbox encode/decode smoke is an explicit opt-in hardware
-check. M5's Viewer input transport gate and M6's Host authorization/mapping
-implementation gate are complete with deterministic tests. M6 real OS event
-posting remains an environment evidence item requiring a disposable foreground
-test application and PostEvent permission; Accessibility is optional for the
-best-effort secure-input provider, and a detected secure field remains
-fail-closed. M7's implementation/test gate is
-complete, including the two app-layer pasteboard bridges; its physical
-Intel-Host/Apple-Silicon-Viewer clipboard walkthrough remains an environment
-evidence item. M8's deterministic measurement/resilience gate and M9's
-release-audit gate are implemented. M10 now also has a launchable Host/Viewer
-production composition covering Bonjour/TLS, explicit Host selection,
-same-session one-window replacement, capture, H.264/Metal presentation,
-authenticated input, and opt-in text clipboard delivery. Host
-permission/listener failures are recoverable from a resident status-menu
-action, Bonjour readiness includes service registration, and the Metal path
-reports the actual drawable presentation boundary. M10 now also refreshes the
-eligible window catalog during active sessions, foregrounds an explicitly
-selected regular app while retaining per-event input gates, exposes truthful
-Viewer connection-button states, and exchanges short hostnames as display-only
-Hello metadata. M10's deterministic final
-gate, interactive pairing UI, Keychain trust reuse, and acceptance checklist
-are implemented, including explicit trust reset controls on both endpoints
-and editable Host discovery naming. The production roles now use separate
-Keychain identity labels and peer-trust services, with signed per-role cleanup
-for uninstall. The physical two-machine acceptance and
-clock-synchronized performance report remain unverified on this Apple Silicon
-workspace. The intentionally deferred capabilities are listed in
-`docs/POST_V1_ROADMAP.md`.
-
-M10 UI now uses the shared `AppSupport` package for native menus, settings
-content, and version/build formatting. Viewer Settings is a page in its main
-window; Host Settings retains the resident menu-bar lifecycle. The recorded
-local checks do not complete the connected navigation/input-release or Host
-window-lifecycle acceptance rows. See [M10 acceptance](M10_ACCEPTANCE.md) and
-the dated [UI review evidence](TESTING_CLEANUP.md#local-evidence-2026-09-26-021003).
+Current milestone state and open evidence gaps are tracked in
+[the status page](STATUS.md).
 
 ## Delivery principles
 
@@ -69,7 +27,8 @@ the dated [UI review evidence](TESTING_CLEANUP.md#local-evidence-2026-09-26-0210
 - Do not add out-of-scope features as shortcuts or future-proofing.
 - Keep README, product requirements, architecture, milestone status, and
   user/acceptance guides synchronized with user-visible behavior. Record
-  unverified hardware behavior separately from implementation completion.
+  milestone status and unverified hardware behavior in
+  [the status page](STATUS.md), separately from implementation completion.
 - Finish each UI/installation test with [scoped cleanup](TESTING_CLEANUP.md),
   unless retaining the test state was explicitly requested. Preserve source,
   Git state, unrelated checkouts, and release channels; record any cleanup gap.
