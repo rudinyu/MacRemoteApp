@@ -205,57 +205,16 @@ event rate/sequence is invalid.
 V1 does not transfer arbitrary key logs, secure-input contents, password
 prompts, or events intended for background/unfocused applications.
 
-### M5 binding decisions
+The concrete input bindings are recorded as decision records:
 
-- Viewer pointer coordinates are normalized to unsigned 16-bit values against
-  the current content rectangle. The Viewer surface uses a top-left origin:
-  `y=0` is the top edge and `y=65535` is the bottom edge. Events outside that rectangle, or while the
-  surface is not authenticated, authorized, and stream-ready, are rejected
-  locally and never sent.
-- `InputCore` assigns a local monotonic event ordinal and carries the current
-  selected-window generation. Keyboard modifiers use the protocol bitmask;
-  scroll deltas are bounded before encoding. The Viewer input surface admits
-  at most 240 events per monotonic second and the encoded event payload is
-  limited to 512 bytes.
-- `ViewerInputTransport` converts only the typed `InputCore.InputEventRecord`
-  into the existing `RemoteProtocol.InputEventMessage`. It does not serialize
-  raw `NSEvent`, `CGEvent`, key logs, or clipboard data. `TransportCore` then
-  applies session authentication, direction, capability, sequence, and window
-  generation checks.
-- M5 verification may use a Host test double to inspect typed records. M6 now
-  performs Host coordinate mapping and OS event injection only after the
-  permission, foreground, focus, and selected-window checks below.
-
-### M6 binding decisions
-
-- `Apps/Host/HostInputMessageHandler` converts only the typed
-  `InputEventMessage` fields into an `InputCore.InputEventRecord`. The
-  already-authenticated ordered delivery gate is followed by a Host-local
-  per-session sequence and local monotonic arrival timestamp; remote payload
-  fields do not provide admission authority.
-- `InputCore.HostInputController` queries Host context for every event and
-  requires session authorization, matching window generation and process/
-  window identity, current window geometry, PostEvent permission, optional AX
-  secure-input inspection, eligible foreground focus, and the negotiated mouse/keyboard
-  capability. Commands retain the selected target identity so the OS adapter
-  can repeat the check immediately before posting.
-- Normalized coordinates map to the selected window's current global screen
-  bounds. Only typed CoreGraphics commands are accepted; arbitrary `CGEvent`
-  archives, background activation, locked-screen control, and secure-input
-  bypass remain unsupported.
-- Disconnect, authorization revocation, focus/permission loss, and selection
-  changes reset Host input sequence/rate state and attempt safe release of
-  admitted pressed state while the same target and permission remain valid.
-  A known not-foreground state is permitted only for this target-bound cleanup;
-  normal input still requires eligible focus. Host lifecycle code announces a
-  selection change before replacing the CaptureCore selection. If that order
-  is missed, the stale release is rejected and the Host closes the session
-  rather than admitting input for the replacement target. If permission is
-  unavailable, cleanup remains pending and status stays unavailable until a
-  safe snapshot allows a retry.
-  A detected secure-input state or unknown console state is rejected. If the
-  optional Accessibility secure-input query is unavailable, the independent
-  foreground/window checks still protect the base PostEvent path.
+- M5 Viewer binding (16-bit top-left normalized coordinates, local event
+  ordinal, 240 events per second, 512-byte payload, typed-record-only
+  transport) — [ADR-0004](decisions/0004-m5-viewer-input-binding.md).
+- M6 Host binding (typed-field conversion, Host-local sequence, per-event
+  context checks, target-bound cleanup, fail-closed secure input) —
+  [ADR-0005](decisions/0005-m6-host-input-binding.md), with the cleanup state
+  machine in
+  [Host input admission and cleanup](ARCHITECTURE.md#host-input-admission-and-cleanup).
 
 ## Clipboard contract
 

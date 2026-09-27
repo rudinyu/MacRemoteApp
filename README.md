@@ -7,48 +7,10 @@ Host; this is deliberately not a full remote-desktop product.
 
 ## Current status
 
-The M0 Repository Foundation and M1 RemoteProtocol wire contract are complete.
-The Host target is validated for both `x86_64` and `arm64` builds; the V1
-physical Host target remains Intel, while the Viewer target is Apple Silicon.
-The M2 secure LAN session implementation, local Keychain identity enrollment,
-PKCS#12 diagnostic provisioning, and real loopback mutual-TLS/session smoke
-test are complete.
-The repository now includes a repeatable physical Intel Host to Apple Silicon
-Viewer Bonjour/TLS/capability smoke harness, signed app/DMG packaging, and
-role-specific install/uninstall scripts;
-the actual two-machine run remains an environment evidence gate. M3 now
-contains the Host window catalog
-and ScreenCaptureKit capture foundation with deterministic fake-provider tests
-and a successful M5 live frame smoke test. M4 now contains bounded H.264
-VideoToolbox encode/decode adapters, decoder-generation recovery rules, and a
-Viewer Metal presentation surface with deterministic layout/queue tests. M5
-adds the Viewer-side typed input foundation and authenticated event transport.
-M6 adds Host-side authorization-aware coordinate mapping and typed
-CoreGraphics/Accessibility injection adapters with deterministic fake-adapter
-tests. M7 now adds the opt-in text clipboard coordinator, bounded Offer/ACK/
-Text flow, echo/conflict handling, explicit session UX projection, and Host/
-Viewer AppKit string-pasteboard bridges. Physical OS event posting and the
-two-machine clipboard walkthrough remain environment evidence steps. M8 now
-includes the authenticated clock-sync/percentile model, deterministic
-performance harness, bounded-queue stress coverage, and reconnect/keyframe
-resilience evidence. M9 adds release-only debug gating, hardened-runtime
-artifact audit, negative-test documentation, and a residual-risk record. M10
-adds the deterministic final gate, the production Host/Viewer composition with
-interactive pairing and Keychain trust reuse, and the two-machine acceptance
-checklist.
-The production path now wires window discovery/selection, ScreenCaptureKit,
-H.264 encode/decode, Metal presentation, authenticated mouse/keyboard input,
-and opt-in text clipboard synchronization. The Viewer presents the eligible
-Host windows in a picker so a system/helper window is not selected silently.
-The interactive pairing UI is implemented with Keychain trust reuse. Host and
-Viewer use separate identity labels and peer-trust services so they can also
-be tested on the same Mac without sharing a private key. The Host status menu
-and Viewer window provide role-specific peer-trust reset controls, and the
-Host discovery name can be changed without rotating its TLS identity. An
-upgrade from the previous shared-trust namespace requires one fresh pairing;
-legacy Keychain entries are left untouched by the upgrade. The
-actual Intel-to-Apple-Silicon run and OS Accessibility/input evidence remain
-environment gates until they are executed on both Macs.
+Milestone state and open evidence gaps are tracked in one place:
+[`docs/STATUS.md`](docs/STATUS.md).
+
+## Native app shell
 
 Both roles now have native macOS About, Settings, Hide, Minimize, and Quit
 commands. Viewer Settings replaces the remote view in its existing main
@@ -59,9 +21,6 @@ without replacing the session's authorization checks. Release identifiers use
 `major.minor.build`: `0.2.1003` is Version `0.2`, Build `1003`, stored separately
 in the bundle metadata. See the [UI architecture](docs/ARCHITECTURE.md#native-app-shell-and-release-identity)
 and [product requirements](docs/PRODUCT_SPEC.md#settings-and-standard-macos-controls).
-Connected page switching and Host window lifecycle still require the physical
-acceptance checks; local UI evidence is recorded in
-[UI Review and Post-test Cleanup](docs/TESTING_CLEANUP.md).
 
 The user-facing documents are [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md),
 [`docs/DEBUGGING.md`](docs/DEBUGGING.md), and
@@ -116,7 +75,9 @@ MacRemoteApp/
     ├── TESTING_CLEANUP.md
     ├── PRODUCT_SPEC.md
     ├── PROTOCOL.md
-    └── SECURITY.md
+    ├── SECURITY.md
+    ├── STATUS.md
+    └── decisions/
 ```
 
 The implementation repository is expected to grow toward this shape, while
@@ -310,6 +271,9 @@ Read the documents in this order before implementation:
 4. `docs/SECURITY.md` — threats, pairing, permissions, and privacy controls.
 5. `docs/DEVELOPMENT_PLAN.md` — M0-M10 scope and verification gates.
 
+`docs/STATUS.md` is the single source for milestone state and evidence gaps,
+and `docs/decisions/` holds milestone-scoped decision records.
+
 The user's current request and later explicit corrections take precedence over
 stale assumptions. Any resulting design change should be recorded in the
 appropriate document before implementation.
@@ -322,13 +286,16 @@ appropriate document before implementation.
 | M1 | RemoteProtocol types, framing, codec tests, and versioning |
 | M2 | Secure LAN discovery, pairing, and session lifecycle |
 | M3 | Host window discovery and ScreenCaptureKit capture |
-| M4 | H.264 encode/decode and Metal presentation (complete; hardware smoke is opt-in) |
-| M5 | Viewer mouse/keyboard capture and event transport (complete) |
-| M6 | Host-side focus-aware input mapping and injection (implementation/test gate complete; OS evidence pending) |
-| M7 | Text clipboard synchronization and session UX (implementation/test gate complete; physical walkthrough pending) |
-| M8 | Performance/resilience implementation and deterministic evidence (physical report pending) |
-| M9 | Security hardening, signed app/DMG release audit, install lifecycle, and notarization helper (current notarized artifacts verified; profile remains host-specific) |
-| M10 | Production Host/Viewer vertical slice, interactive pairing, and acceptance checklist (physical Intel-to-Apple-Silicon acceptance pending) |
+| M4 | H.264 encode/decode and Metal presentation |
+| M5 | Viewer mouse/keyboard capture and event transport |
+| M6 | Host-side focus-aware input mapping and injection |
+| M7 | Text clipboard synchronization and session UX |
+| M8 | Performance/resilience implementation and deterministic evidence |
+| M9 | Security hardening, signed app/DMG release audit, install lifecycle, and notarization helper |
+| M10 | Production Host/Viewer vertical slice, interactive pairing, and acceptance checklist |
+
+Per-milestone completion and pending evidence are in
+[`docs/STATUS.md`](docs/STATUS.md).
 
 Each milestone is independently scoped in `docs/DEVELOPMENT_PLAN.md`. Do not
 skip a gate because a later feature appears easy to prototype.
