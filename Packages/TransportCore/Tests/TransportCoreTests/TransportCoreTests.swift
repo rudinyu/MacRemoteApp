@@ -688,6 +688,52 @@ final class TransportCoreTests: XCTestCase {
         await viewer.stop()
     }
 
+    func testViewerSendsReceiverReportWhenAuthorized() async throws {
+        let (host, viewer) = try await makeAuthorizedVideoSessions(
+            capabilities: [.pingPong, .h264Video, .receiverReport],
+            authorized: [.h264Video, .receiverReport]
+        )
+        let reader = Task { () throws -> ReceiverReportMessage? in
+            for try await message in host.incomingMessages {
+                if case let .receiverReport(report) = message {
+                    return report
+                }
+            }
+            return nil
+        }
+        // Two frames at least one report interval apart produce a report.
+        for index in 0 ..< 2 {
+            try await host.send(
+                .videoFrame(
+                    VideoFrameMessage(
+                        generation: 9,
+                        captureTimestamp: UInt64(index),
+                        presentationTimestamp: UInt64(index),
+                        width: 1,
+                        height: 1,
+                        keyframe: true,
+                        accessUnit: Data([UInt8(index)])
+                    )
+                ),
+                flags: .keyframe
+            )
+            if index == 0 {
+                try await Task.sleep(nanoseconds: 600_000_000)
+            }
+        }
+        let timeout = Task {
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            reader.cancel()
+        }
+        let report = try await reader.value
+        timeout.cancel()
+        XCTAssertEqual(report?.generation, 9)
+        XCTAssertEqual(report?.discardedFrames, 0)
+        XCTAssertGreaterThanOrEqual(report?.receivedFrames ?? 0, 1)
+        await host.stop()
+        await viewer.stop()
+    }
+
     private func makeAuthorizedVideoSessions(
         capabilities: Set<Capability>,
         authorized: Set<Capability>
@@ -3386,5 +3432,41 @@ final class LatencyBudgetTests: XCTestCase {
         XCTAssertEqual(LatencyBudget.isWithinBudget(fast, budget: budget), true)
         XCTAssertEqual(LatencyBudget.isWithinBudget(slow, budget: budget), false)
         XCTAssertNil(LatencyBudget.isWithinBudget(nil, budget: budget))
+    }
+}
+
+final class ReceiverCongestionMonitorTests: XCTestCase {
+    func testQueuingDelayIsMeasuredAboveTheMinimumOffset() {
+        var monitor = ReceiverCongestionMonitor()
+        // The Viewer clock is 1 s ahead of the Host clock. Frames first
+        // arrive with 5 ms transit, then with 45 ms (40 ms of queuing).
+        let offset: UInt64 = 1_000_000_000
+        monitor.recordFrame(senderTimestamp: 0, receivedAt: offset + 5_000_000)
+        monitor.recordFrame(senderTimestamp: 100_000_000, receivedAt: offset + 145_000_000)
+        monitor.recordFrame(senderTimestamp: 200_000_000, receivedAt: offset + 245_000_000)
+        XCTAssertNil(
+            monitor.takeReport(generation: 3, at: offset + 300_000_000),
+            "no report before the interval elapses"
+        )
+        monitor.recordDiscarded(2, at: offset + 400_000_000)
+        let report = monitor.takeReport(generation: 3, at: offset + 600_000_000)
+        XCTAssertEqual(report?.generation, 3)
+        XCTAssertEqual(report?.receivedFrames, 3)
+        XCTAssertEqual(report?.discardedFrames, 2)
+        // (0 + 40 + 40) / 3 ms ≈ 26.666 ms.
+        XCTAssertEqual(report?.queuingDelayMicroseconds, 26_666)
+        XCTAssertNil(
+            monitor.takeReport(generation: 3, at: offset + 1_200_000_000),
+            "no report without new activity"
+        )
+    }
+
+    func testNegativeClockOffsetIsHandled() {
+        var monitor = ReceiverCongestionMonitor()
+        // The Viewer clock is behind the Host clock.
+        monitor.recordFrame(senderTimestamp: 10_000_000_000, receivedAt: 1_000_000)
+        monitor.recordFrame(senderTimestamp: 10_100_000_000, receivedAt: 111_000_000)
+        let report = monitor.takeReport(generation: 1, at: 700_000_000)
+        XCTAssertEqual(report?.queuingDelayMicroseconds, 5_000, "(0 + 10 ms) / 2")
     }
 }

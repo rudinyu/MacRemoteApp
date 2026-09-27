@@ -113,6 +113,7 @@ The exact binary field widths and serialization format are fixed by M1 in
 | `SessionState` | Both | Explicit state, permission, focus, and capability transitions |
 | `Error` | Both | Structured failure code, retryability, and safe user-facing detail |
 | `Close` | Both | Intentional shutdown reason |
+| `ReceiverReport` | Viewer → Host | Periodic queuing-delay and loss feedback for Host bitrate adaptation (M8, optional capability) |
 | `KeyframeRequest` | Viewer → Host | Ask the Host to make its next frame a keyframe after a media gap or decode failure (M8, optional capability) |
 
 Message names are design identifiers. M1 defines exact schemas, optionality,
@@ -185,6 +186,21 @@ input before stopping or renegotiating the stream.
   independently honors at most one per 250 ms, so a peer cannot force every
   frame to be a keyframe. Peers without the capability never receive it and
   recover at the periodic keyframe.
+- Bitrate adaptation (M8): with the optional `receiverReport` capability, the
+  Viewer's session sends `ReceiverReport` about every 500 ms while video
+  arrives. It carries the mean queuing delay (the rise of receive time minus
+  Host send time above its minimum over the last 5–10 s, which cancels the
+  clock offset), frames received, and frames lost to sequence gaps or local
+  discards. The Host's `AdaptiveBitrateController` cuts the encoder bitrate to
+  70% on a report with discards or at least 40 ms queuing delay, on a Host
+  queue discard, or on a gap-triggered `KeyframeRequest`, at most once per
+  500 ms and never below 2 Mbps. After 3 s without congestion, reports with at
+  most 15 ms delay raise it by one tenth of the maximum per second back to
+  16 Mbps. The bitrate changes on the live VideoToolbox session without a new
+  keyframe. A report is untrusted input bound to the authorized window
+  generation; the worst a peer can do is move the bitrate within those
+  bounds. Without the capability, the Host still adapts to its own queue
+  discards and to gap-triggered keyframe requests.
 - Authorization invalidation: unsent protected media is discarded. An admitted
   protected control envelope is replaced by an optional unknown tombstone with
   the same sequence, preserving strict control ordering while ensuring the

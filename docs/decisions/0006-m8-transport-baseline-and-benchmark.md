@@ -39,6 +39,12 @@ latency with a bounded clock-offset uncertainty.
   one-second `DataRateLimits` cap at 1.5x the average bitrate. The TCP binding
   sets `noDelay` so small control/input envelopes are not held by Nagle
   coalescing behind video segments.
+- The encoder bitrate adapts to congestion: 16 Mbps maximum, 2 Mbps floor,
+  multiplicative decrease to 70% on loss or at least 40 ms Viewer-measured
+  queuing delay, and stepwise recovery after 3 s of clear reports. Queuing
+  delay comes from the optional Viewer `ReceiverReport`, which rises before
+  frames are dropped; Host queue discards remain a fallback signal. See
+  [the protocol](../PROTOCOL.md#video-contract).
 - Capture defaults to 4:2:0 bi-planar video-range pixels tagged BT.709, the
   encoder's native input, removing a per-frame BGRA conversion on the Host.
 - The p95 latency budget is split per stage in `LatencyBudget.v1`: Host

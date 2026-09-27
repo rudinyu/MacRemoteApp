@@ -24,7 +24,9 @@ product UI flow.
 ## Codec defaults
 
 The default encoder configuration is H.264 Main Auto Level, real-time mode,
-8 Mbps average bitrate, 60 fps, and a 60-frame keyframe interval. M8 adds
+16 Mbps average bitrate (raised from 8 Mbps in M8 after scrolling and fast UI
+motion looked soft at 1080p60; M8 lowers it at runtime on congestion through
+`H264Encoder.updateAverageBitrate`, down to 2 Mbps), 60 fps, and a 60-frame keyframe interval. M8 adds
 `AllowFrameReordering = false` (no B-frame output delay) and a best-effort
 one-second `DataRateLimits` cap at 1.5x the average bitrate. M4 uses the
 VideoToolbox output's AVCC-style access unit bytes and carries one SPS/PPS pair

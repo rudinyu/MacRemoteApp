@@ -139,6 +139,7 @@ are rejected.
 | `0x0011` | Error |
 | `0x0012` | Close |
 | `0x0017` | KeyframeRequest (M8, optional capability) |
+| `0x0018` | ReceiverReport (M8, optional capability) |
 
 ### Capabilities
 
@@ -151,6 +152,7 @@ are rejected.
 | `0x0005` | Text clipboard |
 | `0x0006` | Ping/pong |
 | `0x0007` | Keyframe request (M8, optional) |
+| `0x0008` | Receiver report (M8, optional) |
 
 `0x8000` is a wire-only mandatory marker and is not part of the identifier
 value. `CodecIdentifier.h264` is `0x0001`.
@@ -186,6 +188,7 @@ capability list above.
 | `Error` | 1 `code` (u16), 2 `retryable` (bool), 3 `detailCode` (utf8, optional) |
 | `Close` | 1 `reason` (u16), 2 `detailCode` (utf8, optional) |
 | `KeyframeRequest` | 1 `generation` (u64), 2 `reason` (u8: 1 media gap, 2 decode failure) |
+| `ReceiverReport` | 1 `generation` (u64), 2 `queuingDelayMicroseconds` (u32), 3 `receivedFrames` (u32), 4 `discardedFrames` (u32) |
 
 `WindowList` nested window records use the same TLV format with fields:
 1 `identifier` (u64), 2 `applicationIdentifier` (utf8), 3 `title` (utf8,
@@ -225,6 +228,7 @@ SessionState        010101000000010802010000000102030100000001010400000000080000
 Error               0101010000000200050201000000010103000000001073637265656E2D7265636F7264696E67
 Close               010101000000020001020000000004646F6E65
 KeyframeRequest     01010100000008000000000000000902010000000101
+ReceiverReport      0101010000000800000000000000090201000000040000A4100301000000040000001E04010000000400000002
 ```
 
 The test suite asserts the exact bytes above, then decodes and re-encodes every

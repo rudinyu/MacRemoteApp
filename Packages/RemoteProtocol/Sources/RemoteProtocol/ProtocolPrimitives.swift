@@ -73,6 +73,7 @@ public enum MessageType: Equatable, Hashable, Sendable {
     case error
     case close
     case keyframeRequest
+    case receiverReport
     case unknown(UInt16)
 
     public init(rawValue: UInt16) {
@@ -100,6 +101,7 @@ public enum MessageType: Equatable, Hashable, Sendable {
         case 0x0011: self = .error
         case 0x0012: self = .close
         case 0x0017: self = .keyframeRequest
+        case 0x0018: self = .receiverReport
         default: self = .unknown(rawValue)
         }
     }
@@ -129,6 +131,7 @@ public enum MessageType: Equatable, Hashable, Sendable {
         case .error: return 0x0011
         case .close: return 0x0012
         case .keyframeRequest: return 0x0017
+        case .receiverReport: return 0x0018
         case let .unknown(rawValue): return rawValue
         }
     }
@@ -158,6 +161,9 @@ public enum Capability: Equatable, Hashable, Sendable {
     /// Optional: the Viewer may send `KeyframeRequest`. Peers that do not
     /// advertise it never receive the message.
     case keyframeRequest
+    /// Optional: the Viewer sends periodic `ReceiverReport` congestion
+    /// feedback so the Host can adapt its video bitrate.
+    case receiverReport
     case unknown(UInt16)
 
     public init(rawValue: UInt16) {
@@ -169,6 +175,7 @@ public enum Capability: Equatable, Hashable, Sendable {
         case 0x0005: self = .textClipboard
         case 0x0006: self = .pingPong
         case 0x0007: self = .keyframeRequest
+        case 0x0008: self = .receiverReport
         default: self = .unknown(rawValue)
         }
     }
@@ -182,6 +189,7 @@ public enum Capability: Equatable, Hashable, Sendable {
         case .textClipboard: return 0x0005
         case .pingPong: return 0x0006
         case .keyframeRequest: return 0x0007
+        case .receiverReport: return 0x0008
         case let .unknown(rawValue): return rawValue
         }
     }

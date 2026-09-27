@@ -183,13 +183,15 @@ public actor SessionCoordinator {
         .clipboardOffer,
         .clipboardText,
         .clipboardAcknowledgement,
-        .keyframeRequest
+        .keyframeRequest,
+        .receiverReport
     ]
 
     private static let windowBoundCapabilities: Set<Capability> = [
         .windowSelection,
         .h264Video,
         .keyframeRequest,
+        .receiverReport,
         .mouseInput,
         .keyboardInput
     ]
@@ -224,6 +226,7 @@ public actor SessionCoordinator {
         .windowSelection,
         .inputEvent,
         .keyframeRequest,
+        .receiverReport,
         .clipboardOffer,
         .clipboardText,
         .clipboardAcknowledgement,
@@ -243,6 +246,7 @@ public actor SessionCoordinator {
         .windowSelection,
         .inputEvent,
         .keyframeRequest,
+        .receiverReport,
         .clipboardOffer,
         .clipboardText,
         .clipboardAcknowledgement,
@@ -290,6 +294,7 @@ public actor SessionCoordinator {
     private var authorizedWindowGeneration: UInt64?
     private var authorizedCapabilities: Set<Capability> = []
     private var lastKeyframeRequestNanoseconds: UInt64?
+    private var congestionMonitor = ReceiverCongestionMonitor()
     private var helloSent = false
     private var capabilitiesSent = false
     private var capabilitiesSendInFlight = false
@@ -1043,6 +1048,7 @@ public actor SessionCoordinator {
         incomingSequence.removeAll()
         outgoingSequence.removeAll()
         lastKeyframeRequestNanoseconds = nil
+        congestionMonitor = ReceiverCongestionMonitor()
         pendingPing = nil
         clockSyncEstimator = ClockSyncEstimator()
         lastHeartbeatAt = nil
@@ -1325,6 +1331,13 @@ public actor SessionCoordinator {
                 return
             }
             let receivedTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
+            if configuration.role == .viewer, envelope.messageType == .videoFrame {
+                congestionMonitor.recordFrame(
+                    senderTimestamp: envelope.timestamp,
+                    receivedAt: receivedTimestampNanoseconds
+                )
+                sendReceiverReportIfDue(at: receivedTimestampNanoseconds)
+            }
             let message = try envelope.decodedMessage(using: effectiveProtocolLimits())
             try await handle(
                 message,
@@ -1940,6 +1953,10 @@ public actor SessionCoordinator {
                 // The sender discarded media; its queue skips delta frames
                 // until a keyframe, so ask for one instead of waiting for
                 // the periodic keyframe.
+                congestionMonitor.recordDiscarded(
+                    envelope.sequence - previous - 1,
+                    at: DispatchTime.now().uptimeNanoseconds
+                )
                 noteIncomingMediaGap()
             }
             incomingSequence[envelope.channel] = envelope.sequence
@@ -1969,6 +1986,8 @@ public actor SessionCoordinator {
             return [.h264Video]
         case .keyframeRequest:
             return [.h264Video, .keyframeRequest]
+        case .receiverReport:
+            return [.h264Video, .receiverReport]
         case let .inputEvent(input):
             switch input.kind {
             case .keyDown, .keyUp:
@@ -1995,6 +2014,8 @@ public actor SessionCoordinator {
             return frame.generation
         case let .keyframeRequest(request):
             return request.generation
+        case let .receiverReport(report):
+            return report.generation
         case let .inputEvent(input):
             return input.windowGeneration
         default:
@@ -2090,12 +2111,29 @@ public actor SessionCoordinator {
         do {
             let result = try incomingMessageStorage.yield(message)
             if result == .replacedMedia {
+                congestionMonitor.recordDiscarded(1, at: DispatchTime.now().uptimeNanoseconds)
                 noteIncomingMediaGap()
             }
         } catch TransportError.controlBackpressure {
             throw SessionError.incomingMessageBackpressure(.control)
         } catch TransportError.mediaBackpressure {
             throw SessionError.incomingMessageBackpressure(.media)
+        }
+    }
+
+    /// Viewer only: sends congestion feedback about every 500 ms while video
+    /// arrives, when the Host authorized `Capability.receiverReport`. Sent
+    /// from a separate task for the same reason as `noteIncomingMediaGap`.
+    private func sendReceiverReportIfDue(at now: UInt64) {
+        guard configuration.role == .viewer,
+              authorized,
+              authorizedCapabilities.contains(.receiverReport),
+              let generation = authorizedWindowGeneration,
+              let report = congestionMonitor.takeReport(generation: generation, at: now) else {
+            return
+        }
+        Task { [weak self] in
+            _ = try? await self?.sendUnrestricted(.receiverReport(report))
         }
     }
 

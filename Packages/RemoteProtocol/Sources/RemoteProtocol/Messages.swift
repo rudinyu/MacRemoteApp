@@ -1242,6 +1242,60 @@ public struct KeyframeRequestMessage: MessagePayloadValue {
     }
 }
 
+/// Periodic Viewer congestion feedback for Host bitrate adaptation. Sent only
+/// when both endpoints negotiated `Capability.receiverReport`. It carries
+/// aggregate counts and delay only, never frame content.
+public struct ReceiverReportMessage: MessagePayloadValue {
+    public static let messageType: MessageType = .receiverReport
+    /// Selected-window generation of the stream being reported.
+    public let generation: UInt64
+    /// Mean queuing delay over the report interval: how far the one-way
+    /// send-to-receive time rose above its recent minimum.
+    public let queuingDelayMicroseconds: UInt32
+    /// Video frames received during the interval.
+    public let receivedFrames: UInt32
+    /// Video frames lost during the interval: media sequence gaps plus
+    /// frames the Viewer's own bounded queues discarded.
+    public let discardedFrames: UInt32
+
+    public init(
+        generation: UInt64,
+        queuingDelayMicroseconds: UInt32,
+        receivedFrames: UInt32,
+        discardedFrames: UInt32
+    ) {
+        self.generation = generation
+        self.queuingDelayMicroseconds = queuingDelayMicroseconds
+        self.receivedFrames = receivedFrames
+        self.discardedFrames = discardedFrames
+    }
+
+    public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
+        var fields = try MessageFieldWriter(message: .receiverReport, limits: limits)
+        try fields.append(fieldID: 1, mandatory: true, value: WireValue.uint64(generation))
+        try fields.append(fieldID: 2, mandatory: true, value: WireValue.uint32(queuingDelayMicroseconds))
+        try fields.append(fieldID: 3, mandatory: true, value: WireValue.uint32(receivedFrames))
+        try fields.append(fieldID: 4, mandatory: true, value: WireValue.uint32(discardedFrames))
+        return fields.data
+    }
+
+    public static func decode(
+        _ data: Data,
+        using limits: ProtocolLimits = .default
+    ) throws -> ReceiverReportMessage {
+        let fields = try MessageFieldReader(data: data, message: .receiverReport, limits: limits)
+        try fields.ensureKnown(Set(1 ... 4))
+        return ReceiverReportMessage(
+            generation: try WireValue.decodeUInt64(try fields.required(1), message: .receiverReport, fieldID: 1),
+            queuingDelayMicroseconds: try WireValue.decodeUInt32(
+                try fields.required(2), message: .receiverReport, fieldID: 2
+            ),
+            receivedFrames: try WireValue.decodeUInt32(try fields.required(3), message: .receiverReport, fieldID: 3),
+            discardedFrames: try WireValue.decodeUInt32(try fields.required(4), message: .receiverReport, fieldID: 4)
+        )
+    }
+}
+
 public struct PongMessage: MessagePayloadValue {
     public static let messageType: MessageType = .pong
     public let nonce: UInt64
@@ -1452,6 +1506,7 @@ public enum MessagePayload: Equatable, Sendable {
     case error(ErrorMessage)
     case close(CloseMessage)
     case keyframeRequest(KeyframeRequestMessage)
+    case receiverReport(ReceiverReportMessage)
 
     public var messageType: MessageType {
         switch self {
@@ -1478,6 +1533,7 @@ public enum MessagePayload: Equatable, Sendable {
         case .error: return .error
         case .close: return .close
         case .keyframeRequest: return .keyframeRequest
+        case .receiverReport: return .receiverReport
         }
     }
 
@@ -1506,6 +1562,7 @@ public enum MessagePayload: Equatable, Sendable {
         case let .error(value): return try value.encoded(using: limits)
         case let .close(value): return try value.encoded(using: limits)
         case let .keyframeRequest(value): return try value.encoded(using: limits)
+        case let .receiverReport(value): return try value.encoded(using: limits)
         }
     }
 
@@ -1539,6 +1596,7 @@ public enum MessagePayload: Equatable, Sendable {
         case .error: return .error(try ErrorMessage.decode(data, using: limits))
         case .close: return .close(try CloseMessage.decode(data, using: limits))
         case .keyframeRequest: return .keyframeRequest(try KeyframeRequestMessage.decode(data, using: limits))
+        case .receiverReport: return .receiverReport(try ReceiverReportMessage.decode(data, using: limits))
         case let .unknown(rawValue): throw ProtocolError.unsupportedMessageType(rawValue: rawValue)
         }
     }

@@ -55,7 +55,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         .mouseInput,
         .keyboardInput,
         .textClipboard,
-        .keyframeRequest
+        .keyframeRequest,
+        .receiverReport
     ]
 
     private static var localDeviceName: String {

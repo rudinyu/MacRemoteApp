@@ -390,7 +390,15 @@ final class RemoteProtocolTests: XCTestCase {
             ),
             .error(ErrorMessage(code: .permissionMissing, retryable: true, detailCode: "screen-recording")),
             .close(CloseMessage(reason: .normal, detailCode: "done")),
-            .keyframeRequest(KeyframeRequestMessage(generation: 9, reason: .mediaGap))
+            .keyframeRequest(KeyframeRequestMessage(generation: 9, reason: .mediaGap)),
+            .receiverReport(
+                ReceiverReportMessage(
+                    generation: 9,
+                    queuingDelayMicroseconds: 42_000,
+                    receivedFrames: 30,
+                    discardedFrames: 2
+                )
+            )
         ]
 
         let goldenVectors: [MessageType: String] = [
@@ -413,7 +421,8 @@ final class RemoteProtocolTests: XCTestCase {
             .sessionState: "010101000000010802010000000102030100000001010400000000080000000000000009",
             .error: "0101010000000200050201000000010103000000001073637265656E2D7265636F7264696E67",
             .close: "010101000000020001020000000004646F6E65",
-            .keyframeRequest: "01010100000008000000000000000902010000000101"
+            .keyframeRequest: "01010100000008000000000000000902010000000101",
+            .receiverReport: "0101010000000800000000000000090201000000040000A4100301000000040000001E04010000000400000002"
         ]
 
         for message in messages {
@@ -450,6 +459,9 @@ final class RemoteProtocolTests: XCTestCase {
         XCTAssertEqual(MessageType(rawValue: 0x0017), .keyframeRequest)
         XCTAssertEqual(MessageType.keyframeRequest.defaultChannel, .control)
         XCTAssertEqual(Capability(rawValue: 0x0007), .keyframeRequest)
+        XCTAssertEqual(Capability(rawValue: 0x0008), .receiverReport)
+        XCTAssertEqual(MessageType(rawValue: 0x0018), .receiverReport)
+        XCTAssertEqual(MessageType.receiverReport.defaultChannel, .control)
         var encoded = try KeyframeRequestMessage(generation: 9, reason: .decodeFailure).encoded()
         encoded[encoded.count - 1] = 0x7F
         XCTAssertThrowsError(
@@ -549,12 +561,12 @@ final class RemoteProtocolTests: XCTestCase {
         )
 
         let unknownOptional = try CapabilitiesMessage.decode(
-            Data(hex: "0101010000000400010008")
+            Data(hex: "0101010000000400010040")
         )
-        XCTAssertEqual(unknownOptional.capabilities, [.unknown(8)])
+        XCTAssertEqual(unknownOptional.capabilities, [.unknown(0x0040)])
         XCTAssertTrue(unknownOptional.mandatoryCapabilities.isEmpty)
-        assertProtocolError(.unknownMandatoryCapability(rawValue: 8)) {
-            _ = try CapabilitiesMessage.decode(Data(hex: "0101010000000400018008"))
+        assertProtocolError(.unknownMandatoryCapability(rawValue: 0x0040)) {
+            _ = try CapabilitiesMessage.decode(Data(hex: "0101010000000400018040"))
         }
         assertProtocolError(.invalidFieldValue(message: .capabilities, fieldID: 1)) {
             _ = try CapabilitiesMessage(capabilities: [.unknown(0)]).encoded()

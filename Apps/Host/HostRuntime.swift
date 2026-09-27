@@ -83,7 +83,8 @@ actor HostRuntime {
         .mouseInput,
         .keyboardInput,
         .textClipboard,
-        .keyframeRequest
+        .keyframeRequest,
+        .receiverReport
     ]
     /// Floor between Viewer-requested keyframes, independent of the Viewer's
     /// own throttle, so a misbehaving peer cannot force every frame to be
@@ -122,6 +123,9 @@ actor HostRuntime {
     /// so the capture loop forces one.
     private var keyframeRequested = false
     private var lastViewerKeyframeRequestNanoseconds: UInt64?
+    /// Lowers the encoder bitrate on congestion and restores it when the
+    /// path is clear. Created per video pipeline.
+    private var bitrateController: AdaptiveBitrateController?
     /// M8 stage budget evidence: capture arrival to wire-queue admission.
     private var captureToSendCollector = BoundedStageLatencyCollector()
     private static let stageLogSampleInterval = 600
@@ -832,8 +836,23 @@ actor HostRuntime {
                now &- last < Self.viewerKeyframeRequestMinimumIntervalNanoseconds {
                 return
             }
+            if request.reason == .mediaGap {
+                applyBitrate(bitrateController?.recordCongestion(atNanoseconds: now), reason: "viewer-media-gap")
+            }
             lastViewerKeyframeRequestNanoseconds = now
             requestKeyframe()
+        case let .receiverReport(report):
+            // Authorization and window generation were checked by
+            // SessionCoordinator; ignore a report for a stopped pipeline.
+            guard report.generation == selectedWindowGeneration, encoder != nil else { return }
+            applyBitrate(
+                bitrateController?.recordReport(
+                    queuingDelayMicroseconds: report.queuingDelayMicroseconds,
+                    discardedFrames: report.discardedFrames,
+                    atNanoseconds: DispatchTime.now().uptimeNanoseconds
+                ),
+                reason: "viewer-report"
+            )
         case .close:
             scheduleTeardown(session: session)
         default:
@@ -972,7 +991,7 @@ actor HostRuntime {
                 width: dimensions.width,
                 height: dimensions.height,
                 frameRate: 60,
-                averageBitrate: 8_000_000,
+                averageBitrate: H264EncoderConfiguration.defaultAverageBitrate,
                 keyframeInterval: 60,
                 maxInFlightFrames: 2
             )
@@ -983,6 +1002,9 @@ actor HostRuntime {
         videoConfigSentAuthorizationGeneration = nil
         keyframeRequested = false
         captureToSendCollector.reset()
+        bitrateController = AdaptiveBitrateController(
+            configuration: .standard(maximumBitrate: H264EncoderConfiguration.defaultAverageBitrate)
+        )
         try await session.send(
             .streamConfig(
                 StreamConfigMessage(
@@ -1155,6 +1177,12 @@ actor HostRuntime {
             )
             if result == .replacedMedia {
                 keyframeRequested = true
+                // The Host send queue is full: the path cannot carry the
+                // current bitrate.
+                applyBitrate(
+                    bitrateController?.recordCongestion(atNanoseconds: DispatchTime.now().uptimeNanoseconds),
+                    reason: "host-queue-discard"
+                )
             }
             captureToSendCollector.append(
                 startNanoseconds: frame.captureTimestamp,
@@ -1193,6 +1221,22 @@ actor HostRuntime {
         startupLogger.notice(
             "M8 stage host-capture-to-send samples=\(summary.count, privacy: .public) p50Ns=\(summary.p50Nanoseconds, privacy: .public) p95Ns=\(summary.p95Nanoseconds, privacy: .public) budgetNs=\(budget, privacy: .public) withinBudget=\(within, privacy: .public)"
         )
+    }
+
+    /// Applies a controller decision to the live encoder. Logs only the
+    /// numeric bitrate and a fixed reason code.
+    private func applyBitrate(_ bitrate: UInt32?, reason: StaticString) {
+        guard let bitrate, let encoder else { return }
+        do {
+            try encoder.updateAverageBitrate(bitrate)
+            startupLogger.notice(
+                "M8 bitrate bps=\(bitrate, privacy: .public) reason=\(String(describing: reason), privacy: .public)"
+            )
+        } catch {
+            startupLogger.error(
+                "M8 bitrate update failed (bps: \(bitrate, privacy: .public))"
+            )
+        }
     }
 
     private func requestKeyframe() {
@@ -1249,6 +1293,7 @@ actor HostRuntime {
         videoConfigSentAuthorizationGeneration = nil
         keyframeRequested = false
         captureToSendCollector.reset()
+        bitrateController = nil
     }
 
     private func stopVideoPipeline() async {
@@ -1265,6 +1310,7 @@ actor HostRuntime {
         videoConfigSentAuthorizationGeneration = nil
         keyframeRequested = false
         captureToSendCollector.reset()
+        bitrateController = nil
     }
 
     /// Ends the ordered send path. The send task is cancelled rather than

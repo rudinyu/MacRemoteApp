@@ -33,6 +33,10 @@ public enum CodecError: Error, Equatable, Sendable, CustomStringConvertible {
 
 public struct H264EncoderConfiguration: Equatable, Sendable {
     public static let `default` = H264EncoderConfiguration()
+    /// LAN default. 8 Mbps visibly softened scrolling and fast UI motion at
+    /// 1080p60; 16 Mbps (24 Mbps one-second peak with `DataRateLimits`) stays
+    /// well inside a wired or 5 GHz Wi-Fi LAN.
+    public static let defaultAverageBitrate: UInt32 = 16_000_000
 
     public let width: UInt32
     public let height: UInt32
@@ -45,7 +49,7 @@ public struct H264EncoderConfiguration: Equatable, Sendable {
         width: UInt32 = 1920,
         height: UInt32 = 1080,
         frameRate: UInt16 = 60,
-        averageBitrate: UInt32 = 8_000_000,
+        averageBitrate: UInt32 = Self.defaultAverageBitrate,
         keyframeInterval: UInt32 = 60,
         maxInFlightFrames: Int = 2
     ) {

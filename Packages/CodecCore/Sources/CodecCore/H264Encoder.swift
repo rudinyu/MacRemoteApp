@@ -181,6 +181,28 @@ public final class H264Encoder: @unchecked Sendable {
         }
     }
 
+    /// Changes the target bitrate of the running session in place. It takes
+    /// effect on subsequent frames without a new session or keyframe, which
+    /// lets the Host adapt to congestion mid-stream.
+    public func updateAverageBitrate(_ averageBitrate: UInt32) throws {
+        guard averageBitrate > 0 else {
+            throw CodecError.invalidConfiguration("bitrate must be positive")
+        }
+        guard let activeSession = lock.withLock({ session }) else {
+            throw CodecError.notStarted
+        }
+        try setProperty(
+            kVTCompressionPropertyKey_AverageBitRate,
+            value: NSNumber(value: averageBitrate),
+            on: activeSession
+        )
+        try setOptionalProperty(
+            kVTCompressionPropertyKey_DataRateLimits,
+            value: Self.dataRateLimits(averageBitrate: averageBitrate) as CFArray,
+            on: activeSession
+        )
+    }
+
     public func reset() {
         let oldSession: VTCompressionSession?
         let completions: [@Sendable (Result<EncodedH264Frame, CodecError>) -> Void]
@@ -322,7 +344,11 @@ public final class H264Encoder: @unchecked Sendable {
     /// Returns the VideoToolbox `DataRateLimits` pair: a byte budget and the
     /// window in seconds over which it applies.
     static func dataRateLimits(for configuration: H264EncoderConfiguration) -> [NSNumber] {
-        let peakBytesPerSecond = Double(configuration.averageBitrate) * peakBitrateMultiplier / 8
+        dataRateLimits(averageBitrate: configuration.averageBitrate)
+    }
+
+    static func dataRateLimits(averageBitrate: UInt32) -> [NSNumber] {
+        let peakBytesPerSecond = Double(averageBitrate) * peakBitrateMultiplier / 8
         return [NSNumber(value: peakBytesPerSecond.rounded(.down)), NSNumber(value: 1.0)]
     }
 

@@ -5,6 +5,59 @@ import Foundation
 import XCTest
 
 final class CodecCoreTests: XCTestCase {
+    func testAdaptiveBitrateCutsOncePerHoldoffAndRespectsFloor() {
+        var controller = AdaptiveBitrateController(configuration: .standard(maximumBitrate: 16_000_000))
+        XCTAssertEqual(controller.bitrate, 16_000_000)
+        XCTAssertEqual(controller.recordCongestion(atNanoseconds: 1_000_000_000), 11_200_000)
+        // A burst inside the 500 ms holdoff counts once.
+        XCTAssertNil(controller.recordCongestion(atNanoseconds: 1_200_000_000))
+        XCTAssertEqual(controller.recordCongestion(atNanoseconds: 1_600_000_000), 7_840_000)
+        var now: UInt64 = 1_600_000_000
+        for _ in 0 ..< 20 {
+            now += 600_000_000
+            _ = controller.recordCongestion(atNanoseconds: now)
+        }
+        XCTAssertEqual(controller.bitrate, 2_000_000, "never below the floor")
+        now += 600_000_000
+        XCTAssertNil(controller.recordCongestion(atNanoseconds: now), "no change at the floor")
+    }
+
+    func testAdaptiveBitrateTreatsReportsAsCongestionOrRecovery() {
+        var controller = AdaptiveBitrateController(configuration: .standard(maximumBitrate: 16_000_000))
+        // High queuing delay or discards cut the bitrate.
+        XCTAssertEqual(
+            controller.recordReport(queuingDelayMicroseconds: 60_000, discardedFrames: 0, atNanoseconds: 1_000_000_000),
+            11_200_000
+        )
+        XCTAssertEqual(
+            controller.recordReport(queuingDelayMicroseconds: 0, discardedFrames: 3, atNanoseconds: 2_000_000_000),
+            7_840_000
+        )
+        // Low delay does not raise it until 3 s after the last congestion.
+        XCTAssertNil(controller.recordReport(queuingDelayMicroseconds: 5_000, discardedFrames: 0, atNanoseconds: 4_000_000_000))
+        XCTAssertEqual(
+            controller.recordReport(queuingDelayMicroseconds: 5_000, discardedFrames: 0, atNanoseconds: 5_000_000_000),
+            9_440_000
+        )
+        // At most one increase per second, and none while delay is between
+        // the clear and congestion thresholds.
+        XCTAssertNil(controller.recordReport(queuingDelayMicroseconds: 5_000, discardedFrames: 0, atNanoseconds: 5_500_000_000))
+        XCTAssertNil(controller.recordReport(queuingDelayMicroseconds: 25_000, discardedFrames: 0, atNanoseconds: 7_000_000_000))
+        var now: UInt64 = 7_000_000_000
+        for _ in 0 ..< 20 {
+            now += 1_000_000_000
+            _ = controller.recordReport(queuingDelayMicroseconds: 0, discardedFrames: 0, atNanoseconds: now)
+        }
+        XCTAssertEqual(controller.bitrate, 16_000_000, "recovers to, but not above, the maximum")
+    }
+
+    func testDefaultBitrateIsSixteenMegabitsWithTwentyFourMegabitPeak() {
+        let configuration = H264EncoderConfiguration()
+        XCTAssertEqual(configuration.averageBitrate, 16_000_000)
+        let limits = H264Encoder.dataRateLimits(for: configuration)
+        XCTAssertEqual(limits[0].doubleValue, 3_000_000, "24 Mbps peak is 3,000,000 bytes per second")
+    }
+
     func testEncoderDataRateLimitCapsOneSecondPeakAboveAverage() {
         let configuration = H264EncoderConfiguration(averageBitrate: 8_000_000)
         let limits = H264Encoder.dataRateLimits(for: configuration)
@@ -110,6 +163,8 @@ final class CodecCoreTests: XCTestCase {
         XCTAssertEqual(encoded.captureTimestamp, 100)
         XCTAssertEqual(encoded.presentationTimestamp, 200)
         XCTAssertTrue(encoded.keyframe)
+        // Congestion adaptation changes the bitrate on the live session.
+        try encoder.updateAverageBitrate(125_000)
         let decoderConfiguration = try XCTUnwrap(encoded.decoderConfiguration)
 
         let decoder = H264Decoder()

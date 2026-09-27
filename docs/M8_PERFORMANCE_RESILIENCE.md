@@ -133,6 +133,7 @@ before the acceptance gate stops.
 | Ordered encoder-to-wire relay | Compiles into Host; ordering is structural (single FIFO consumer); not exercised by a physical run |
 | `420v` capture input | Accepted by the Apple Silicon VideoToolbox smoke; Intel capture/encode pending physical run |
 | Per-stage budget collectors and log lines | Collector math verified by deterministic tests; stage values pending physical run |
+| Adaptive bitrate (`ReceiverReport`, `AdaptiveBitrateController`, live encoder update) | Controller and delay-measurement math verified by deterministic tests; session delivery verified by a TransportCore test; live `AverageBitRate` change accepted by the Apple Silicon VideoToolbox smoke; behavior on a degraded physical LAN not measured. The Host logs `M8 bitrate bps=… reason=…` on each change |
 | Reconnect/keyframe recovery state model | Verified by TransportCore/CodecCore tests |
 | 1080p/60 synthetic contract | Harness pass; not a hardware result |
 | Intel Host capture-to-display | Pending physical Intel Host |
