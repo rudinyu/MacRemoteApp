@@ -2092,8 +2092,19 @@ final class TransportCoreTests: XCTestCase {
 
         // Both sides must arm a deadline bounded by the challenge expiry
         // before anyone consents.
-        let hostRequested = await hostDeadline.waitUntilArmed()
-        let viewerRequested = await viewerDeadline.waitUntilArmed()
+        let armTimeoutNanoseconds: UInt64 = 5_000_000_000
+        guard let hostRequested = await hostDeadline.waitUntilArmed(
+            timeoutNanoseconds: armTimeoutNanoseconds
+        ) else {
+            XCTFail("Host pairing deadline was not armed")
+            return
+        }
+        guard let viewerRequested = await viewerDeadline.waitUntilArmed(
+            timeoutNanoseconds: armTimeoutNanoseconds
+        ) else {
+            XCTFail("Viewer pairing deadline was not armed")
+            return
+        }
         XCTAssertLessThanOrEqual(hostRequested, pairingTimeoutNanoseconds)
         XCTAssertLessThanOrEqual(viewerRequested, pairingTimeoutNanoseconds)
         let hostPending = await host.snapshot()
@@ -3118,7 +3129,6 @@ private actor ManualPairingDeadline {
     private var nextID: UInt64 = 0
     private var sleepers: [UInt64: CheckedContinuation<Void, Error>] = [:]
     private var requestedNanoseconds: [UInt64] = []
-    private var armedWaiters: [CheckedContinuation<UInt64, Never>] = []
 
     func sleep(nanoseconds: UInt64) async throws {
         nextID &+= 1
@@ -3143,22 +3153,22 @@ private actor ManualPairingDeadline {
         }
         sleepers[id] = continuation
         requestedNanoseconds.append(nanoseconds)
-        let waiters = armedWaiters
-        armedWaiters.removeAll()
-        for waiter in waiters {
-            waiter.resume(returning: nanoseconds)
-        }
     }
 
-    /// Suspends until a session has armed its pairing deadline and returns
-    /// the requested sleep duration.
-    func waitUntilArmed() async -> UInt64 {
-        if let first = requestedNanoseconds.first {
-            return first
+    /// Waits a bounded time for a session to arm its pairing deadline.
+    /// Expiry correctness remains manual; this timeout only fails the test
+    /// instead of leaving a checked continuation suspended forever.
+    func waitUntilArmed(timeoutNanoseconds: UInt64) async -> UInt64? {
+        let deadline = Date().addingTimeInterval(
+            Double(timeoutNanoseconds) / 1_000_000_000
+        )
+        while Date() < deadline {
+            if let first = requestedNanoseconds.first {
+                return first
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000)
         }
-        return await withCheckedContinuation { continuation in
-            armedWaiters.append(continuation)
-        }
+        return requestedNanoseconds.first
     }
 
     func expire() {
