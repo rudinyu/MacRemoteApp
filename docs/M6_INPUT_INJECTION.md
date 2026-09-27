@@ -115,12 +115,44 @@ local `inactive`/`active` signal is accepted only from a Host-owned provider.
 It never infers secure-input safety from the Viewer or from received event
 data.
 
+## Keyboard layouts, dead keys, and input methods
+
+Design decision (V1): the Viewer forwards physical key positions, and the
+Host's active input source interprets them. The full policy is recorded in
+[`PROTOCOL.md`](PROTOCOL.md#keyboard-layout-and-text-input-policy-v1-decision-m6).
+For the M6 boundary this means:
+
+- `HostInputMapper` copies `keyCode` and the device-independent `modifiers`
+  mask into `HostInputCommand.key` unchanged. It does not remap key codes
+  for ANSI/ISO/JIS differences and has no character or text command.
+- `CoreGraphicsAccessibilityInputAdapter` posts that key code with a `nil`
+  event source, so the target application uses the Host's keyboard layout,
+  keyboard type, and input method. Dead-key and IME composition therefore
+  happen in the Host application's text system, from the same ordered key
+  events the Viewer received.
+- Modifier key events are admitted and released like other keys. A reset
+  releases admitted keys with an empty modifier mask.
+- Viewer-side IME text entry, character translation, and a text-insertion
+  message are out of V1 scope. Any proposal to add one needs a recorded
+  design decision and the user's approval before a wire change.
+- Key codes and modifier masks never appear in logs, errors, status, or
+  receipts. The secure-input rejection applies regardless of layout or input
+  method.
+
+Manual OS evidence should include one mismatched-layout check (for example a
+US Viewer with a Dvorak or JIS Host input source), one dead-key sequence, and
+one Host IME composition in the disposable test application.
+
 ## Verification
 
 `InputCoreTests` cover:
 
 - normalized pointer and scroll mapping to selected-window screen geometry;
 - keyboard modifiers and typed command construction;
+- the keyboard layout policy: Option/dead-key and modifier-shortcut
+  sequences reach the adapter as ordered key commands with unchanged key
+  codes and masks, ISO/JIS layout-specific key codes are not remapped, and
+  key rejection, status, and receipt text contains no key value;
 - authorization, permission, focus, lock, secure-input, identity, and stale
   generation rejection;
 - malformed modifier/button rejection, event rate limits and the state-ending

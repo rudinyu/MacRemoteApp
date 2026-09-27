@@ -321,6 +321,20 @@ if [[ -n "${pasteboard_scope_hits}" ]]; then
     exit 1
 fi
 
+echo "Checking keyboard layout policy boundary"
+# V1 forwards physical key positions; the Host's active input source
+# interprets them. The input path must not translate characters, insert text,
+# adopt a Viewer-side input method, or bypass secure input.
+keyboard_policy_hits="$(find Packages/InputCore/Sources Apps/Host Apps/Viewer \
+    -type f \( -path 'Packages/InputCore/Sources/*' -o -name 'HostInput*.swift' \
+    -o -name 'ViewerInput*.swift' \) -name '*.swift' \
+    -exec grep -nE 'keyboardSetUnicodeString|keyboardGetUnicodeString|charactersIgnoringModifiers|\.characters\b|interpretKeyEvents|NSTextInputClient|insertText|UCKeyTranslate|TISCopy|TISSelect|DisableSecureEventInput' {} + || true)"
+if [[ -n "${keyboard_policy_hits}" ]]; then
+    echo "Validation failed: the input path must forward physical key codes only (docs/PROTOCOL.md keyboard layout policy)" >&2
+    echo "${keyboard_policy_hits}" >&2
+    exit 1
+fi
+
 echo "Checking required repository documents"
 for document in \
     docs/PRODUCT_SPEC.md \

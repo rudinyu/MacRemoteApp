@@ -927,6 +927,147 @@ final class InputCoreTests: XCTestCase {
         }
     }
 
+    // Keyboard layout policy (docs/PROTOCOL.md): physical key positions are
+    // forwarded unchanged and the Host's active input source interprets them.
+
+    func testHostForwardsOptionDeadKeySequenceAsOrderedPhysicalKeyEvents() throws {
+        // US-layout Option-E dead key followed by E. The Host must not compose,
+        // collapse, or reorder these; its own text system does the composition.
+        let option: UInt32 = 0x0008_0000
+        let steps: [(keyCode: UInt16, modifiers: UInt32, pressed: Bool)] = [
+            (58, option, true),
+            (14, option, true),
+            (14, option, false),
+            (58, 0, false),
+            (14, 0, true),
+            (14, 0, false)
+        ]
+
+        let adapter = try injectKeySequence(steps)
+
+        XCTAssertEqual(adapter.commands.count, steps.count)
+        XCTAssertEqual(keyCommands(adapter.commands), steps.map { KeyCommandValues($0) })
+    }
+
+    func testHostPreservesModifierOrderingAndMasksAroundShortcut() throws {
+        // Shift-Command-Z with left Shift pressed first and released last.
+        let shift: UInt32 = 0x0002_0000
+        let command: UInt32 = 0x0010_0000
+        let steps: [(keyCode: UInt16, modifiers: UInt32, pressed: Bool)] = [
+            (56, shift, true),
+            (55, shift | command, true),
+            (6, shift | command, true),
+            (6, shift | command, false),
+            (55, shift, false),
+            (56, 0, false)
+        ]
+
+        let adapter = try injectKeySequence(steps)
+
+        XCTAssertEqual(keyCommands(adapter.commands), steps.map { KeyCommandValues($0) })
+    }
+
+    func testHostForwardsLayoutSpecificKeyCodesWithoutRemapping() throws {
+        // ISO section (10), JIS Yen (93), JIS Eisu (102), JIS Kana (104), and a
+        // key carrying the Caps Lock state bit are passed through as positions.
+        let capsLock: UInt32 = 0x0001_0000
+        let steps: [(keyCode: UInt16, modifiers: UInt32, pressed: Bool)] = [
+            (10, 0, true), (10, 0, false),
+            (93, 0, true), (93, 0, false),
+            (102, 0, true), (102, 0, false),
+            (104, 0, true), (104, 0, false),
+            (0, capsLock, true), (0, capsLock, false)
+        ]
+
+        let adapter = try injectKeySequence(steps)
+
+        XCTAssertEqual(keyCommands(adapter.commands), steps.map { KeyCommandValues($0) })
+    }
+
+    func testHostKeyRejectionStatusAndReceiptsContainNoKeyValues() throws {
+        // A distinctive key code and mask that must not appear in any text the
+        // Host could surface to status UI or diagnostics.
+        let keyCode: UInt16 = 47_813
+        let modifiers: UInt32 = 0x0048_0000
+        let forbidden = ["\(keyCode)", "\(modifiers)", String(modifiers, radix: 16)]
+        let provider = FakeHostInputContextProvider(context: authorizedHostContext())
+        let controller = HostInputController(
+            contextProvider: provider,
+            injectionAdapter: RecordingHostInputAdapter()
+        )
+        var surfaced: [String] = []
+
+        func key(_ sequence: UInt64, pressed: Bool, mask: UInt32 = modifiers) -> InputEventRecord {
+            InputEventRecord(
+                sequence: sequence,
+                timestampNanoseconds: sequence * 1_000,
+                windowGeneration: 9,
+                kind: pressed ? .keyDown : .keyUp,
+                keyCode: keyCode,
+                modifiers: mask
+            )
+        }
+        func captureRejection(_ record: InputEventRecord) {
+            do {
+                surfaced.append(String(describing: try controller.inject(record)))
+                XCTFail("expected rejection")
+            } catch {
+                surfaced.append(String(describing: error))
+            }
+        }
+
+        captureRejection(key(1, pressed: false))
+        captureRejection(key(2, pressed: true, mask: modifiers | 0x0000_0001))
+        let receipt = try controller.inject(key(3, pressed: true))
+        surfaced.append(String(describing: receipt))
+        surfaced.append(String(describing: controller.status()))
+        provider.context = authorizedHostContext(focus: .secureInput)
+        captureRejection(key(4, pressed: true))
+        surfaced.append(String(describing: controller.status()))
+        provider.context = authorizedHostContext(keyboardInputEnabled: false)
+        captureRejection(key(5, pressed: true))
+
+        XCTAssertEqual(surfaced.count, 7)
+        for text in surfaced {
+            for value in forbidden {
+                XCTAssertFalse(text.contains(value), "surfaced text leaked a key value")
+            }
+        }
+    }
+
+    private func injectKeySequence(
+        _ steps: [(keyCode: UInt16, modifiers: UInt32, pressed: Bool)]
+    ) throws -> RecordingHostInputAdapter {
+        let adapter = RecordingHostInputAdapter()
+        let controller = HostInputController(
+            contextProvider: FakeHostInputContextProvider(context: authorizedHostContext()),
+            injectionAdapter: adapter
+        )
+        for (index, step) in steps.enumerated() {
+            let sequence = UInt64(index + 1)
+            try controller.inject(InputEventRecord(
+                sequence: sequence,
+                timestampNanoseconds: sequence * 1_000,
+                windowGeneration: 9,
+                kind: step.pressed ? .keyDown : .keyUp,
+                keyCode: step.keyCode,
+                modifiers: step.modifiers
+            ))
+        }
+        return adapter
+    }
+
+    private func keyCommands(_ commands: [HostInputCommand]) -> [KeyCommandValues] {
+        commands.map { command in
+            guard case let .key(target, keyCode, modifiers, pressed) = command else {
+                XCTFail("keyboard input must reach the adapter only as typed key commands")
+                return KeyCommandValues(keyCode: 0, modifiers: 0, pressed: false)
+            }
+            XCTAssertEqual(target.windowGeneration, 9)
+            return KeyCommandValues(keyCode: keyCode, modifiers: modifiers, pressed: pressed)
+        }
+    }
+
     private func authorizedHostContext(
         sessionAuthorized: Bool = true,
         authorizedWindowGeneration: UInt64? = 9,
@@ -966,7 +1107,23 @@ final class InputCoreTests: XCTestCase {
     }
 }
 
-private final class FakeHostInputContextProvider: HostInputContextProvider, @unchecked Sendable {
+private struct KeyCommandValues: Equatable {
+    let keyCode: UInt16
+    let modifiers: UInt32
+    let pressed: Bool
+
+    init(keyCode: UInt16, modifiers: UInt32, pressed: Bool) {
+        self.keyCode = keyCode
+        self.modifiers = modifiers
+        self.pressed = pressed
+    }
+
+    init(_ step: (keyCode: UInt16, modifiers: UInt32, pressed: Bool)) {
+        self.init(keyCode: step.keyCode, modifiers: step.modifiers, pressed: step.pressed)
+    }
+}
+
+private final class FakeHostInputContextProvider:HostInputContextProvider, @unchecked Sendable {
     var context: HostInputContext
     var releaseContext: HostInputContext?
 
