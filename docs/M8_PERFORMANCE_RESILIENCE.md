@@ -142,3 +142,8 @@ before the acceptance gate stops.
 No alternate transport was introduced. The baseline remains the authenticated
 Network.framework TCP binding until a physical measurement demonstrates that
 it misses the documented target.
+
+The physical run must report resolution as the encoded pixel size from
+`StreamConfig` and note the Host display backing scale, per the
+[M3 output resolution policy](M3_CAPTURE.md#output-resolution-policy); the
+deterministic harness does not capture and records neither.

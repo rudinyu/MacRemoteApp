@@ -16,7 +16,7 @@ clipboard content, or introduce whole-desktop capture.
 - The system provider excludes desktop windows, requires an on-screen window
   layer of zero, requires a non-empty application bundle identifier, and
   rejects zero-sized, helper, renderer, or service surfaces. The default
-  minimum selectable window is 160×80 pixels, which prevents common 1×33
+  minimum selectable window is 160×80 points, which prevents common 1×33
   preview/service windows while preserving normal app windows such as LINE and
   ChatGPT.
 - M8 changes the default capture pixel format to 4:2:0 bi-planar video range
@@ -30,6 +30,42 @@ through `CGPreflightScreenCaptureAccess()` and exposes an explicit request
 method for the Host application to guide the user through the macOS permission
 flow. Capture never treats a failed or unavailable permission as an empty
 window list.
+
+## Output resolution policy
+
+Window bounds from ScreenCaptureKit are global **points**; the capture stream
+is sized in **pixels**. CaptureCore applies one rule, shared by the capture
+engine and the Host encoder/`StreamConfig`:
+
+1. At catalog read, each window records the backing scale (pixels per point)
+   of the display holding the largest share of its frame. The scale is the
+   display mode's `pixelWidth / width` (2 on Retina, 1 on a standard display).
+   Equal overlaps prefer the higher scale; no overlap, an unavailable mode, or
+   a non-finite value yields 1. Values are clamped to 1…4.
+2. Source pixels are the point bounds times that scale.
+3. The source is downscaled with preserved aspect ratio to fit
+   `CaptureConfiguration.maximumWidth` × `maximumHeight`, 1920×1080 pixels by
+   default. Capture never upscales.
+
+Examples: 640×480 points at scale 2 captures 1280×960; 960×540 points at
+scale 2 captures exactly 1920×1080; 1600×1000 points captures 1600×1000 at
+scale 1 and 1728×1080 at scale 2.
+
+The dimensions are fixed for one capture generation and exposed as
+`CaptureSessionSnapshot.outputDimensions`; the Host builds its H.264 encoder
+and `StreamConfig` from that value rather than recomputing it. If the window
+moves to a display with a different scale (or is resized) during a
+generation, the catalog entry and point bounds refresh, but the stream keeps
+its configured pixel size and ScreenCaptureKit resamples the content into it.
+The next selection (a new generation) samples the new scale. Mid-generation
+renegotiation is not implemented.
+
+Host input is unaffected: the Viewer normalizes pointer positions to the
+displayed content rectangle and InputCore maps them to the selected window's
+current point bounds, so the encoded pixel size never enters input mapping.
+The Host advertises `CaptureConfiguration.default.maximumWidth`/`Height` as
+its negotiated video limit, and `SessionCoordinator` rejects any
+`StreamConfig` or `VideoFrame` above the negotiated minimum of both peers.
 
 ## Capture lifecycle
 
@@ -50,7 +86,13 @@ Deterministic tests use fake window and capture providers to cover:
 - selected-window start/stop and generation-tagged frame delivery;
 - permission loss and window disappearance fail-closed behavior;
 - rejection of ineligible windows;
-- bounded output configuration.
+- bounded output configuration;
+- pixel output sizing at backing scale 1 and 2, oversized-window downscaling
+  with preserved aspect ratio, display selection by largest overlap, and
+  per-generation pinning of output dimensions.
+
+A root smoke test proves that the same normalized pointer event lands on the
+same Host point for scale-1 and scale-2 capture sizes.
 
 The opt-in `scripts/run-m3-system-smoke.sh` checks the current macOS
 ScreenCaptureKit path without requesting permission. It selects the largest

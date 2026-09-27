@@ -11,6 +11,7 @@ public actor WindowCaptureSession {
 
     private var state: CaptureSessionState = .idle
     private var selectedWindow: CaptureWindow?
+    private var outputDimensions: CaptureOutputDimensions?
     private var generation: UInt64 = 0
     private var permission: CapturePermissionState = .denied
     private var engine: (any WindowCaptureEngine)?
@@ -45,7 +46,8 @@ public actor WindowCaptureSession {
             state: state,
             selectedWindow: selectedWindow,
             generation: generation,
-            permission: permission
+            permission: permission,
+            outputDimensions: outputDimensions
         )
     }
 
@@ -97,6 +99,9 @@ public actor WindowCaptureSession {
         let newEngine = engineFactory.makeEngine()
         let relayTermination = CaptureRelayTermination()
         selectedWindow = window
+        // The engine sizes its stream from this same window value, so the
+        // dimensions are pinned here for the whole generation.
+        outputDimensions = configuration.outputDimensions(for: window)
         state = .starting(windowIdentifier: window.identifier, generation: sessionGeneration)
         engine = newEngine
         startRelay(
@@ -149,6 +154,7 @@ public actor WindowCaptureSession {
         state = .stopping
         await activeEngine?.stop()
         selectedWindow = nil
+        outputDimensions = nil
         state = .stopped(.cancelled)
     }
 
@@ -267,6 +273,7 @@ public actor WindowCaptureSession {
         monitorTask = nil
         state = .stopped(nil)
         selectedWindow = nil
+        outputDimensions = nil
     }
 
     private func relayFailed(
@@ -325,6 +332,7 @@ public actor WindowCaptureSession {
         state = .failed(failure)
         await activeEngine?.stop()
         selectedWindow = nil
+        outputDimensions = nil
         // `frames` is a reusable Host pipeline stream. Finishing it here
         // would strand a long-lived Host after a recoverable permission,
         // provider, or capture-engine failure; deinit is the only terminal

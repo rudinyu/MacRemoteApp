@@ -444,8 +444,11 @@ actor HostRuntime {
                 deviceName: configuration.serviceName,
                 capabilities: Self.capabilities,
                 mandatoryCapabilities: [.pingPong],
-                maxVideoWidth: 1920,
-                maxVideoHeight: 1080,
+                // Advertise the CaptureCore pixel cap; SessionCoordinator
+                // rejects any StreamConfig/VideoFrame above the negotiated
+                // min(Host, Viewer) bound.
+                maxVideoWidth: CaptureConfiguration.default.maximumWidth,
+                maxVideoHeight: CaptureConfiguration.default.maximumHeight,
                 maxFrameRate: 60
             ),
             transport: transport,
@@ -884,7 +887,8 @@ actor HostRuntime {
         // intentionally validated separately above.
         guard case .capturing = captureSnapshot.state,
               captureSnapshot.selectedWindow?.identifier == window.identifier,
-              let selected = captureSnapshot.selectedWindow else {
+              let selected = captureSnapshot.selectedWindow,
+              let dimensions = captureSnapshot.outputDimensions else {
             throw HostRuntimeError.staleWindowGeneration
         }
 
@@ -961,7 +965,8 @@ actor HostRuntime {
             try await inputRuntime?.setClipboardEnabled(true)
         }
 
-        let dimensions = CaptureConfiguration.default.outputDimensions(for: selected.bounds)
+        // `dimensions` is the pixel size the capture engine was configured
+        // with for this generation (backing scale applied, fit to the cap).
         let encoder = try H264Encoder(
             configuration: H264EncoderConfiguration(
                 width: dimensions.width,

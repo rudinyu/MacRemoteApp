@@ -342,6 +342,184 @@ final class CaptureCoreTests: XCTestCase {
         )
     }
 
+    func testOutputDimensionsAtScaleOneUsePointSizeWithinCap() {
+        let configuration = CaptureConfiguration()
+        let bounds = WindowBounds(x: 10, y: 20, width: 1_280, height: 720)
+        XCTAssertEqual(
+            configuration.outputDimensions(for: bounds, backingScaleFactor: 1),
+            CaptureOutputDimensions(width: 1_280, height: 720)
+        )
+        XCTAssertEqual(
+            configuration.outputDimensions(for: bounds),
+            CaptureOutputDimensions(width: 1_280, height: 720)
+        )
+    }
+
+    func testOutputDimensionsAtScaleTwoCaptureBackingPixels() {
+        let configuration = CaptureConfiguration()
+        let window = makeWindow(
+            identifier: 1,
+            bounds: WindowBounds(x: 0, y: 0, width: 640, height: 480),
+            backingScaleFactor: 2
+        )
+        XCTAssertEqual(
+            configuration.outputDimensions(for: window),
+            CaptureOutputDimensions(width: 1_280, height: 960)
+        )
+
+        let exactFit = makeWindow(
+            identifier: 2,
+            bounds: WindowBounds(x: 0, y: 0, width: 960, height: 540),
+            backingScaleFactor: 2
+        )
+        XCTAssertEqual(
+            configuration.outputDimensions(for: exactFit),
+            CaptureOutputDimensions(width: 1_920, height: 1_080)
+        )
+    }
+
+    func testOversizedWindowsDownscaleToCapPreservingAspectRatio() {
+        let configuration = CaptureConfiguration()
+        let bounds = WindowBounds(x: 0, y: 0, width: 1_600, height: 1_000)
+
+        // 1600x1000 points fits at scale 1 and is never upscaled.
+        XCTAssertEqual(
+            configuration.outputDimensions(for: bounds, backingScaleFactor: 1),
+            CaptureOutputDimensions(width: 1_600, height: 1_000)
+        )
+        // 3200x2000 pixels is height-bound: 0.54 x -> 1728x1080.
+        XCTAssertEqual(
+            configuration.outputDimensions(for: bounds, backingScaleFactor: 2),
+            CaptureOutputDimensions(width: 1_728, height: 1_080)
+        )
+        // A wide Retina window is width-bound: 5120x1440 -> 1920x540.
+        XCTAssertEqual(
+            configuration.outputDimensions(
+                for: WindowBounds(x: 0, y: 0, width: 2_560, height: 720),
+                backingScaleFactor: 2
+            ),
+            CaptureOutputDimensions(width: 1_920, height: 540)
+        )
+        // A 5K Retina window stays within the cap in both dimensions.
+        let fiveK = configuration.outputDimensions(
+            for: WindowBounds(x: 0, y: 0, width: 2_560, height: 1_440),
+            backingScaleFactor: 2
+        )
+        XCTAssertEqual(fiveK, CaptureOutputDimensions(width: 1_920, height: 1_080))
+    }
+
+    func testOutputDimensionsNeverExceedConfiguredCapForAnyScale() {
+        let configuration = CaptureConfiguration(maximumWidth: 1_280, maximumHeight: 720)
+        for scale in [1.0, 1.5, 2.0, 3.0] {
+            for (width, height) in [(160.0, 80.0), (800.0, 600.0), (1_920.0, 1_200.0), (3_000.0, 400.0)] {
+                let bounds = WindowBounds(x: 0, y: 0, width: width, height: height)
+                let output = configuration.outputDimensions(for: bounds, backingScaleFactor: scale)
+                XCTAssertLessThanOrEqual(output.width, 1_280)
+                XCTAssertLessThanOrEqual(output.height, 720)
+                let sourceAspect = width / height
+                let outputAspect = Double(output.width) / Double(output.height)
+                XCTAssertEqual(outputAspect, sourceAspect, accuracy: sourceAspect * 0.01)
+            }
+        }
+    }
+
+    func testInvalidBackingScaleFallsBackToPointSize() {
+        XCTAssertEqual(CaptureBackingScale.sanitized(.nan), 1)
+        XCTAssertEqual(CaptureBackingScale.sanitized(.infinity), 1)
+        XCTAssertEqual(CaptureBackingScale.sanitized(0), 1)
+        XCTAssertEqual(CaptureBackingScale.sanitized(-2), 1)
+        XCTAssertEqual(CaptureBackingScale.sanitized(0.5), 1)
+        XCTAssertEqual(CaptureBackingScale.sanitized(8), 4)
+        let window = makeWindow(
+            identifier: 1,
+            bounds: WindowBounds(x: 0, y: 0, width: 640, height: 480),
+            backingScaleFactor: .nan
+        )
+        XCTAssertEqual(window.backingScaleFactor, 1)
+        XCTAssertEqual(
+            CaptureConfiguration().outputDimensions(for: window),
+            CaptureOutputDimensions(width: 640, height: 480)
+        )
+    }
+
+    func testBackingScaleComesFromDisplayHoldingMostOfTheWindow() {
+        let standard = CaptureDisplayGeometry(
+            bounds: WindowBounds(x: 0, y: 0, width: 1_920, height: 1_080),
+            backingScaleFactor: 1
+        )
+        let retina = CaptureDisplayGeometry(
+            bounds: WindowBounds(x: 1_920, y: 0, width: 1_512, height: 982),
+            backingScaleFactor: 2
+        )
+        let displays = [standard, retina]
+
+        let mostlyStandard = WindowBounds(x: 1_500, y: 100, width: 600, height: 400)
+        XCTAssertEqual(
+            CaptureBackingScale.backingScaleFactor(forWindow: mostlyStandard, displays: displays),
+            1
+        )
+        let mostlyRetina = WindowBounds(x: 1_800, y: 100, width: 600, height: 400)
+        XCTAssertEqual(
+            CaptureBackingScale.backingScaleFactor(forWindow: mostlyRetina, displays: displays),
+            2
+        )
+        let evenSplit = WindowBounds(x: 1_620, y: 100, width: 600, height: 400)
+        XCTAssertEqual(
+            CaptureBackingScale.backingScaleFactor(forWindow: evenSplit, displays: displays),
+            2
+        )
+        let offscreen = WindowBounds(x: -5_000, y: -5_000, width: 600, height: 400)
+        XCTAssertEqual(
+            CaptureBackingScale.backingScaleFactor(forWindow: offscreen, displays: displays),
+            1
+        )
+        XCTAssertEqual(
+            CaptureBackingScale.backingScaleFactor(forWindow: mostlyRetina, displays: []),
+            1
+        )
+    }
+
+    func testSessionPinsOutputDimensionsForTheGenerationAcrossDisplayMoves() async throws {
+        let retinaWindow = makeWindow(
+            identifier: 42,
+            bounds: WindowBounds(x: 0, y: 0, width: 800, height: 600),
+            backingScaleFactor: 2
+        )
+        let provider = FakeWindowProvider(windows: [retinaWindow], permission: .authorized)
+        let engine = FakeCaptureEngine()
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: FakeCaptureEngineFactory(engine: engine),
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 0)
+        )
+
+        try await session.start(windowIdentifier: retinaWindow.identifier)
+        // 1600x1200 pixels fit to 1440x1080.
+        let expected = CaptureOutputDimensions(width: 1_440, height: 1_080)
+        var snapshot = await session.snapshot()
+        XCTAssertEqual(snapshot.outputDimensions, expected)
+        XCTAssertEqual(engine.startedWindow()?.backingScaleFactor, 2)
+
+        // The window moves to a standard display. The catalog entry updates
+        // (input mapping uses current point bounds) but the running stream
+        // keeps the size it was configured with for this generation.
+        let movedWindow = makeWindow(
+            identifier: 42,
+            bounds: WindowBounds(x: 2_000, y: 0, width: 800, height: 600),
+            backingScaleFactor: 1
+        )
+        await provider.setWindows([movedWindow])
+        await session.refreshSelection()
+        snapshot = await session.snapshot()
+        XCTAssertEqual(snapshot.selectedWindow, movedWindow)
+        XCTAssertEqual(snapshot.outputDimensions, expected)
+        XCTAssertEqual(snapshot.generation, 1)
+
+        await session.stop()
+        snapshot = await session.snapshot()
+        XCTAssertNil(snapshot.outputDimensions)
+    }
+
     func testM3SystemCaptureSmokeWhenOptedIn() async throws {
         guard ProcessInfo.processInfo.environment["MACREMOTEAPP_RUN_M3_SYSTEM_SMOKE"] == "1" else {
             throw XCTSkip("set MACREMOTEAPP_RUN_M3_SYSTEM_SMOKE=1 to use ScreenCaptureKit")
@@ -391,13 +569,18 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertGreaterThan(frame.height, 0)
     }
 
-    private func makeWindow(identifier: UInt64) -> CaptureWindow {
+    private func makeWindow(
+        identifier: UInt64,
+        bounds: WindowBounds = WindowBounds(x: 0, y: 0, width: 640, height: 480),
+        backingScaleFactor: Double = 1
+    ) -> CaptureWindow {
         CaptureWindow(
             identifier: identifier,
             applicationIdentifier: "com.example.test",
             applicationName: "Test App",
             title: "Test Window",
-            bounds: WindowBounds(x: 0, y: 0, width: 640, height: 480),
+            bounds: bounds,
+            backingScaleFactor: backingScaleFactor,
             processIdentifier: 123,
             eligible: true
         )
