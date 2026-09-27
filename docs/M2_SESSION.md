@@ -116,6 +116,9 @@ The deterministic M2 tests use in-memory transport doubles and cover:
 - trust-store round trip, revocation, pairing confirmation, wrong-code and
   expiry handling;
 - Host-initiated pairing with two-sided consent and no single-sided trust;
+- pairing-challenge expiry failing both endpoints closed when consent never
+  completes, driven by an injected manual deadline rather than wall-clock
+  sleeps so teardown cannot race `start()`;
 - bootstrap reconnect with matching Keychain trust bypasses the pairing prompt;
 - capability negotiation and refusal to send protected content before
   authorization;

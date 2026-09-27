@@ -305,6 +305,7 @@ public actor SessionCoordinator {
     private var handshakeTask: Task<Void, Never>?
     private var pairingDeadlineTask: Task<Void, Never>?
     private var pairingDeadlineGeneration: UInt64 = 0
+    private let pairingDeadlineSleep: PairingDeadlineSleep
     private var lastFailure: SessionError?
 
     public nonisolated let incomingMessages: MessageStream
@@ -315,9 +316,32 @@ public actor SessionCoordinator {
         transport: any SessionTransport,
         pairingCoordinator: PairingCoordinator? = nil
     ) {
+        self.init(
+            configuration: configuration,
+            transport: transport,
+            pairingCoordinator: pairingCoordinator,
+            pairingDeadlineSleep: { nanoseconds in
+                try await Task.sleep(nanoseconds: nanoseconds)
+            }
+        )
+    }
+
+    /// Waits for the pairing challenge expiry. It must throw when the calling
+    /// task is cancelled so a completed or superseded challenge never tears
+    /// down the session. Tests inject a manual deadline so pairing expiry is
+    /// driven by explicit state instead of wall-clock scheduling.
+    typealias PairingDeadlineSleep = @Sendable (_ nanoseconds: UInt64) async throws -> Void
+
+    init(
+        configuration: SessionConfiguration,
+        transport: any SessionTransport,
+        pairingCoordinator: PairingCoordinator?,
+        pairingDeadlineSleep: @escaping PairingDeadlineSleep
+    ) {
         self.configuration = configuration
         self.transport = transport
         self.pairingCoordinator = pairingCoordinator
+        self.pairingDeadlineSleep = pairingDeadlineSleep
         let stream = try! MessageStream.makeBounded(
             maxControlMessages: Self.incomingControlMessageCapacity,
             maxMediaMessages: Self.incomingMediaMessageCapacity
@@ -2099,9 +2123,10 @@ public actor SessionCoordinator {
                 )
             )
         )
+        let sleep = pairingDeadlineSleep
         pairingDeadlineTask = Task { [weak self] in
             do {
-                try await Task.sleep(nanoseconds: nanoseconds)
+                try await sleep(nanoseconds)
             } catch {
                 return
             }

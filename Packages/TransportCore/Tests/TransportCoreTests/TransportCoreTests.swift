@@ -2053,28 +2053,36 @@ final class TransportCoreTests: XCTestCase {
             firstAuthentication: .pairingRequired(viewerIdentity),
             secondAuthentication: .pairingRequired(hostIdentity)
         )
+        // Expiry is driven by the manual deadlines below, never by the
+        // scheduler, so the Host deadline cannot close the shared transport
+        // while the Viewer is still sending Hello from start().
+        let hostDeadline = ManualPairingDeadline()
+        let viewerDeadline = ManualPairingDeadline()
+        let pairingTimeoutNanoseconds: UInt64 = 60_000_000_000
         let capabilities: Set<Capability> = [.pingPong]
         let host = SessionCoordinator(
             configuration: SessionConfiguration(
                 role: .host,
                 implementationIdentifier: "pairing-deadline-host",
                 capabilities: capabilities,
-                handshakeTimeoutNanoseconds: 1_000_000_000,
-                pairingTimeoutNanoseconds: 20_000_000
+                handshakeTimeoutNanoseconds: 60_000_000_000,
+                pairingTimeoutNanoseconds: pairingTimeoutNanoseconds
             ),
             transport: pair.first,
-            pairingCoordinator: hostPairing
+            pairingCoordinator: hostPairing,
+            pairingDeadlineSleep: { try await hostDeadline.sleep(nanoseconds: $0) }
         )
         let viewer = SessionCoordinator(
             configuration: SessionConfiguration(
                 role: .viewer,
                 implementationIdentifier: "pairing-deadline-viewer",
                 capabilities: capabilities,
-                handshakeTimeoutNanoseconds: 1_000_000_000,
-                pairingTimeoutNanoseconds: 20_000_000
+                handshakeTimeoutNanoseconds: 60_000_000_000,
+                pairingTimeoutNanoseconds: pairingTimeoutNanoseconds
             ),
             transport: pair.second,
-            pairingCoordinator: viewerPairing
+            pairingCoordinator: viewerPairing,
+            pairingDeadlineSleep: { try await viewerDeadline.sleep(nanoseconds: $0) }
         )
 
         async let hostStart: Void = host.start()
@@ -2082,22 +2090,56 @@ final class TransportCoreTests: XCTestCase {
         try await hostStart
         try await viewerStart
 
-        for _ in 0 ..< 500 {
-            if (await host.snapshot()).state == .failed,
-               (await viewer.snapshot()).state == .failed {
-                break
-            }
-            try await Task.sleep(nanoseconds: 1_000_000)
-        }
+        // Both sides must arm a deadline bounded by the challenge expiry
+        // before anyone consents.
+        let hostRequested = await hostDeadline.waitUntilArmed()
+        let viewerRequested = await viewerDeadline.waitUntilArmed()
+        XCTAssertLessThanOrEqual(hostRequested, pairingTimeoutNanoseconds)
+        XCTAssertLessThanOrEqual(viewerRequested, pairingTimeoutNanoseconds)
+        let hostPending = await host.snapshot()
+        let viewerPending = await viewer.snapshot()
+        XCTAssertEqual(hostPending.state, .pairingRequired)
+        XCTAssertEqual(viewerPending.state, .pairingRequired)
+        XCTAssertFalse(hostPending.authorized)
+        XCTAssertFalse(viewerPending.authorized)
 
+        // Consent never completes: the Host challenge expires first and must
+        // fail closed with the pairing failure itself.
+        await hostDeadline.expire()
+        await waitForFailedState(host)
         let hostSnapshot = await host.snapshot()
-        let viewerSnapshot = await viewer.snapshot()
         let hostFailure = await host.failureReason()
-        let viewerFailure = await viewer.failureReason()
         XCTAssertEqual(hostSnapshot.state, .failed)
+        XCTAssertFalse(hostSnapshot.authorized)
+        XCTAssertEqual(hostFailure, .pairingFailed)
+
+        // The Viewer fails closed either from its own expired challenge or
+        // from the Host tearing down the transport, whichever it observes
+        // first; neither path may leave it pending or authorized.
+        await viewerDeadline.expire()
+        await waitForFailedState(viewer)
+        let viewerSnapshot = await viewer.snapshot()
+        let viewerFailure = await viewer.failureReason()
         XCTAssertEqual(viewerSnapshot.state, .failed)
-        XCTAssertTrue(isPairingTimeoutFailure(hostFailure))
+        XCTAssertFalse(viewerSnapshot.authorized)
         XCTAssertTrue(isPairingTimeoutFailure(viewerFailure))
+    }
+
+    /// Waits for an explicit terminal state. The wall-clock bound only stops a
+    /// broken build from hanging; correctness never depends on it.
+    private func waitForFailedState(
+        _ coordinator: SessionCoordinator,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let bound = Date().addingTimeInterval(30)
+        while await coordinator.snapshot().state != .failed {
+            guard Date() < bound else {
+                XCTFail("session never reached .failed", file: file, line: line)
+                return
+            }
+            await Task.yield()
+        }
     }
 
     private func isPairingTimeoutFailure(_ error: SessionError?) -> Bool {
@@ -3065,5 +3107,69 @@ private final class MessageStreamRegistrationGate: @unchecked Sendable {
 
         entered.signal()
         release.wait()
+    }
+}
+
+/// Pairing-challenge expiry controlled by the test instead of wall-clock time.
+/// A session arms it through the injected deadline sleep; `expire()` resumes
+/// every armed sleeper, and cancelling the sleeping task throws exactly like
+/// `Task.sleep`, so a superseded deadline still cannot tear down a session.
+private actor ManualPairingDeadline {
+    private var nextID: UInt64 = 0
+    private var sleepers: [UInt64: CheckedContinuation<Void, Error>] = [:]
+    private var requestedNanoseconds: [UInt64] = []
+    private var armedWaiters: [CheckedContinuation<UInt64, Never>] = []
+
+    func sleep(nanoseconds: UInt64) async throws {
+        nextID &+= 1
+        let id = nextID
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                arm(id: id, nanoseconds: nanoseconds, continuation: continuation)
+            }
+        } onCancel: {
+            Task { await self.cancel(id) }
+        }
+    }
+
+    private func arm(
+        id: UInt64,
+        nanoseconds: UInt64,
+        continuation: CheckedContinuation<Void, Error>
+    ) {
+        guard !Task.isCancelled else {
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        sleepers[id] = continuation
+        requestedNanoseconds.append(nanoseconds)
+        let waiters = armedWaiters
+        armedWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume(returning: nanoseconds)
+        }
+    }
+
+    /// Suspends until a session has armed its pairing deadline and returns
+    /// the requested sleep duration.
+    func waitUntilArmed() async -> UInt64 {
+        if let first = requestedNanoseconds.first {
+            return first
+        }
+        return await withCheckedContinuation { continuation in
+            armedWaiters.append(continuation)
+        }
+    }
+
+    func expire() {
+        let pending = sleepers
+        sleepers.removeAll()
+        for continuation in pending.values {
+            continuation.resume()
+        }
+    }
+
+    private func cancel(_ id: UInt64) {
+        sleepers.removeValue(forKey: id)?.resume(throwing: CancellationError())
     }
 }
