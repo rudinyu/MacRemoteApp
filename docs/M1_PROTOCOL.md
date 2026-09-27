@@ -73,9 +73,9 @@ and remote values, with encoding overhead still applied.
 
 The first sequence on each channel may be any value. Control sequences must be
 strictly contiguous and control/media sequences are independent. Media
-sequences must be strictly increasing; a bounded queue may replace an unsent,
-discardable video frame with a newer one, so the receiver may observe a forward
-gap in the media sequence. It must never drop `VideoConfig` or a required
+sequences must be strictly increasing; a bounded queue may discard delta video
+frames under the keyframe-aware policy in `docs/PROTOCOL.md`, so the receiver
+may observe a forward gap in the media sequence. It must never drop `VideoConfig` or a required
 recovery keyframe locally, and a non-increasing media sequence is still a
 replay/protocol error.
 
@@ -138,6 +138,7 @@ are rejected.
 | `0x0010` | SessionState |
 | `0x0011` | Error |
 | `0x0012` | Close |
+| `0x0017` | KeyframeRequest (M8, optional capability) |
 
 ### Capabilities
 
@@ -149,6 +150,7 @@ are rejected.
 | `0x0004` | Keyboard input |
 | `0x0005` | Text clipboard |
 | `0x0006` | Ping/pong |
+| `0x0007` | Keyframe request (M8, optional) |
 
 `0x8000` is a wire-only mandatory marker and is not part of the identifier
 value. `CodecIdentifier.h264` is `0x0001`.
@@ -183,6 +185,7 @@ capability list above.
 | `SessionState` | 1 `state` (u8), 2 `permission` (u8), 3 `focusEligible` (bool), 4 `windowGeneration` (u64, optional) |
 | `Error` | 1 `code` (u16), 2 `retryable` (bool), 3 `detailCode` (utf8, optional) |
 | `Close` | 1 `reason` (u16), 2 `detailCode` (utf8, optional) |
+| `KeyframeRequest` | 1 `generation` (u64), 2 `reason` (u8: 1 media gap, 2 decode failure) |
 
 `WindowList` nested window records use the same TLV format with fields:
 1 `identifier` (u64), 2 `applicationIdentifier` (utf8), 3 `title` (utf8,
@@ -221,6 +224,7 @@ Pong                010101000000080102030405060708
 SessionState        010101000000010802010000000102030100000001010400000000080000000000000009
 Error               0101010000000200050201000000010103000000001073637265656E2D7265636F7264696E67
 Close               010101000000020001020000000004646F6E65
+KeyframeRequest     01010100000008000000000000000902010000000101
 ```
 
 The test suite asserts the exact bytes above, then decodes and re-encodes every

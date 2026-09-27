@@ -24,7 +24,9 @@ product UI flow.
 ## Codec defaults
 
 The default encoder configuration is H.264 Main Auto Level, real-time mode,
-8 Mbps average bitrate, 60 fps, and a 60-frame keyframe interval. M4 uses the
+8 Mbps average bitrate, 60 fps, and a 60-frame keyframe interval. M8 adds
+`AllowFrameReordering = false` (no B-frame output delay) and a best-effort
+one-second `DataRateLimits` cap at 1.5x the average bitrate. M4 uses the
 VideoToolbox output's AVCC-style access unit bytes and carries one SPS/PPS pair
 in the deterministic `MRAH264` decoder-configuration payload. The protocol
 layer remains responsible for carrying these bytes; CodecCore does not import
@@ -45,7 +47,7 @@ layer remains responsible for carrying these bytes; CodecCore does not import
 
 Deterministic tests cover decoder-configuration round trips, malformed trailing
 data, keyframe-preserving queue replacement, and aspect-fit layout. The
-`MACREMOTEAPP_RUN_M4_CODEC_SMOKE=1` opt-in test creates a 64x64 BGRA fixture,
+`MACREMOTEAPP_RUN_M4_CODEC_SMOKE=1` opt-in test creates 64x64 BGRA and `420v` fixtures,
 encodes one forced keyframe, decodes it, and checks generation, timestamps,
 dimensions, and output pixels. It is deliberately opt-in because VideoToolbox
 hardware availability is host-specific. Metal presentation still requires a

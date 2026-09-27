@@ -427,11 +427,13 @@ lists, selected-window state, session status, input events, clipboard messages,
 and errors. It is reliable and ordered.
 
 The media plane carries codec configuration and video frames. It has an
-independent bounded scheduling queue and may replace only unsent, discardable
-video frames before they are admitted to the wire. `VideoConfig` and
-recovery keyframes are not discardable. Media sequences are strictly
-increasing, but a replaced frame may create a forward media gap; control
-sequences remain contiguous. The baseline V1 binding is one ordered
+independent bounded scheduling queue with a keyframe-aware drop policy:
+when full it discards the incoming delta frame, never a queued one, and then
+skips every later delta frame until a keyframe, because H.264 delta frames
+reference earlier pictures. A keyframe purges queued delta frames it
+supersedes. `VideoConfig` and keyframes are never discarded. Media sequences
+are strictly increasing, but a discarded frame may create a forward media gap;
+control sequences remain contiguous. The baseline V1 binding is one ordered
 Network.framework TCP stream protected by the same authenticated session
 policy; control is prioritized between individual writes, while TCP
 head-of-line blocking remains an M8 measurement concern. M8 may evaluate a
@@ -524,9 +526,31 @@ to add speculative features.
 - The benchmark exchanges at least 20 authenticated four-timestamp probes,
   selects the minimum-RTT offset, reports residual uncertainty and drift, and
   refuses to label one-way latency verified when uncertainty exceeds 5 ms.
-- Video queue capacity remains three; only unsent non-keyframes may be
-  superseded. Control/input ordering and authorization gates are never traded
-  for a latency optimization.
+- Video queue capacity remains three. The Host outgoing queue and both Viewer
+  incoming queues share `KeyframeAwareMediaAdmission`: a discarded delta frame
+  starts a skip-until-keyframe state so no delta frame is ever decoded against
+  a missing reference, and protected-media invalidation starts the same wait.
+  `SessionCoordinator.send` reports `.replacedMedia` only when the queue
+  enters that wait (a keyframe purging superseded delta frames does not), and
+  the Host forces its next encode to a keyframe. A Viewer-side gap or decode
+  failure sends the rate-limited `KeyframeRequest` described in
+  `docs/PROTOCOL.md`.
+- Encoder output reaches the wire through one FIFO relay
+  (`Apps/Host/HostEncodedFrameRelay`) instead of one unstructured task per
+  frame, so frames cannot be reordered before sequence numbers are assigned.
+  Its bounded buffer follows the same skip-until-keyframe rule on overflow.
+- Capture defaults to 4:2:0 bi-planar video-range pixels tagged BT.709, the
+  encoder's native input, removing a per-frame BGRA conversion on the Host.
+- The p95 latency budget is split per stage in `LatencyBudget.v1`: Host
+  capture-to-send 12 ms, network transit 18 ms, Viewer receive-to-present
+  20 ms, summing to the 50 ms target. Host and Viewer log sanitized per-stage
+  p50/p95 aggregates so a miss can be attributed to one stage.
+  Control/input ordering and authorization gates are never traded for a
+  latency optimization.
+- The encoder disables B-frame reordering and applies a best-effort
+  one-second `DataRateLimits` cap at 1.5x the average bitrate. The TCP binding
+  sets `noDelay` so small control/input envelopes are not held by Nagle
+  coalescing behind video segments.
 
 ## M2 decisions
 

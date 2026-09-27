@@ -71,6 +71,28 @@ rule and a hard 10,000-sample bound; one-way conversion remains invalid until
 the authenticated clock-sync estimate is available. It is currently an
 in-memory measurement boundary rather than a completed physical-run report.
 
+## Per-stage latency budget
+
+`LatencyBudget.v1` splits the 50 ms p95 target so a miss can be attributed:
+
+| Stage | Clock | p95 budget | Measured by |
+| --- | --- | ---: | --- |
+| Host capture arrival → wire-queue admission (encode + scheduling) | Host | 12 ms | `HostRuntime` `BoundedStageLatencyCollector` |
+| Wire admission → Viewer receipt (TCP + queues) | Both | 18 ms | Not measured directly; the end-to-end remainder |
+| Viewer receipt → drawable presentation (decode + display wait) | Viewer | 20 ms | `ViewerRuntime` `BoundedStageLatencyCollector` |
+| End to end | Both, clock-aligned | 50 ms | `BoundedPresentationSampleCollector` |
+
+The two single-clock stages need no clock synchronization. Each collector
+skips 60 warm-up samples, keeps at most 10,000 intervals, and stores interval
+lengths only. During a session the Host and Viewer write aggregate lines to the
+unified log about every ten seconds, for example
+`M8 stage host-capture-to-send samples=… p50Ns=… p95Ns=… budgetNs=…
+withinBudget=…`. The Host uses category `host-runtime`; the Viewer uses
+`startup` and also logs `viewer-receive-to-present` and, once the clock
+estimate is eligible, `end-to-end`. These lines contain no pixels, titles,
+input, or clipboard data. The physical run should collect them with the
+commands in `docs/DEBUG_LOG_COLLECTION.md`.
+
 ## Harness and artifacts
 
 Run the deterministic harness with:
@@ -104,7 +126,13 @@ before the acceptance gate stops.
 | --- | --- |
 | Clock-probe math and p50/p95 calculation | Verified by deterministic tests |
 | Production Ping/Pong probe wiring and bounded presentation collector | Verified by focused unit tests; physical timing not measured here |
-| Queue bound and non-keyframe replacement | Verified by deterministic tests and harness |
+| Queue bound and keyframe-aware delta-frame discard | Verified by deterministic TransportCore tests and harness |
+| Encoder no-reordering and `DataRateLimits` settings | Accepted by the Apple Silicon VideoToolbox smoke; Intel encoder pending physical run |
+| TCP `noDelay` input latency effect | Configured; not measured |
+| Viewer `KeyframeRequest` gating, throttling, and gap trigger | Verified by RemoteProtocol golden vector and TransportCore session tests; physical recovery time not measured |
+| Ordered encoder-to-wire relay | Compiles into Host; ordering is structural (single FIFO consumer); not exercised by a physical run |
+| `420v` capture input | Accepted by the Apple Silicon VideoToolbox smoke; Intel capture/encode pending physical run |
+| Per-stage budget collectors and log lines | Collector math verified by deterministic tests; stage values pending physical run |
 | Reconnect/keyframe recovery state model | Verified by TransportCore/CodecCore tests |
 | 1080p/60 synthetic contract | Harness pass; not a hardware result |
 | Intel Host capture-to-display | Pending physical Intel Host |

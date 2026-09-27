@@ -345,6 +345,9 @@ final class MacRemoteAppSmokeTests: XCTestCase {
         XCTAssertTrue(hostRuntime.contains("snapshot.state == .streaming"))
         XCTAssertTrue(hostRuntime.contains("bringSelectedApplicationToForeground(selected)"))
         XCTAssertTrue(hostRuntime.contains("frontmostApplication?.processIdentifier == window.processIdentifier"))
+        // A remote foreground change must be visible on the Host.
+        XCTAssertTrue(hostRuntime.contains("broughtToFront: didForegroundSelectedApplication"))
+        XCTAssertTrue(hostRuntime.contains("Viewer brought \\(application) to the front and is sharing it"))
         XCTAssertTrue(viewerRuntime.contains("deviceName: Self.localDeviceName"))
         XCTAssertTrue(viewerRuntime.contains("case .connected: return \"Connected\""))
         XCTAssertTrue(viewerRuntime.contains("case .reconnecting: return \"Reconnecting…\""))

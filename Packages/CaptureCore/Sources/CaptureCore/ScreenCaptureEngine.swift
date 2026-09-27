@@ -58,7 +58,12 @@ public final class ScreenCaptureEngine: NSObject, WindowCaptureEngine, SCStreamO
             timescale: CMTimeScale(max(1, configuration.frameRate))
         )
         streamConfiguration.queueDepth = configuration.queueDepth
-        streamConfiguration.pixelFormat = kCVPixelFormatType_32BGRA
+        streamConfiguration.pixelFormat = configuration.pixelFormat
+        if configuration.pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
+            // Tag the YCbCr conversion explicitly so the H.264 VUI and the
+            // Viewer's color conversion agree.
+            streamConfiguration.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
+        }
         streamConfiguration.showsCursor = false
 
         let newStream = SCStream(filter: filter, configuration: streamConfiguration, delegate: self)

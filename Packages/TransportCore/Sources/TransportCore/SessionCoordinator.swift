@@ -168,6 +168,10 @@ public actor SessionCoordinator {
     private static let incomingControlMessageCapacity = 64
     private static let incomingMediaMessageCapacity = 3
     private static let maximumClockSyncProbes = 64
+    /// Minimum spacing between Viewer keyframe requests. One forced keyframe
+    /// recovers every gap that occurred before it, so closer requests only
+    /// cost bandwidth.
+    static let keyframeRequestMinimumIntervalNanoseconds: UInt64 = 250_000_000
 
     private static let protectedMessageTypes: Set<MessageType> = [
         .windowList,
@@ -178,12 +182,14 @@ public actor SessionCoordinator {
         .inputEvent,
         .clipboardOffer,
         .clipboardText,
-        .clipboardAcknowledgement
+        .clipboardAcknowledgement,
+        .keyframeRequest
     ]
 
     private static let windowBoundCapabilities: Set<Capability> = [
         .windowSelection,
         .h264Video,
+        .keyframeRequest,
         .mouseInput,
         .keyboardInput
     ]
@@ -217,6 +223,7 @@ public actor SessionCoordinator {
         .pairingConfirmation,
         .windowSelection,
         .inputEvent,
+        .keyframeRequest,
         .clipboardOffer,
         .clipboardText,
         .clipboardAcknowledgement,
@@ -235,6 +242,7 @@ public actor SessionCoordinator {
         .pairingConfirmation,
         .windowSelection,
         .inputEvent,
+        .keyframeRequest,
         .clipboardOffer,
         .clipboardText,
         .clipboardAcknowledgement,
@@ -281,6 +289,7 @@ public actor SessionCoordinator {
     private var authorized = false
     private var authorizedWindowGeneration: UInt64?
     private var authorizedCapabilities: Set<Capability> = []
+    private var lastKeyframeRequestNanoseconds: UInt64?
     private var helloSent = false
     private var capabilitiesSent = false
     private var capabilitiesSendInFlight = false
@@ -777,21 +786,23 @@ public actor SessionCoordinator {
         outboundMutex.release()
     }
 
+    /// Returns `.replacedMedia` when the keyframe-aware media queue discarded
+    /// video; a media sender should then force its next frame to a keyframe.
+    @discardableResult
     public func send(
         _ payload: MessagePayload,
         flags: EnvelopeFlags = [],
         expectedAuthorizationGeneration: UInt64? = nil,
         localAdmission: (@MainActor @Sendable () -> Bool)? = nil
-    ) async throws {
+    ) async throws -> TransportSendResult {
         try validateMessageDirection(for: payload.messageType, incoming: false)
         try validateAuthorization(for: payload)
         guard let localAdmission else {
-            _ = try await sendUnrestricted(
+            return try await sendUnrestricted(
                 payload,
                 flags: flags,
                 expectedAuthorizationGeneration: expectedAuthorizationGeneration
             )
-            return
         }
 
         let operationReceiveGeneration = receiveGeneration
@@ -814,13 +825,44 @@ public actor SessionCoordinator {
             throw SessionError.authorizationChanged
         }
         try validateAuthorization(for: payload)
-        _ = try await sendUnrestrictedAfterAdmission(
+        return try await sendUnrestrictedAfterAdmission(
             payload,
             flags: flags,
             operationGeneration: operationReconnectGeneration,
             operationReceiveGeneration: operationReceiveGeneration,
             operationAuthorizationGeneration: operationAuthorizationGeneration
         )
+    }
+
+    /// Viewer only: asks the Host to encode its next frame as a keyframe.
+    ///
+    /// Best-effort. Returns `false` without sending when the Host did not
+    /// authorize `Capability.keyframeRequest` for the current window, when a
+    /// request was sent within `keyframeRequestMinimumIntervalNanoseconds`,
+    /// or when the send fails. A media sequence gap or a local media discard
+    /// triggers this automatically; the app calls it after a decode failure.
+    @discardableResult
+    public func requestKeyframe(reason: KeyframeRequestReason) async -> Bool {
+        guard configuration.role == .viewer,
+              authorized,
+              authorizedCapabilities.contains(.keyframeRequest),
+              let generation = authorizedWindowGeneration else {
+            return false
+        }
+        let now = DispatchTime.now().uptimeNanoseconds
+        if let last = lastKeyframeRequestNanoseconds,
+           now &- last < Self.keyframeRequestMinimumIntervalNanoseconds {
+            return false
+        }
+        lastKeyframeRequestNanoseconds = now
+        do {
+            _ = try await sendUnrestricted(
+                .keyframeRequest(KeyframeRequestMessage(generation: generation, reason: reason))
+            )
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// Runs the native pasteboard commit while the outbound authorization
@@ -1000,6 +1042,7 @@ public actor SessionCoordinator {
         capabilitiesSendInFlight = false
         incomingSequence.removeAll()
         outgoingSequence.removeAll()
+        lastKeyframeRequestNanoseconds = nil
         pendingPing = nil
         clockSyncEstimator = ClockSyncEstimator()
         lastHeartbeatAt = nil
@@ -1893,6 +1936,12 @@ public actor SessionCoordinator {
             guard envelope.sequence > previous else {
                 throw SessionError.replayDetected
             }
+            if envelope.sequence != previous + 1 {
+                // The sender discarded media; its queue skips delta frames
+                // until a keyframe, so ask for one instead of waiting for
+                // the periodic keyframe.
+                noteIncomingMediaGap()
+            }
             incomingSequence[envelope.channel] = envelope.sequence
             return
         }
@@ -1918,6 +1967,8 @@ public actor SessionCoordinator {
             return [.windowSelection]
         case .streamConfig, .videoConfig, .videoFrame:
             return [.h264Video]
+        case .keyframeRequest:
+            return [.h264Video, .keyframeRequest]
         case let .inputEvent(input):
             switch input.kind {
             case .keyDown, .keyUp:
@@ -1942,6 +1993,8 @@ public actor SessionCoordinator {
             return config.generation
         case let .videoFrame(frame):
             return frame.generation
+        case let .keyframeRequest(request):
+            return request.generation
         case let .inputEvent(input):
             return input.windowGeneration
         default:
@@ -2035,11 +2088,23 @@ public actor SessionCoordinator {
 
     private func publish(_ message: MessagePayload) throws {
         do {
-            _ = try incomingMessageStorage.yield(message)
+            let result = try incomingMessageStorage.yield(message)
+            if result == .replacedMedia {
+                noteIncomingMediaGap()
+            }
         } catch TransportError.controlBackpressure {
             throw SessionError.incomingMessageBackpressure(.control)
         } catch TransportError.mediaBackpressure {
             throw SessionError.incomingMessageBackpressure(.media)
+        }
+    }
+
+    /// Sends from a separate task: the receive path must not wait on the
+    /// outbound mutex while it is validating an incoming envelope.
+    private func noteIncomingMediaGap() {
+        guard configuration.role == .viewer else { return }
+        Task { [weak self] in
+            await self?.requestKeyframe(reason: .mediaGap)
         }
     }
 

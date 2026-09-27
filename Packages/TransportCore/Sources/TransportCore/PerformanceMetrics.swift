@@ -499,3 +499,88 @@ public struct PerformanceRunReport: Codable, Equatable, Sendable {
         self.verdict = verdict
     }
 }
+
+/// Bounded interval collector for one pipeline stage whose start and end are
+/// taken on the same monotonic clock, so no clock synchronization is needed.
+/// Only interval lengths are retained, never raw timestamps.
+public struct BoundedStageLatencyCollector: Sendable {
+    public static let defaultWarmupSampleCount = 60
+    public static let defaultMaximumSamples = 10_000
+
+    private let warmupSampleCount: Int
+    private let maximumSamples: Int
+    private var observedCount = 0
+    private var intervals: [UInt64] = []
+
+    public init(
+        warmupSampleCount: Int = Self.defaultWarmupSampleCount,
+        maximumSamples: Int = Self.defaultMaximumSamples
+    ) {
+        self.warmupSampleCount = max(0, warmupSampleCount)
+        self.maximumSamples = max(1, maximumSamples)
+    }
+
+    public var retainedSampleCount: Int { intervals.count }
+
+    /// Ignores an interval whose end precedes its start.
+    public mutating func append(startNanoseconds: UInt64, endNanoseconds: UInt64) {
+        guard endNanoseconds >= startNanoseconds else { return }
+        let ordinal = observedCount
+        if observedCount < Int.max {
+            observedCount += 1
+        }
+        guard ordinal >= warmupSampleCount, intervals.count < maximumSamples else { return }
+        intervals.append(endNanoseconds - startNanoseconds)
+    }
+
+    public mutating func reset() {
+        observedCount = 0
+        intervals.removeAll(keepingCapacity: true)
+    }
+
+    public func summary() -> PercentileSummary? {
+        PercentileSummary(samples: intervals)
+    }
+}
+
+/// The p95 latency budget for each pipeline stage. The stages sum to the
+/// V1 end-to-end target, so a miss can be attributed to one stage.
+///
+/// - `hostCaptureToSend`: capture arrival to wire-queue admission on the
+///   Host clock (encode plus Host scheduling).
+/// - `networkTransit`: wire admission to Viewer receipt. It spans two clocks
+///   and is not measured directly; it is the remainder of the end-to-end
+///   figure.
+/// - `viewerReceiveToPresent`: Viewer receipt to drawable presentation on
+///   the Viewer clock (decode plus waiting for the display refresh).
+public struct LatencyBudget: Codable, Equatable, Sendable {
+    public let hostCaptureToSendNanoseconds: UInt64
+    public let networkTransitNanoseconds: UInt64
+    public let viewerReceiveToPresentNanoseconds: UInt64
+
+    public static let v1 = LatencyBudget(
+        hostCaptureToSendNanoseconds: 12_000_000,
+        networkTransitNanoseconds: 18_000_000,
+        viewerReceiveToPresentNanoseconds: 20_000_000
+    )
+
+    public init(
+        hostCaptureToSendNanoseconds: UInt64,
+        networkTransitNanoseconds: UInt64,
+        viewerReceiveToPresentNanoseconds: UInt64
+    ) {
+        self.hostCaptureToSendNanoseconds = hostCaptureToSendNanoseconds
+        self.networkTransitNanoseconds = networkTransitNanoseconds
+        self.viewerReceiveToPresentNanoseconds = viewerReceiveToPresentNanoseconds
+    }
+
+    public var endToEndNanoseconds: UInt64 {
+        hostCaptureToSendNanoseconds + networkTransitNanoseconds + viewerReceiveToPresentNanoseconds
+    }
+
+    /// Returns `nil` when the stage has no samples, otherwise whether its p95
+    /// is within the budget.
+    public static func isWithinBudget(_ summary: PercentileSummary?, budget: UInt64) -> Bool? {
+        summary.map { $0.p95Nanoseconds <= budget }
+    }
+}

@@ -316,6 +316,13 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertFalse(engine.wasStarted())
     }
 
+    func testCaptureConfigurationDefaultsToEncoderNativeYUV() {
+        XCTAssertEqual(
+            CaptureConfiguration().pixelFormat,
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        )
+    }
+
     func testCaptureConfigurationRejectsTinyHelperWindows() {
         let configuration = CaptureConfiguration()
         XCTAssertFalse(

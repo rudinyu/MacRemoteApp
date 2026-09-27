@@ -258,6 +258,10 @@ public struct CaptureConfiguration: Equatable, Sendable {
     public let queueDepth: Int
     public let monitorIntervalNanoseconds: UInt64
     public let outputBufferCount: Int
+    /// Capture pixel format. The default is 4:2:0 bi-planar video range, the
+    /// encoder's native input, so VideoToolbox does not convert every frame
+    /// from BGRA on the Host.
+    public let pixelFormat: OSType
 
     public init(
         maximumWidth: UInt32 = 1920,
@@ -267,7 +271,8 @@ public struct CaptureConfiguration: Equatable, Sendable {
         frameRate: UInt16 = 60,
         queueDepth: Int = 3,
         monitorIntervalNanoseconds: UInt64 = 1_000_000_000,
-        outputBufferCount: Int = 3
+        outputBufferCount: Int = 3,
+        pixelFormat: OSType = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
     ) {
         self.maximumWidth = maximumWidth
         self.maximumHeight = maximumHeight
@@ -277,6 +282,7 @@ public struct CaptureConfiguration: Equatable, Sendable {
         self.queueDepth = queueDepth
         self.monitorIntervalNanoseconds = monitorIntervalNanoseconds
         self.outputBufferCount = outputBufferCount
+        self.pixelFormat = pixelFormat
     }
 
     /// Reject macOS helper/service surfaces that are technically on-screen

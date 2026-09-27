@@ -1199,6 +1199,49 @@ public struct PingMessage: MessagePayloadValue {
     }
 }
 
+/// Viewer request for the Host to encode its next frame as a keyframe.
+/// Sent only when both endpoints negotiated `Capability.keyframeRequest`;
+/// the Host rate-limits honored requests.
+public struct KeyframeRequestMessage: MessagePayloadValue {
+    public static let messageType: MessageType = .keyframeRequest
+    /// Selected-window generation of the stream the Viewer is decoding.
+    public let generation: UInt64
+    public let reason: KeyframeRequestReason
+
+    public init(generation: UInt64, reason: KeyframeRequestReason) {
+        self.generation = generation
+        self.reason = reason
+    }
+
+    public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
+        var fields = try MessageFieldWriter(message: .keyframeRequest, limits: limits)
+        try fields.append(fieldID: 1, mandatory: true, value: WireValue.uint64(generation))
+        try fields.append(
+            fieldID: 2,
+            mandatory: true,
+            value: WireValue.byte(reason.rawValue, message: .keyframeRequest, fieldID: 2)
+        )
+        return fields.data
+    }
+
+    public static func decode(
+        _ data: Data,
+        using limits: ProtocolLimits = .default
+    ) throws -> KeyframeRequestMessage {
+        let fields = try MessageFieldReader(data: data, message: .keyframeRequest, limits: limits)
+        try fields.ensureKnown(Set([1, 2]))
+        guard let reason = KeyframeRequestReason(
+            rawValue: try WireValue.decodeByte(try fields.required(2), message: .keyframeRequest, fieldID: 2)
+        ) else {
+            throw ProtocolError.invalidFieldValue(message: .keyframeRequest, fieldID: 2)
+        }
+        return KeyframeRequestMessage(
+            generation: try WireValue.decodeUInt64(try fields.required(1), message: .keyframeRequest, fieldID: 1),
+            reason: reason
+        )
+    }
+}
+
 public struct PongMessage: MessagePayloadValue {
     public static let messageType: MessageType = .pong
     public let nonce: UInt64
@@ -1408,6 +1451,7 @@ public enum MessagePayload: Equatable, Sendable {
     case sessionState(SessionStateMessage)
     case error(ErrorMessage)
     case close(CloseMessage)
+    case keyframeRequest(KeyframeRequestMessage)
 
     public var messageType: MessageType {
         switch self {
@@ -1433,6 +1477,7 @@ public enum MessagePayload: Equatable, Sendable {
         case .sessionState: return .sessionState
         case .error: return .error
         case .close: return .close
+        case .keyframeRequest: return .keyframeRequest
         }
     }
 
@@ -1460,6 +1505,7 @@ public enum MessagePayload: Equatable, Sendable {
         case let .sessionState(value): return try value.encoded(using: limits)
         case let .error(value): return try value.encoded(using: limits)
         case let .close(value): return try value.encoded(using: limits)
+        case let .keyframeRequest(value): return try value.encoded(using: limits)
         }
     }
 
@@ -1492,6 +1538,7 @@ public enum MessagePayload: Equatable, Sendable {
         case .sessionState: return .sessionState(try SessionStateMessage.decode(data, using: limits))
         case .error: return .error(try ErrorMessage.decode(data, using: limits))
         case .close: return .close(try CloseMessage.decode(data, using: limits))
+        case .keyframeRequest: return .keyframeRequest(try KeyframeRequestMessage.decode(data, using: limits))
         case let .unknown(rawValue): throw ProtocolError.unsupportedMessageType(rawValue: rawValue)
         }
     }

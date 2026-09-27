@@ -363,10 +363,17 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         switch status {
         case .needsScreenRecording, .needsLocalNetwork, .listenerFailed, .failed:
             canRetry = true
-        case .starting, .connected, .pairing, .listening, .stopped:
+        case .starting, .connected, .sharing, .pairing, .listening, .stopped:
             canRetry = false
         }
         retryItem?.isEnabled = canRetry
+        // Remote viewing/control is visible in the menu bar without opening
+        // the menu, alongside macOS's own screen-recording indicator.
+        if case .sharing = status {
+            statusItem?.button?.contentTintColor = .systemOrange
+        } else {
+            statusItem?.button?.contentTintColor = nil
+        }
         statusItem?.button?.toolTip = "MacRemoteApp Host — \(status.description)"
         refreshSettings()
     }

@@ -1,10 +1,18 @@
-import CodecCore
+@testable import CodecCore
 import CoreGraphics
 import CoreVideo
 import Foundation
 import XCTest
 
 final class CodecCoreTests: XCTestCase {
+    func testEncoderDataRateLimitCapsOneSecondPeakAboveAverage() {
+        let configuration = H264EncoderConfiguration(averageBitrate: 8_000_000)
+        let limits = H264Encoder.dataRateLimits(for: configuration)
+        XCTAssertEqual(limits.count, 2)
+        XCTAssertEqual(limits[0].doubleValue, 1_500_000)
+        XCTAssertEqual(limits[1].doubleValue, 1.0)
+    }
+
     func testM0FoundationMarker() {
         XCTAssertEqual(CodecCoreModule.name, "CodecCore")
     }
@@ -64,7 +72,14 @@ final class CodecCoreTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["MACREMOTEAPP_RUN_M4_CODEC_SMOKE"] == "1" else {
             throw XCTSkip("set MACREMOTEAPP_RUN_M4_CODEC_SMOKE=1 to use VideoToolbox")
         }
+        // BGRA is the historical input; 4:2:0 video range is the M8 capture
+        // default and must encode without a format conversion failure.
+        for pixelFormat in [kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange] {
+            try await runEncodeDecodeSmoke(pixelFormat: pixelFormat)
+        }
+    }
 
+    private func runEncodeDecodeSmoke(pixelFormat: OSType) async throws {
         let encoder = try H264Encoder(
             configuration: H264EncoderConfiguration(
                 width: 64,
@@ -76,7 +91,7 @@ final class CodecCoreTests: XCTestCase {
         )
         try encoder.start(generation: 7)
         defer { encoder.reset() }
-        let pixelBuffer = try makePixelBuffer(width: 64, height: 64)
+        let pixelBuffer = try makePixelBuffer(width: 64, height: 64, pixelFormat: pixelFormat)
         let encoded: EncodedH264Frame = try await withCheckedThrowingContinuation { continuation in
             do {
                 try encoder.encode(
@@ -128,13 +143,17 @@ final class CodecCoreTests: XCTestCase {
         )
     }
 
-    private func makePixelBuffer(width: Int, height: Int) throws -> CVPixelBuffer {
+    private func makePixelBuffer(
+        width: Int,
+        height: Int,
+        pixelFormat: OSType = kCVPixelFormatType_32BGRA
+    ) throws -> CVPixelBuffer {
         var pixelBuffer: CVPixelBuffer?
         let status = CVPixelBufferCreate(
             nil,
             width,
             height,
-            kCVPixelFormatType_32BGRA,
+            pixelFormat,
             nil,
             &pixelBuffer
         )

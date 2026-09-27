@@ -3,11 +3,12 @@ import RemoteProtocol
 
 /// A single-consumer bounded stream for decoded session messages.
 ///
-/// Control messages are reliable: they are never evicted. Media messages may
-/// replace an older non-keyframe video message when the media capacity is
-/// reached. Required media messages such as `VideoConfig` and keyframes are
-/// retained when a discardable frame is available; if no safe replacement is
-/// possible, delivery fails explicitly instead of silently losing a message.
+/// Control messages are reliable: they are never evicted. Media messages
+/// follow the keyframe-aware policy in `KeyframeAwareMediaAdmission`: delta
+/// frames are discarded only in a way that skips to the next keyframe, and
+/// required media such as `VideoConfig` and keyframes may purge queued delta
+/// frames. If no safe room exists, delivery fails explicitly instead of
+/// silently losing a required message.
 public struct MessageStream: AsyncSequence, Sendable {
     public typealias Element = MessagePayload
     public typealias Failure = Error
@@ -51,6 +52,7 @@ internal final class MessageStreamStorage: @unchecked Sendable {
     private let maxMediaMessages: Int
     private let beforeWaiterRegistrationHook: (@Sendable () -> Void)?
     private var queue: [MessagePayload] = []
+    private var mediaAdmission = KeyframeAwareMediaAdmission()
     private var waiter: PendingMessageWaiter?
     private var isFinished = false
     private var terminalError: Error?
@@ -125,15 +127,23 @@ internal final class MessageStreamStorage: @unchecked Sendable {
             }
             result = .queued
         case .media:
-            if mediaCountLocked >= maxMediaMessages {
-                guard let discardableIndex = queue.firstIndex(where: { $0.isDiscardableMedia }) else {
-                    lock.unlock()
-                    throw TransportError.mediaBackpressure
-                }
-                queue.remove(at: discardableIndex)
-                result = .replacedMedia
-            } else {
-                result = .queued
+            let decision: KeyframeAwareMediaAdmission.Decision
+            do {
+                decision = try mediaAdmission.admit(
+                    message.mediaAdmissionKind,
+                    into: &queue,
+                    maxMediaCount: maxMediaMessages,
+                    isMedia: { $0.messageType.defaultChannel == .media },
+                    kindOf: \.mediaAdmissionKind
+                )
+            } catch {
+                lock.unlock()
+                throw error
+            }
+            result = decision.awaitingKeyframe ? .replacedMedia : .queued
+            guard decision.admitIncoming else {
+                lock.unlock()
+                return result
             }
         }
 
@@ -174,7 +184,11 @@ internal final class MessageStreamStorage: @unchecked Sendable {
 
     func removeProtectedMessages() {
         lock.withLock {
+            let mediaCount = mediaCountLocked
             queue.removeAll { $0.isProtectedSessionMessage }
+            if mediaCountLocked != mediaCount {
+                mediaAdmission.noteMediaRemoved()
+            }
         }
     }
 
@@ -198,6 +212,7 @@ internal final class MessageStreamStorage: @unchecked Sendable {
     func reset() {
         lock.withLock {
             queue.removeAll(keepingCapacity: false)
+            mediaAdmission.reset()
             isFinished = false
             terminalError = nil
         }
@@ -246,9 +261,10 @@ internal final class MessageStreamStorage: @unchecked Sendable {
 }
 
 private extension MessagePayload {
-    var isDiscardableMedia: Bool {
-        guard case let .videoFrame(frame) = self else { return false }
-        return !frame.keyframe
+    var mediaAdmissionKind: KeyframeAwareMediaAdmission.Kind {
+        guard messageType.defaultChannel == .media else { return .control }
+        guard case let .videoFrame(frame) = self else { return .requiredMedia }
+        return frame.keyframe ? .keyframe : .deltaFrame
     }
 
     var isProtectedSessionMessage: Bool {

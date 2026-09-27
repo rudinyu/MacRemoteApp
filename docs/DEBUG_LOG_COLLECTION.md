@@ -44,6 +44,17 @@ In the second Terminal window, launch the Viewer:
 open -n "$HOME/Applications/MacRemoteApp-Viewer.app"
 ```
 
+For M8 latency-budget evidence, stream the per-stage aggregate lines on each
+Mac during a session of at least 30 seconds. The Host writes them under
+category `host-runtime` and the Viewer under `startup`; they contain timing
+aggregates only:
+
+```sh
+log stream --style compact \
+  --predicate 'subsystem == "com.rudinyu.MacRemoteApp" AND eventMessage BEGINSWITH "M8 stage"' \
+  2>&1 | tee "$support_dir/m8-stage-budget.log"
+```
+
 Do not launch `Contents/MacOS/...` for permission validation: that can attach
 macOS TCC decisions to the Terminal process instead of the signed app bundle.
 The direct executable is reserved for a separately documented debug build and

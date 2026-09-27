@@ -113,6 +113,7 @@ The exact binary field widths and serialization format are fixed by M1 in
 | `SessionState` | Both | Explicit state, permission, focus, and capability transitions |
 | `Error` | Both | Structured failure code, retryability, and safe user-facing detail |
 | `Close` | Both | Intentional shutdown reason |
+| `KeyframeRequest` | Viewer → Host | Ask the Host to make its next frame a keyframe after a media gap or decode failure (M8, optional capability) |
 
 Message names are design identifiers. M1 defines exact schemas, optionality,
 canonical encoding, and golden test vectors in `docs/M1_PROTOCOL.md`.
@@ -169,10 +170,21 @@ input before stopping or renegotiating the stream.
   generations. Forward gaps are allowed for discardable `VideoFrame` messages;
   the decoder waits for the next usable keyframe/configuration rather than
   applying stale state.
-- Backpressure: the media queue is bounded and may replace only unsent,
-  discardable video frames before they receive a wire sequence number; it must
-  never grow without limit. `VideoConfig` and recovery keyframes are not
-  discardable.
+- Backpressure: the media queue is bounded and must never grow without limit.
+  When full it discards the incoming delta frame and then skips delta frames
+  until the next keyframe, so a decoder never receives a delta frame whose
+  reference was dropped. A keyframe purges queued delta frames. `VideoConfig`
+  and keyframes are never discarded. A sender that observes a discard forces
+  its next frame to a keyframe.
+- Keyframe request (M8): when both endpoints negotiate the optional
+  `keyframeRequest` capability and the Host authorizes it for the selected
+  window, the Viewer sends `KeyframeRequest` on the control channel after an
+  incoming media sequence gap, a local media-queue discard, or a decode
+  failure. It is a protected message bound to the authorized window
+  generation. The Viewer sends at most one request per 250 ms and the Host
+  independently honors at most one per 250 ms, so a peer cannot force every
+  frame to be a keyframe. Peers without the capability never receive it and
+  recover at the periodic keyframe.
 - Authorization invalidation: unsent protected media is discarded. An admitted
   protected control envelope is replaced by an optional unknown tombstone with
   the same sequence, preserving strict control ordering while ensuring the

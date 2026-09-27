@@ -17,7 +17,7 @@ injection, or clipboard transfer.
 | Identity fingerprint | Lowercase SHA-256 of the presented public-key representation |
 | Known peer policy | `SecurityCore` compares the presented identity with a Keychain-backed `TrustedPeer` record; a changed identity is rejected |
 | Bootstrap policy | An unknown but actually presented certificate may establish the TLS-protected bootstrap session, but the session remains pairing-required and unauthorized until both endpoints record local consent and the displayed code matches |
-| Queue policy | Control queue capacity 128; media queue capacity 3; a full media queue replaces only an unsent discardable video frame before wire admission, while a full control queue fails closed |
+| Queue policy | Control queue capacity 128; media queue capacity 3; a full media queue discards delta video frames until the next keyframe (M8 keyframe-aware policy) before wire admission, while a full control queue fails closed |
 
 The local device key is generated and retained by `SecurityCore` in the login
 Keychain. `KeychainIdentityProvider.loadOrCreate()` reuses an existing
@@ -84,8 +84,8 @@ connecting
 The session coordinator validates role and protocol version, computes the
 capability intersection, rejects missing mandatory capabilities, and tracks a
 separate sequence per channel. Control sequences are strict. A bounded media
-queue may replace an unsent discardable frame with a newer frame, so media
-sequences are strictly increasing but may have forward gaps; `VideoConfig` and
+queue may discard delta frames until the next keyframe (M8 keyframe-aware
+policy), so media sequences are strictly increasing but may have forward gaps; `VideoConfig` and
 recovery keyframes are retained. Heartbeat uses `Ping`/`Pong`; connection and
 handshake deadlines, normal EOF, cancellation, and timeout clear authorization
 and close the transport. Reconnect resets identities, sequences, capabilities,

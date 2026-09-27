@@ -2,7 +2,10 @@ import RemoteProtocol
 
 public enum EnqueueResult: Equatable, Sendable {
     case queued
-    case replacedOldestMedia
+    /// Media was discarded and the queue now skips delta frames until the
+    /// next keyframe. The sender should produce a keyframe. A keyframe that
+    /// only purges superseded delta frames reports `.queued`.
+    case discardedMedia
 }
 
 extension Envelope {
@@ -34,18 +37,6 @@ extension Envelope {
             limits: .default
         )
     }
-
-    var isDiscardableMedia: Bool {
-        guard channel == .media, messageType == .videoFrame else { return false }
-        guard !flags.contains(.keyframe) else { return false }
-        guard let message = try? decodedMessage(),
-              case let .videoFrame(frame) = message else {
-            // If the frame cannot be decoded, fail closed and retain it for
-            // the malformed-frame path instead of treating it as disposable.
-            return false
-        }
-        return !frame.keyframe
-    }
 }
 
 public actor BoundedFrameQueue {
@@ -54,6 +45,7 @@ public actor BoundedFrameQueue {
 
     private var controlFrames: [Envelope] = []
     private var mediaFrames: [Envelope] = []
+    private var mediaAdmission = KeyframeAwareMediaAdmission()
 
     public init(maxControlFrames: Int = 128, maxMediaFrames: Int = 3) throws {
         guard maxControlFrames > 0, maxMediaFrames > 0 else {
@@ -72,20 +64,17 @@ public actor BoundedFrameQueue {
             controlFrames.append(envelope)
             return .queued
         case .media:
-            if mediaFrames.count >= maxMediaFrames {
-                guard envelope.isDiscardableMedia,
-                      let discardableIndex = mediaFrames.firstIndex(where: { $0.isDiscardableMedia }) else {
-                    throw TransportError.mediaBackpressure
-                }
-                // Prefer the newest frame. The removed frame was not yet
-                // admitted to the wire, so a media sequence gap is expected
-                // and is handled as a monotonic media sequence by the session.
-                mediaFrames.remove(at: discardableIndex)
+            let decision = try mediaAdmission.admit(
+                envelope.mediaAdmissionKind,
+                into: &mediaFrames,
+                maxMediaCount: maxMediaFrames,
+                isMedia: { _ in true },
+                kindOf: \.mediaAdmissionKind
+            )
+            if decision.admitIncoming {
                 mediaFrames.append(envelope)
-                return .replacedOldestMedia
             }
-            mediaFrames.append(envelope)
-            return .queued
+            return decision.awaitingKeyframe ? .discardedMedia : .queued
         }
     }
 
@@ -106,6 +95,7 @@ public actor BoundedFrameQueue {
     public func removeAll() {
         controlFrames.removeAll(keepingCapacity: false)
         mediaFrames.removeAll(keepingCapacity: false)
+        mediaAdmission.reset()
     }
 
     public func removeProtectedMessages() {
@@ -116,6 +106,10 @@ public actor BoundedFrameQueue {
         controlFrames = controlFrames.map {
             $0.authorizationInvalidationTombstone ?? $0
         }
+        let mediaCount = mediaFrames.count
         mediaFrames.removeAll(where: \.isProtectedSessionMessage)
+        if mediaFrames.count != mediaCount {
+            mediaAdmission.noteMediaRemoved()
+        }
     }
 }

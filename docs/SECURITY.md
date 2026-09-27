@@ -157,6 +157,10 @@ An explicit Viewer selection may ask the Host to foreground an eligible
 regular application so it can be operated. This is not background control:
 Host-side input remains rejected unless the selected target is confirmed
 foreground-eligible, authorized, and permitted at the time of each event.
+Because a remote selection changes the Host's frontmost app, the Host shows
+it locally: the menu-bar icon is tinted while a window is shared, and the
+status menu names the app and states when the Viewer brought it to the front.
+The app name is local UI only; it is not logged or sent to the Viewer.
 
 ## macOS permission boundaries
 

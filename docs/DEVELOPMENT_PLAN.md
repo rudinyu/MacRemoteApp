@@ -202,8 +202,8 @@ or WebRTC.
 - Authorization records bind the session generation, selected-window
   generation, and enabled capabilities; protected delivery checks that scope.
 - Control and media queue ownership is isolated enough to prioritize control;
-  replacing an unsent discardable media frame may create an observable forward
-  media gap, but never drops required config/recovery frames or accepts a
+  discarding delta media frames until the next keyframe may create an
+  observable forward media gap, but never drops required config/recovery frames or accepts a
   non-increasing media sequence.
 - Trust records and revocation behavior are documented and tested.
 

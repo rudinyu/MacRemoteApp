@@ -63,6 +63,14 @@ integration target remains a physical Intel Host and an Apple Silicon Viewer.
 Build compatibility does not claim Host runtime, permission, or cross-machine
 interoperability on Apple Silicon.
 
+**Platform lifespan risk.** Apple has announced that macOS 26 Tahoe is the
+last macOS release for Intel Macs. An Intel-only Host therefore stops
+receiving macOS feature updates after that release, and ScreenCaptureKit or
+VideoToolbox behavior on Intel will not track newer releases. V1 keeps the
+Intel Host target, but an Apple Silicon Host is the expected successor: keep
+the `arm64` Host build green, avoid Intel-specific encoder assumptions, and
+run an Apple Silicon Host smoke before any post-V1 platform decision.
+
 The exact supported macOS deployment target and toolchain matrix must be
 verified and recorded in M0. No document should silently assume that an API is
 available on every macOS version.
@@ -101,7 +109,10 @@ available on every macOS version.
 5. The Operator may stop the session or explicitly change the selected window;
    the Viewer can request an eligible app switch in the same session. The Host
    may foreground that explicitly selected regular application, but input stays
-   disabled until focus and permission checks pass. There is never simultaneous
+   disabled until focus and permission checks pass. While a Viewer is
+   authorized for a window, the Host menu-bar icon is tinted and the status
+   menu names the shared app and whether the Viewer brought it to the front.
+   There is never simultaneous
    multi-window control.
 
 ### Interact with the selected window
@@ -320,6 +331,9 @@ documented compatibility matrix:
 
 - Exact minimum macOS deployment target and supported Intel/Apple Silicon
   hardware matrix — M0.
+- Whether a post-V1 release adds Apple Silicon as a supported Host platform,
+  given the Intel platform lifespan risk above — post-V1 decision; V1 does not
+  change the Intel Host target.
 - Final stream transport binding and whether a future datagram/QUIC path is
   necessary after the baseline is measured — M2/M8; no WebRTC in V1.
 - Exact H.264 profile, bitrate/rate-control defaults, and decoder fallback —
@@ -330,3 +344,9 @@ documented compatibility matrix:
 - Clipboard size limit, conflict policy, and text encoding edge cases — resolved
   in M7: 65,515 UTF-8 bytes, Offer/ACK/Text ordering, and deterministic
   arrival-order conflict handling.
+- Host cursor shape on the Viewer (the capture currently hides the cursor, and
+  no message carries its shape) — post-V1, not an M0–M10 requirement; option
+  (b), an optional enumerated `CursorState` message, was chosen and is pending
+  its P0.5 milestone definition.
+  The options and security notes are in
+  [the post-V1 roadmap](POST_V1_ROADMAP.md#open-decision-host-cursor-shape).

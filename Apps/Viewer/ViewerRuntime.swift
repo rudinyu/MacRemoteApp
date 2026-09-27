@@ -54,7 +54,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         .h264Video,
         .mouseInput,
         .keyboardInput,
-        .textClipboard
+        .textClipboard,
+        .keyframeRequest
     ]
 
     private static var localDeviceName: String {
@@ -110,6 +111,13 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var reportedVideoFailureGeneration: UInt64?
     private var performanceCollector = BoundedPresentationSampleCollector()
     private var latestPerformanceSnapshot: PresentationSampleSnapshot?
+    /// M8 stage budget evidence: Viewer receipt to drawable presentation.
+    /// Receipt times are keyed by the frame's capture timestamp and bounded.
+    private var pendingFrameReceiptNanoseconds: [UInt64: UInt64] = [:]
+    private static let maximumPendingFrameReceipts = 16
+    private var receiveToPresentCollector = BoundedStageLatencyCollector()
+    private var stageLogTick = 0
+    private static let stageLogTickInterval = 100
     private var latestClockSyncEstimate: ClockSyncEstimate?
     private var hostInputPermission: PermissionState = .unknown
     private var hostInputFocusEligible = false
@@ -533,6 +541,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             latestPerformanceSnapshot = performanceCollector.snapshot(
                 clockSync: latestClockSyncEstimate
             )
+            logStageBudgetIfDue()
             if current.authorizationGeneration != previous.authorizationGeneration ||
                 current.authorized != previous.authorized ||
                 current.authorizedWindowGeneration != previous.authorizedWindowGeneration ||
@@ -723,6 +732,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             resetPresentedFPS()
             performanceCollector.reset()
             latestPerformanceSnapshot = nil
+            receiveToPresentCollector.reset()
+            pendingFrameReceiptNanoseconds.removeAll()
             decoder.reset()
             contentView?.updateStream(size: streamDimensions, readiness: .awaitingAuthorization)
             contentView?.setWindowSelectionEnabled(true)
@@ -741,6 +752,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case let .videoFrame(frame):
             guard frame.generation == selectedGeneration,
                   streamGenerationGate.accepts(frame.generation) else { return }
+            notePendingFrameReceipt(captureTimestamp: frame.captureTimestamp)
             do {
                 let encoded = try EncodedH264Frame(
                     generation: frame.generation,
@@ -764,8 +776,11 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             } catch let error as CodecError {
                 // A non-keyframe before decoder configuration is expected to
-                // be dropped; the bounded media path waits for the next keyframe.
-                if error != .missingDecoderConfiguration && error != .cancelled {
+                // be dropped; ask for the next keyframe instead of waiting for
+                // the periodic one.
+                if error == .missingDecoderConfiguration {
+                    requestRecoveryKeyframe()
+                } else if error != .cancelled {
                     reportVideoDecodeFailure(error)
                 }
             } catch {
@@ -909,6 +924,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func reportVideoDecodeFailure(_ error: CodecError) {
+        requestRecoveryKeyframe()
         guard let generation = selectedGeneration,
               reportedVideoFailureGeneration != generation else { return }
         reportedVideoFailureGeneration = generation
@@ -918,12 +934,28 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setStatus("Video decoding failed; check Viewer logs")
     }
 
+    /// Best-effort and rate-limited by `SessionCoordinator`; a Host without
+    /// `Capability.keyframeRequest` simply recovers at its periodic keyframe.
+    private func requestRecoveryKeyframe() {
+        guard let session else { return }
+        Task {
+            await session.requestKeyframe(reason: .decodeFailure)
+        }
+    }
+
     private func recordPresentation(
         captureTimestamp: UInt64,
         presentedTimestamp: UInt64?,
         presentationUptime: TimeInterval
     ) {
         presentedFrameCount += 1
+        let receivedAt = pendingFrameReceiptNanoseconds.removeValue(forKey: captureTimestamp)
+        if let presentedTimestamp, let receivedAt {
+            receiveToPresentCollector.append(
+                startNanoseconds: receivedAt,
+                endNanoseconds: presentedTimestamp
+            )
+        }
         if let presentedTimestamp {
             // The renderer callback is the authoritative display boundary.
             // Raw pairs stay inside a bounded collector and are converted only
@@ -934,6 +966,38 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             )
         }
         recordPresentedFrame(at: presentationUptime)
+    }
+
+    private func notePendingFrameReceipt(captureTimestamp: UInt64) {
+        if pendingFrameReceiptNanoseconds.count >= Self.maximumPendingFrameReceipts,
+           let oldest = pendingFrameReceiptNanoseconds.keys.min() {
+            // Capture timestamps increase, so the smallest key belongs to a
+            // frame that was dropped or superseded before presentation.
+            pendingFrameReceiptNanoseconds.removeValue(forKey: oldest)
+        }
+        pendingFrameReceiptNanoseconds[captureTimestamp] = DispatchTime.now().uptimeNanoseconds
+    }
+
+    /// Logs only aggregate timing, about every ten seconds.
+    private func logStageBudgetIfDue() {
+        stageLogTick += 1
+        guard stageLogTick % Self.stageLogTickInterval == 0 else { return }
+        let budget = LatencyBudget.v1
+        if let summary = receiveToPresentCollector.summary() {
+            let within = LatencyBudget.isWithinBudget(
+                summary,
+                budget: budget.viewerReceiveToPresentNanoseconds
+            ) ?? false
+            macRemoteAppStartupLogger.notice(
+                "M8 stage viewer-receive-to-present samples=\(summary.count, privacy: .public) p50Ns=\(summary.p50Nanoseconds, privacy: .public) p95Ns=\(summary.p95Nanoseconds, privacy: .public) budgetNs=\(budget.viewerReceiveToPresentNanoseconds, privacy: .public) withinBudget=\(within, privacy: .public)"
+            )
+        }
+        if let summary = latestPerformanceSnapshot?.captureToDisplay {
+            let within = LatencyBudget.isWithinBudget(summary, budget: budget.endToEndNanoseconds) ?? false
+            macRemoteAppStartupLogger.notice(
+                "M8 stage end-to-end samples=\(summary.count, privacy: .public) p50Ns=\(summary.p50Nanoseconds, privacy: .public) p95Ns=\(summary.p95Nanoseconds, privacy: .public) budgetNs=\(budget.endToEndNanoseconds, privacy: .public) withinBudget=\(within, privacy: .public)"
+            )
+        }
     }
 
     private func recordPresentedFrame(at uptime: TimeInterval) {
@@ -1163,6 +1227,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         resetPresentedFPS()
         performanceCollector.reset()
         latestPerformanceSnapshot = nil
+        receiveToPresentCollector.reset()
+        pendingFrameReceiptNanoseconds.removeAll()
         latestClockSyncEstimate = nil
         hostInputPermission = .unknown
         hostInputFocusEligible = false

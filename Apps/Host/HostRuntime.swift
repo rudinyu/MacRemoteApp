@@ -19,6 +19,10 @@ enum HostRuntimeStatus: Sendable, Equatable, CustomStringConvertible {
     case needsLocalNetwork
     case listenerFailed
     case connected
+    /// A Viewer is authorized for one app window. `broughtToFront` records
+    /// that the Host activated the app because of the Viewer's selection, so
+    /// the person at the Host can see why their frontmost app changed.
+    case sharing(application: String, broughtToFront: Bool)
     case pairing(code: String)
     case listening
     case failed
@@ -31,6 +35,10 @@ enum HostRuntimeStatus: Sendable, Equatable, CustomStringConvertible {
         case .needsLocalNetwork: return "Local Network permission required"
         case .listenerFailed: return "Bonjour service unavailable"
         case .connected: return "Viewer connected"
+        case let .sharing(application, broughtToFront):
+            return broughtToFront
+                ? "Viewer brought \(application) to the front and is sharing it"
+                : "Viewer is sharing \(application)"
         case .pairing: return "Pairing requested"
         case .listening: return "Listening for a paired Viewer"
         case .failed: return "Startup failed — retry setup"
@@ -74,8 +82,13 @@ actor HostRuntime {
         .h264Video,
         .mouseInput,
         .keyboardInput,
-        .textClipboard
+        .textClipboard,
+        .keyframeRequest
     ]
+    /// Floor between Viewer-requested keyframes, independent of the Viewer's
+    /// own throttle, so a misbehaving peer cannot force every frame to be
+    /// a keyframe.
+    private static let viewerKeyframeRequestMinimumIntervalNanoseconds: UInt64 = 250_000_000
     private static let inputCapabilities: Set<Capability> = [
         .mouseInput,
         .keyboardInput
@@ -94,6 +107,8 @@ actor HostRuntime {
     private var inputRuntime: HostInputSessionRuntime?
     private var sessionMonitor: Task<Void, Never>?
     private var captureTask: Task<Void, Never>?
+    private var encodedSendTask: Task<Void, Never>?
+    private var encodedFrameRelay: HostEncodedFrameRelay?
     private var encoder: H264Encoder?
     private var selectedWindow: CaptureWindow?
     private var selectedWindowGeneration: UInt64?
@@ -102,6 +117,14 @@ actor HostRuntime {
     private var advertisedWindows: [CaptureWindow] = []
     private var videoConfigSentGeneration: UInt64?
     private var videoConfigSentAuthorizationGeneration: UInt64?
+    /// Set when the media queue discarded video or the decoder configuration
+    /// must be resent. The Viewer skips delta frames until the next keyframe,
+    /// so the capture loop forces one.
+    private var keyframeRequested = false
+    private var lastViewerKeyframeRequestNanoseconds: UInt64?
+    /// M8 stage budget evidence: capture arrival to wire-queue admission.
+    private var captureToSendCollector = BoundedStageLatencyCollector()
+    private static let stageLogSampleInterval = 600
     private var clipboardOptedInForSession = false
     private var clipboardConsentPromptedForSession = false
     private var clipboardConsentTask: Task<Void, Never>?
@@ -478,7 +501,7 @@ actor HostRuntime {
                     permission = .unknown
                     focusEligible = false
                 }
-                try? await session.send(
+                _ = try? await session.send(
                     .sessionState(
                         SessionStateMessage(
                             state: snapshot.state,
@@ -796,6 +819,18 @@ actor HostRuntime {
             } catch {
                 scheduleTeardown(session: session)
             }
+        case let .keyframeRequest(request):
+            // SessionCoordinator already checked the authorized capability
+            // and window generation; also ignore a request for a stream the
+            // encoder is no longer producing.
+            guard request.generation == selectedWindowGeneration, encoder != nil else { return }
+            let now = DispatchTime.now().uptimeNanoseconds
+            if let last = lastViewerKeyframeRequestNanoseconds,
+               now &- last < Self.viewerKeyframeRequestMinimumIntervalNanoseconds {
+                return
+            }
+            lastViewerKeyframeRequestNanoseconds = now
+            requestKeyframe()
         case .close:
             scheduleTeardown(session: session)
         default:
@@ -891,6 +926,12 @@ actor HostRuntime {
         try await session.authorize(windowGeneration: generation, capabilities: authorizedCapabilities)
         selectedWindow = selected
         selectedWindowGeneration = generation
+        publish(
+            .sharing(
+                application: Self.statusApplicationName(for: selected),
+                broughtToFront: didForegroundSelectedApplication
+            )
+        )
         videoConfigSentGeneration = nil
         videoConfigSentAuthorizationGeneration = nil
         stateStore.setSelection(
@@ -935,6 +976,8 @@ actor HostRuntime {
         self.encoder = encoder
         videoConfigSentGeneration = nil
         videoConfigSentAuthorizationGeneration = nil
+        keyframeRequested = false
+        captureToSendCollector.reset()
         try await session.send(
             .streamConfig(
                 StreamConfigMessage(
@@ -948,22 +991,39 @@ actor HostRuntime {
         )
 
         let frames = captureSession.frames
+        let relay = HostEncodedFrameRelay()
+        encodedFrameRelay = relay
+        encodedSendTask = Task { [weak self] in
+            var awaitingKeyframe = false
+            for await result in relay.frames {
+                guard !Task.isCancelled else { return }
+                if relay.takeDroppedFrame() {
+                    awaitingKeyframe = true
+                    await self?.requestKeyframe()
+                }
+                if awaitingKeyframe {
+                    guard case let .success(frame) = result, frame.keyframe else { continue }
+                    awaitingKeyframe = false
+                }
+                await self?.sendEncoded(result, generation: generation, session: session)
+            }
+        }
         captureTask = Task { [weak self, weak encoder] in
+            defer { relay.finish() }
             var framesSinceKeyframe = 60
             do {
                 for try await frame in frames {
                     guard !Task.isCancelled, let encoder else { return }
-                    let forceKeyframe = framesSinceKeyframe >= 60
+                    let requested = await self?.consumeKeyframeRequest() ?? false
+                    let forceKeyframe = requested || framesSinceKeyframe >= 60
                     do {
                         try encoder.encode(
                             pixelBuffer: frame.pixelBuffer,
                             captureTimestamp: frame.captureTimestamp,
                             presentationTimestamp: frame.presentationTimestamp,
                             forceKeyframe: forceKeyframe,
-                            completion: { [weak self] result in
-                                Task { [weak self] in
-                                    await self?.sendEncoded(result, generation: generation, session: session)
-                                }
+                            completion: { result in
+                                relay.submit(result)
                             }
                         )
                         framesSinceKeyframe = forceKeyframe ? 0 : framesSinceKeyframe + 1
@@ -971,6 +1031,9 @@ actor HostRuntime {
                         // VideoToolbox queue pressure is handled by dropping
                         // the frame; the bounded CaptureCore stream provides
                         // the next opportunity for a keyframe.
+                        if forceKeyframe {
+                            framesSinceKeyframe = 60
+                        }
                     }
                 }
             } catch {
@@ -1053,7 +1116,9 @@ actor HostRuntime {
             if videoConfigSentGeneration != generation {
                 guard let decoderConfiguration = frame.decoderConfiguration else {
                     // Wait for the next keyframe. Non-keyframes cannot repair
-                    // a decoder after the previous epoch was invalidated.
+                    // a decoder after the previous epoch was invalidated, so
+                    // ask for one instead of waiting for the periodic keyframe.
+                    keyframeRequested = true
                     return
                 }
                 try await session.send(
@@ -1068,7 +1133,7 @@ actor HostRuntime {
                 videoConfigSentGeneration = generation
             }
             guard videoConfigSentGeneration == generation else { return }
-            try await session.send(
+            let result = try await session.send(
                 .videoFrame(
                     VideoFrameMessage(
                         generation: generation,
@@ -1083,6 +1148,14 @@ actor HostRuntime {
                 flags: frame.keyframe ? [.keyframe] : [],
                 expectedAuthorizationGeneration: authorizationGeneration
             )
+            if result == .replacedMedia {
+                keyframeRequested = true
+            }
+            captureToSendCollector.append(
+                startNanoseconds: frame.captureTimestamp,
+                endNanoseconds: DispatchTime.now().uptimeNanoseconds
+            )
+            logCaptureToSendStageIfDue()
         } catch let error as SessionError {
             switch error {
             case .authorizationChanged, .reconnectRequired:
@@ -1103,6 +1176,35 @@ actor HostRuntime {
             )
             await stopVideoPipelineIfCurrent(session)
         }
+    }
+
+    /// Logs only aggregate timing, roughly every ten seconds at 60 fps.
+    private func logCaptureToSendStageIfDue() {
+        let count = captureToSendCollector.retainedSampleCount
+        guard count > 0, count % Self.stageLogSampleInterval == 0,
+              let summary = captureToSendCollector.summary() else { return }
+        let budget = LatencyBudget.v1.hostCaptureToSendNanoseconds
+        let within = LatencyBudget.isWithinBudget(summary, budget: budget) ?? false
+        startupLogger.notice(
+            "M8 stage host-capture-to-send samples=\(summary.count, privacy: .public) p50Ns=\(summary.p50Nanoseconds, privacy: .public) p95Ns=\(summary.p95Nanoseconds, privacy: .public) budgetNs=\(budget, privacy: .public) withinBudget=\(within, privacy: .public)"
+        )
+    }
+
+    private func requestKeyframe() {
+        keyframeRequested = true
+    }
+
+    private func consumeKeyframeRequest() -> Bool {
+        defer { keyframeRequested = false }
+        return keyframeRequested
+    }
+
+    /// Local status-menu text only; never logged or sent to the Viewer.
+    /// Bounded so an unusual app name cannot stretch the menu.
+    private static func statusApplicationName(for window: CaptureWindow) -> String {
+        let name = window.applicationName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let display = (name?.isEmpty == false ? name : nil) ?? window.applicationIdentifier
+        return display.count > 48 ? String(display.prefix(47)) + "…" : display
     }
 
     @MainActor
@@ -1135,10 +1237,13 @@ actor HostRuntime {
     private func captureDidEnd(_ session: SessionCoordinator) {
         guard activeSession === session else { return }
         captureTask = nil
+        stopEncodedFrameRelay()
         encoder?.reset()
         encoder = nil
         videoConfigSentGeneration = nil
         videoConfigSentAuthorizationGeneration = nil
+        keyframeRequested = false
+        captureToSendCollector.reset()
     }
 
     private func stopVideoPipeline() async {
@@ -1148,10 +1253,22 @@ actor HostRuntime {
             await captureTask.value
         }
         captureTask = nil
+        stopEncodedFrameRelay()
         encoder?.reset()
         encoder = nil
         videoConfigSentGeneration = nil
         videoConfigSentAuthorizationGeneration = nil
+        keyframeRequested = false
+        captureToSendCollector.reset()
+    }
+
+    /// Ends the ordered send path. The send task is cancelled rather than
+    /// awaited because a send failure inside it may itself stop the pipeline.
+    private func stopEncodedFrameRelay() {
+        encodedFrameRelay?.finish()
+        encodedFrameRelay = nil
+        encodedSendTask?.cancel()
+        encodedSendTask = nil
     }
 
     private func teardown(session: SessionCoordinator) async {
