@@ -269,6 +269,65 @@ prompts, or events intended for background/unfocused applications.
   optional Accessibility secure-input query is unavailable, the independent
   foreground/window checks still protect the base PostEvent path.
 
+### Keyboard layout and text-input policy (V1 decision, M6)
+
+The Viewer and Host may use different keyboard layouts (for example US,
+JIS, or Dvorak), different physical keyboard types (ANSI, ISO, JIS), and
+different input methods (for example Pinyin or Kotoeri). V1 resolves this
+with one explicit rule: **physical key positions are forwarded; the Host's
+active input source interprets them.**
+
+- `InputEvent.keyCode` is the macOS virtual key code of the physical key
+  that the Viewer received (`NSEvent.keyCode`). It is a key position, not a
+  character, and the Viewer never translates it through its own layout. The
+  "logical key identity" named in the input contract above is, for V1, only
+  this code plus the `modifiers` mask; no character, Unicode string, or
+  layout identifier is carried.
+- `modifiers` is the AppKit device-independent flag mask (high 16 bits)
+  observed with that key transition. Modifier keys (Shift, Control, Option,
+  Command, left and right) are forwarded as their own key down/up events in
+  the order the Viewer received them, and every key event carries the mask
+  current at that moment. The Host applies that mask unchanged to the posted
+  event and rejects any bit outside the device-independent range.
+- The Host posts the key with `CGEvent(keyboardEventSource: nil, ...)`. The
+  receiving application therefore interprets the key position with the
+  Host's active keyboard layout, keyboard type, and input source. A Viewer
+  key produces the character that the same physical position produces on the
+  Host; it can differ from the Viewer keycap when the layouts differ. The
+  operator selects the matching layout on the Host when that matters.
+- Dead keys and Option-composed characters are forwarded as ordinary key
+  events (for example Option down, E down/up with the Option bit, Option up,
+  E down/up). Dead-key state lives in the Host application's text system, so
+  the composed character is the one the Host's layout defines. Neither side
+  collapses, reorders, or synthesizes events for composition.
+- Input-method (IME) composition happens on the Host. The Viewer input
+  surface is not an `NSTextInputClient` and does not call
+  `interpretKeyEvents`, so a Viewer-side input method does not compose text
+  for the remote surface. Candidate windows, marked text, and input-source
+  switching (for example JIS Eisu/Kana, key codes 102/104, when they reach
+  the surface) are handled by the Host's active input source. Keyboard
+  shortcuts consumed by the Viewer's own system or menus are not forwarded.
+- Caps Lock and Fn are not forwarded as key events. Their state reaches the
+  Host only as the corresponding bit in each key event's `modifiers` mask;
+  the Host's own lock state is not toggled.
+- Text entry through a Viewer-side IME, dictation, character-level
+  translation, and a text-insertion wire message are out of V1 scope. No
+  such message exists. Adding one requires a separate recorded design
+  decision (capability negotiation, byte bounds, redaction, and the
+  secure-input rule) and the user's explicit approval before any wire change.
+- Key codes and modifier masks are raw input values: they are never logged,
+  included in error strings, or reported in Host status/receipts. Secure-input
+  rejection applies to every key regardless of layout; no layout or IME path
+  bypasses it.
+
+Verification: `InputCoreTests` feed Option/dead-key and shortcut sequences
+through `HostInputController` and assert the adapter receives only typed key
+commands with unchanged key codes, masks, and order; layout-specific ISO/JIS
+codes pass through unmapped; and key rejection/status/receipt text contains no
+key value. `scripts/validate.sh` rejects character translation, text-insertion,
+and secure-input-bypass APIs in the input path. Behavior with a real Host
+layout or input method is part of the M6 manual OS evidence.
+
 ## Clipboard contract
 
 - Only text is supported in V1.
