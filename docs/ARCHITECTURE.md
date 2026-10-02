@@ -184,9 +184,13 @@ Additional rules:
   requirement. The Host remains authoritative by validating eligibility and
   generation before authorization. During an active session it refreshes the
   eligible-window catalog so the Viewer can replace the selected app without
-  reconnecting. A direct Viewer selection may foreground that regular app on
-  the Host; this only expresses the user's explicit target choice and does not
-  bypass InputCore's per-event permission/focus/identity checks. The Viewer
+  reconnecting. A direct Viewer selection activates that regular app and may
+  use the public Accessibility raise action to foreground the exact selected
+  window when the Host already has Accessibility trust and can match its
+  geometry unambiguously. This expresses the user's explicit target choice;
+  InputCore still requires a fresh exact-window foreground check for every
+  event. If raising is unavailable or ambiguous, input remains fail-closed.
+  The Viewer
   shows explicit Connecting, Connected, and Reconnecting states and disables
   duplicate Connect actions while a session is active. Host and Viewer send
   their bounded short hostnames in the optional `Hello.deviceName` display

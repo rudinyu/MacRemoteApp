@@ -409,13 +409,22 @@ final class MacRemoteAppSmokeTests: XCTestCase {
             contentsOf: rootURL.appendingPathComponent("Apps/Viewer/ViewerRuntime.swift"),
             encoding: .utf8
         )
+        let inputSource = try String(
+            contentsOf: rootURL.appendingPathComponent(
+                "Packages/InputCore/Sources/InputCore/CoreGraphicsAccessibilityInput.swift"
+            ),
+            encoding: .utf8
+        )
 
         XCTAssertTrue(preferences.contains("ProcessInfo.processInfo.hostName"))
         XCTAssertTrue(preferences.contains("return shortHostName(hostName)"))
         XCTAssertTrue(hostRuntime.contains("deviceName: configuration.serviceName"))
         XCTAssertTrue(hostRuntime.contains("snapshot.state == .streaming"))
         XCTAssertTrue(hostRuntime.contains("bringSelectedApplicationToForeground(selected)"))
-        XCTAssertTrue(hostRuntime.contains("frontmostApplication?.processIdentifier == window.processIdentifier"))
+        XCTAssertTrue(hostRuntime.contains("CoreGraphicsAccessibilityWindowFocus.isSelectedWindowForeground(selection)"))
+        XCTAssertTrue(inputSource.contains("raiseSelectedWindowIfAccessible"))
+        XCTAssertTrue(inputSource.contains("kAXRaiseAction as CFString"))
+        XCTAssertTrue(inputSource.contains("HostInputWindowSelection"))
         // A remote foreground change must be visible on the Host.
         XCTAssertTrue(hostRuntime.contains("broughtToFront: didForegroundSelectedApplication"))
         XCTAssertTrue(hostRuntime.contains("Viewer brought \\(application) to the front and is sharing it"))
@@ -426,6 +435,41 @@ final class MacRemoteAppSmokeTests: XCTestCase {
         XCTAssertTrue(hostRuntime.contains("videoConfigSentAuthorizationGeneration"))
         XCTAssertTrue(hostRuntime.contains("expectedAuthorizationGeneration: authorizationGeneration"))
         XCTAssertTrue(hostRuntime.contains("case .authorizationChanged, .reconnectRequired"))
+    }
+
+    func testM10WindowSwitchKeepsInputClipboardAndVideoLifecycleInSync() throws {
+        let rootURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let inputLoop = try String(
+            contentsOf: rootURL.appendingPathComponent("Apps/Host/HostInputSessionLoop.swift"),
+            encoding: .utf8
+        )
+        let viewerClipboard = try String(
+            contentsOf: rootURL.appendingPathComponent("Apps/Viewer/ViewerClipboardSessionController.swift"),
+            encoding: .utf8
+        )
+        let viewerRuntime = try String(
+            contentsOf: rootURL.appendingPathComponent("Apps/Viewer/ViewerRuntime.swift"),
+            encoding: .utf8
+        )
+        let hostRuntime = try String(
+            contentsOf: rootURL.appendingPathComponent("Apps/Host/HostRuntime.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(inputLoop.contains("let sessionLifecycleChanged ="))
+        XCTAssertTrue(inputLoop.contains("else if sessionLifecycleChanged"))
+        XCTAssertTrue(inputLoop.contains("await onInputStatusChange(inputStatus)"))
+        XCTAssertTrue(viewerClipboard.contains("resetForAuthorizationEpoch("))
+        XCTAssertTrue(viewerClipboard.contains("preservingLocalOptIn: preserveLocalOptIn"))
+        XCTAssertTrue(viewerRuntime.contains("pendingWindowSelection"))
+        XCTAssertTrue(viewerRuntime.contains("Host window list changed — select a window again"))
+        XCTAssertTrue(hostRuntime.contains("republishWindowCatalogAfterRejectedSelection"))
+        XCTAssertTrue(hostRuntime.contains("recoverFromSelectionFailure"))
+        XCTAssertTrue(viewerRuntime.contains("videoView.frame = videoFrame"))
+        XCTAssertTrue(viewerRuntime.contains("surface.frame = videoFrame"))
     }
 
     func testM10UsesLANOnlyTransportAndPostEventBasePermission() throws {

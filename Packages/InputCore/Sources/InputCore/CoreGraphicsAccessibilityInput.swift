@@ -121,7 +121,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             )
         }
 
-        let windows = onScreenApplicationWindows()
+        let windows = Self.onScreenApplicationWindows()
         return HostInputContext(
             sessionAuthorized: session.authorized,
             authorizedWindowGeneration: session.authorizedWindowGeneration,
@@ -139,7 +139,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
 
     public func currentReleaseContext(for target: HostInputTarget) -> HostInputContext? {
         let session = sessionStateProvider()
-        let windows = onScreenApplicationWindows()
+        let windows = Self.onScreenApplicationWindows()
         guard let liveWindow = windows.first(where: {
             $0.windowIdentifier == target.windowIdentifier &&
                 $0.processIdentifier == target.processIdentifier &&
@@ -218,7 +218,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         // WindowServer/menu-bar surface rather than the frontmost regular
         // application window. Ignore known non-regular system surfaces while
         // retaining unresolved/security surfaces as blockers above.
-        guard let frontmostApplication = frontmostApplicationWindow(in: windows),
+        guard let frontmostApplication = Self.frontmostApplicationWindow(in: windows),
               frontmostApplication.windowIdentifier == selection.windowIdentifier,
               frontmostApplication.processIdentifier == selection.processIdentifier,
               frontmostApplication.applicationIdentifier == selection.applicationIdentifier else {
@@ -231,15 +231,15 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         for selection: HostInputWindowSelection,
         windows: [OnScreenWindow]
     ) -> UInt64? {
-        frontmostApplicationWindow(in: windows)?.windowIdentifier
+        Self.frontmostApplicationWindow(in: windows)?.windowIdentifier
     }
 
     private func currentProcessIdentifier(windows: [OnScreenWindow]) -> Int32? {
-        frontmostApplicationWindow(in: windows)?.processIdentifier
+        Self.frontmostApplicationWindow(in: windows)?.processIdentifier
     }
 
     private func currentApplicationIdentifier(windows: [OnScreenWindow]) -> String? {
-        frontmostApplicationWindow(in: windows)?.applicationIdentifier
+        Self.frontmostApplicationWindow(in: windows)?.applicationIdentifier
     }
 
     private func currentWindowBounds(
@@ -253,7 +253,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         })?.bounds
     }
 
-    private struct OnScreenWindow: Sendable {
+    fileprivate struct OnScreenWindow: Sendable {
         let windowIdentifier: UInt64
         let processIdentifier: Int32
         /// `nil` means WindowServer reported an on-screen owner that this
@@ -265,7 +265,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         let bounds: InputWindowBounds
     }
 
-    private func frontmostApplicationWindow(
+    fileprivate static func frontmostApplicationWindow(
         in windows: [OnScreenWindow]
     ) -> OnScreenWindow? {
         windows.first(where: {
@@ -273,7 +273,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         })
     }
 
-    private func onScreenApplicationWindows() -> [OnScreenWindow] {
+    fileprivate static func onScreenApplicationWindows() -> [OnScreenWindow] {
         guard let rawWindows = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
             kCGNullWindowID
@@ -336,6 +336,208 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             if !loginDone { return .lockedScreen }
         }
         return observedState ? nil : .unknown
+    }
+}
+
+/// Best-effort foregrounding for the exact window the Viewer explicitly
+/// selected. Accessibility is used only for the local AXRaise action; input
+/// authorization still independently requires a fresh foreground check.
+public enum CoreGraphicsAccessibilityWindowFocus {
+    /// Confirms that WindowServer currently lists the selected regular-app
+    /// window as the frontmost regular application window.
+    public static func isSelectedWindowForeground(
+        _ selection: HostInputWindowSelection
+    ) -> Bool {
+        let windows = CoreGraphicsAccessibilityContextProvider.onScreenApplicationWindows()
+        guard let first = windows.first,
+              first.applicationIdentifier != nil,
+              let selected = windows.first(where: {
+                  $0.windowIdentifier == selection.windowIdentifier &&
+                      $0.processIdentifier == selection.processIdentifier &&
+                      $0.applicationIdentifier == selection.applicationIdentifier
+              }),
+              selected.bounds.isValid,
+              let frontmost = CoreGraphicsAccessibilityContextProvider.frontmostApplicationWindow(in: windows) else {
+            return false
+        }
+        return frontmost.windowIdentifier == selection.windowIdentifier &&
+            frontmost.processIdentifier == selection.processIdentifier &&
+            frontmost.applicationIdentifier == selection.applicationIdentifier
+    }
+
+    /// Raises a uniquely identified AX window for an explicit Viewer window
+    /// selection. It never prompts for Accessibility access and returns false
+    /// when permission, geometry, or window identity is ambiguous.
+    @discardableResult
+    public static func raiseSelectedWindowIfAccessible(
+        _ selection: HostInputWindowSelection,
+        title: String?
+    ) -> Bool {
+        guard AXIsProcessTrusted() else { return false }
+
+        let application = AXUIElementCreateApplication(pid_t(selection.processIdentifier))
+        _ = AXUIElementSetMessagingTimeout(application, 0.35)
+        var windowsValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            application,
+            kAXWindowsAttribute as CFString,
+            &windowsValue
+        ) == .success,
+        let accessibilityWindows = windowsValue as? [AXUIElement] else {
+            return false
+        }
+
+        let candidates = accessibilityWindows.compactMap { element -> (AXUIElement, AccessibilityWindowGeometry)? in
+            guard let geometry = Self.geometry(of: element) else { return nil }
+            return (element, geometry)
+        }
+        let geometries = candidates.map(\.1)
+        let geometryMatches = AccessibilityWindowMatcher.geometryMatchIndices(
+            selectedBounds: selection.bounds,
+            candidates: geometries
+        )
+        guard !geometryMatches.isEmpty else {
+            return false
+        }
+
+        let index: Int
+        let hasSelectedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        if geometryMatches.count == 1,
+           !hasSelectedTitle {
+            index = geometryMatches[0]
+        } else {
+            var titledCandidates = geometries
+            for candidateIndex in geometryMatches {
+                titledCandidates[candidateIndex] = AccessibilityWindowGeometry(
+                    title: Self.title(of: candidates[candidateIndex].0),
+                    bounds: geometries[candidateIndex].bounds
+                )
+            }
+            guard let match = AccessibilityWindowMatcher.matchIndex(
+                selectedBounds: selection.bounds,
+                selectedTitle: title,
+                candidates: titledCandidates
+            ) else {
+                return false
+            }
+            index = match
+        }
+
+        return AXUIElementPerformAction(
+            candidates[index].0,
+            kAXRaiseAction as CFString
+        ) == .success
+    }
+
+    private static func geometry(of element: AXUIElement) -> AccessibilityWindowGeometry? {
+        _ = AXUIElementSetMessagingTimeout(element, 0.35)
+        var positionValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXPositionAttribute as CFString,
+            &positionValue
+        ) == .success,
+        let positionValue,
+        CFGetTypeID(positionValue) == AXValueGetTypeID() else {
+            return nil
+        }
+        let accessibilityPosition = unsafeDowncast(positionValue, to: AXValue.self)
+        guard AXValueGetType(accessibilityPosition) == .cgPoint else { return nil }
+        var position = CGPoint.zero
+        guard AXValueGetValue(accessibilityPosition, .cgPoint, &position) else { return nil }
+
+        var sizeValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXSizeAttribute as CFString,
+            &sizeValue
+        ) == .success,
+        let sizeValue,
+        CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
+            return nil
+        }
+        let accessibilitySize = unsafeDowncast(sizeValue, to: AXValue.self)
+        guard AXValueGetType(accessibilitySize) == .cgSize else { return nil }
+        var size = CGSize.zero
+        guard AXValueGetValue(accessibilitySize, .cgSize, &size) else { return nil }
+
+        let bounds = InputWindowBounds(
+            originX: Double(position.x),
+            originY: Double(position.y),
+            width: Double(size.width),
+            height: Double(size.height)
+        )
+        guard bounds.isValid else { return nil }
+        return AccessibilityWindowGeometry(title: nil, bounds: bounds)
+    }
+
+    private static func title(of element: AXUIElement) -> String? {
+        _ = AXUIElementSetMessagingTimeout(element, 0.35)
+        var titleValue: CFTypeRef?
+        let title = AXUIElementCopyAttributeValue(
+            element,
+            kAXTitleAttribute as CFString,
+            &titleValue
+        ) == .success ? titleValue as? String : nil
+        return title
+    }
+}
+
+struct AccessibilityWindowGeometry: Equatable, Sendable {
+    let title: String?
+    let bounds: InputWindowBounds
+}
+
+enum AccessibilityWindowMatcher {
+    private static let geometryTolerance = 2.0
+
+    static func geometryMatchIndices(
+        selectedBounds: InputWindowBounds,
+        candidates: [AccessibilityWindowGeometry]
+    ) -> [Int] {
+        guard selectedBounds.isValid else { return [] }
+        return candidates.indices.filter {
+            geometricallyMatches(selectedBounds, candidates[$0].bounds)
+        }
+    }
+
+    static func matchIndex(
+        selectedBounds: InputWindowBounds,
+        selectedTitle: String?,
+        candidates: [AccessibilityWindowGeometry]
+    ) -> Int? {
+        let geometryMatches = geometryMatchIndices(
+            selectedBounds: selectedBounds,
+            candidates: candidates
+        )
+        guard !geometryMatches.isEmpty else { return nil }
+        if geometryMatches.count == 1 {
+            let index = geometryMatches[0]
+            guard let expectedTitle = normalized(selectedTitle) else { return index }
+            return normalized(candidates[index].title) == expectedTitle ? index : nil
+        }
+
+        guard let expectedTitle = normalized(selectedTitle) else { return nil }
+        let titleMatches = geometryMatches.filter {
+            normalized(candidates[$0].title) == expectedTitle
+        }
+        return titleMatches.count == 1 ? titleMatches[0] : nil
+    }
+
+    private static func geometricallyMatches(
+        _ lhs: InputWindowBounds,
+        _ rhs: InputWindowBounds
+    ) -> Bool {
+        abs(lhs.originX - rhs.originX) <= geometryTolerance &&
+            abs(lhs.originY - rhs.originY) <= geometryTolerance &&
+            abs(lhs.width - rhs.width) <= geometryTolerance &&
+            abs(lhs.height - rhs.height) <= geometryTolerance
+    }
+
+    private static func normalized(_ title: String?) -> String? {
+        guard let title else { return nil }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 

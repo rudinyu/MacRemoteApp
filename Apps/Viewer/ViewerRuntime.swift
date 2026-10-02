@@ -102,6 +102,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var localIdentity: ProvisionedIdentity?
     private var selectedGeneration: UInt64?
     private var selectedWindowIdentifier: UInt64?
+    private var pendingWindowSelection: (identifier: UInt64, catalogGeneration: UInt64)?
     private var streamGenerationGate = StreamGenerationGate()
     private var streamDimensions: CGSize = .zero
     private var windowSelectionInFlight = false
@@ -705,6 +706,14 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 await refreshInputSurface()
                 return
             }
+            let selectionWasRejected = pendingWindowSelection.map {
+                $0.catalogGeneration != windowList.catalogGeneration
+            } ?? false
+            if selectionWasRejected {
+                pendingWindowSelection = nil
+                selectedWindowIdentifier = nil
+                contentView?.setWindowSelectionEnabled(true)
+            }
             let eligibleWindows = windowList.windows.filter(\.eligible)
             contentView?.setWindowOptions(
                 eligibleWindows,
@@ -714,12 +723,17 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             )
             if eligibleWindows.isEmpty {
                 setStatus("Connected — Host has no eligible windows")
+            } else if selectionWasRejected {
+                setStatus("Host window list changed — select a window again")
             } else if selectedWindowIdentifier != nil {
-                setStatus("Connected — window selected; starting video")
+                setStatus(selectedGeneration == nil ? "Connected — starting video" : "Receiving video")
             } else {
                 setStatus("Connected — select a Host window to start video")
             }
             await refreshInputSurface()
+            if selectionWasRejected {
+                setStatus("Host window list changed — select a window again")
+            }
 
         case let .streamConfig(config):
             guard config.codec == .h264 else {
@@ -727,6 +741,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 return
             }
             selectedGeneration = config.generation
+            pendingWindowSelection = nil
             streamGenerationGate.advance(to: config.generation)
             streamDimensions = CGSize(width: CGFloat(config.width), height: CGFloat(config.height))
             reportedVideoFailureGeneration = nil
@@ -885,9 +900,11 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 )
                 selectedWindowIdentifier = windowIdentifier
                 contentView?.setSelectedWindowIdentifier(windowIdentifier)
+                pendingWindowSelection = (windowIdentifier, catalogGeneration)
                 setStatus("Window selected; starting video")
                 await refreshInputSurface()
             } catch {
+                pendingWindowSelection = nil
                 selectedWindowIdentifier = nil
                 contentView?.setWindowSelectionEnabled(true)
                 setStatus("Window selection was rejected")
@@ -1223,6 +1240,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         inputTransport = nil
         selectedGeneration = nil
         selectedWindowIdentifier = nil
+        pendingWindowSelection = nil
         windowSelectionInFlight = false
         presentedFrameCount = 0
         resetPresentedFPS()
@@ -1699,8 +1717,6 @@ private final class ViewerContentView: NSView {
 
     override func layout() {
         super.layout()
-        videoView.frame = bounds
-        surface.frame = bounds
         let panelFrame = NSRect(
             x: 12,
             y: 8,
@@ -1839,10 +1855,23 @@ private final class ViewerContentView: NSView {
             width: clipboardWidth,
             height: 24
         )
+        let videoTop = panelFrame.maxY + 12
+        let videoBottom = controlY - 12
+        let videoFrame = NSRect(
+            x: 12,
+            y: videoTop,
+            width: max(1, bounds.width - 24),
+            height: max(1, videoBottom - videoTop)
+        )
+        // Keep the complete remote window visible. Previously the video was
+        // fitted behind the opaque connection panel and bottom controls, so
+        // those overlays hid real portions of the captured app.
+        videoView.frame = videoFrame
+        surface.frame = videoFrame
         let contentRect = VideoContentLayout.aspectFitRect(
             contentWidth: streamSize.width,
             contentHeight: streamSize.height,
-            in: bounds
+            in: surface.bounds
         )
         surface.updateInputState(
             contentRect: InputContentRect(

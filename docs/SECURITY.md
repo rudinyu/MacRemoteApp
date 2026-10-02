@@ -153,10 +153,16 @@ input injection operation or bounded batch. The Viewer must disable its input
 surface when the state is not ready. A UI label such as "connected" must not
 be treated as equivalent to "authorized to control".
 
-An explicit Viewer selection may ask the Host to foreground an eligible
-regular application so it can be operated. This is not background control:
-Host-side input remains rejected unless the selected target is confirmed
-foreground-eligible, authorized, and permitted at the time of each event.
+An explicit Viewer selection may activate an eligible regular application
+and, when the Host already has Accessibility trust, request the public
+Accessibility raise action for the exact selected window. The AX window must
+match the selected window's global point geometry and, when known, its local
+title; a title also disambiguates otherwise identical geometry. Ambiguity or a
+known-title mismatch fails closed. This
+is not background control: Host-side input remains rejected unless WindowServer
+confirms the selected target is foreground-eligible, authorized, and permitted
+at the time of each event. AXRaise is only a best-effort local focus action;
+it neither grants input authority nor replaces the per-event focus check.
 Because a remote selection changes the Host's frontmost app, the Host shows
 it locally: the menu-bar icon is tinted while a window is shared, and the
 status menu names the app and states when the Viewer brought it to the front.
@@ -166,9 +172,9 @@ The app name is local UI only; it is not logged or sent to the Viewer.
 
 - Screen Recording is required for Host-side ScreenCaptureKit capture.
 - PostEvent permission is required for Host-side Quartz keyboard, pointer, and
-  scroll injection. Accessibility is optional for the best-effort AX
-  secure-input/focused-text enhancement and is never treated as a substitute
-  for PostEvent permission.
+  scroll injection. Accessibility is optional for secure-input inspection and
+  best-effort exact-window raising, and is never treated as a substitute for
+  PostEvent permission.
 - Permission prompts are initiated by the owning app at a user-understandable
   point; a remote peer cannot approve them.
 - The implementation must detect permission revocation and stop the affected

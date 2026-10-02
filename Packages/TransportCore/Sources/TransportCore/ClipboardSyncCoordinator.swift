@@ -383,6 +383,19 @@ public struct ClipboardSyncCoordinator: Sendable {
         pendingCancellation = nil
     }
 
+    /// Starts a fresh clipboard authorization epoch without carrying any
+    /// transfer or peer-consent state across it. Same-session window changes
+    /// may preserve the local operator's explicit opt-in, which is re-offered
+    /// in the new epoch; reconnect and authorization loss must use `reset()`.
+    @discardableResult
+    public mutating func resetForAuthorizationEpoch(
+        preservingLocalOptIn: Bool
+    ) -> ClipboardOfferMessage? {
+        let shouldRestoreLocalOptIn = preservingLocalOptIn && localEnabled
+        reset()
+        return shouldRestoreLocalOptIn ? setEnabled(true) : nil
+    }
+
     /// Drops in-flight transfer state after a transport send fails while
     /// preserving the user's explicit local/remote opt-in state. The next
     /// pasteboard change may start a fresh bounded Offer/ACK exchange.

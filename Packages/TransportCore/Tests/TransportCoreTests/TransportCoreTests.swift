@@ -2455,6 +2455,54 @@ final class TransportCoreTests: XCTestCase {
         XCTAssertNil(viewer.status.pendingOutgoing)
     }
 
+    func testClipboardOptInSurvivesAuthorizationEpochChangeButReconnectResetsIt() {
+        var host = ClipboardSyncCoordinator(localRole: .host)
+        var viewer = ClipboardSyncCoordinator(localRole: .viewer)
+
+        let hostEnable = try! XCTUnwrap(host.setEnabled(true))
+        let viewerEnable = try! XCTUnwrap(viewer.setEnabled(true))
+        guard case let .acknowledgement(hostAck) = viewer.receiveOffer(hostEnable),
+              case let .acknowledgement(viewerAck) = host.receiveOffer(viewerEnable) else {
+            XCTFail("both per-session opt-ins must be acknowledged")
+            return
+        }
+        XCTAssertEqual(host.receiveAcknowledgement(hostAck), .statusUpdated)
+        XCTAssertEqual(viewer.receiveAcknowledgement(viewerAck), .statusUpdated)
+        XCTAssertTrue(host.status.isEnabledForSession)
+        XCTAssertTrue(viewer.status.isEnabledForSession)
+
+        guard case .offer = viewer.localTextChanged("discard at window switch") else {
+            XCTFail("an enabled session must admit a text offer")
+            return
+        }
+        let viewerReenable = try! XCTUnwrap(
+            viewer.resetForAuthorizationEpoch(preservingLocalOptIn: true)
+        )
+        host.reset()
+        let hostReenable = try! XCTUnwrap(host.setEnabled(true))
+
+        XCTAssertTrue(viewer.status.localEnabled)
+        XCTAssertFalse(viewer.status.remoteEnabled)
+        XCTAssertNil(viewer.status.pendingOutgoing)
+        XCTAssertTrue(host.status.localEnabled)
+        XCTAssertFalse(host.status.remoteEnabled)
+
+        guard case let .acknowledgement(hostReenableAck) = viewer.receiveOffer(hostReenable),
+              case let .acknowledgement(viewerReenableAck) = host.receiveOffer(viewerReenable) else {
+            XCTFail("both peers must renegotiate opt-in in the new authorization epoch")
+            return
+        }
+        XCTAssertEqual(host.receiveAcknowledgement(hostReenableAck), .statusUpdated)
+        XCTAssertEqual(viewer.receiveAcknowledgement(viewerReenableAck), .statusUpdated)
+        XCTAssertTrue(host.status.isEnabledForSession)
+        XCTAssertTrue(viewer.status.isEnabledForSession)
+
+        viewer.reset()
+        XCTAssertFalse(viewer.status.localEnabled)
+        XCTAssertFalse(viewer.status.remoteEnabled)
+        XCTAssertNil(viewer.resetForAuthorizationEpoch(preservingLocalOptIn: true))
+    }
+
     func testClipboardSyncAcknowledgesTextAndSuppressesEcho() {
         var host = ClipboardSyncCoordinator(localRole: .host)
         var viewer = ClipboardSyncCoordinator(localRole: .viewer)

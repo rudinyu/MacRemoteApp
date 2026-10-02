@@ -1,9 +1,80 @@
-import InputCore
+@testable import InputCore
 import XCTest
 
 final class InputCoreTests: XCTestCase {
     func testM0FoundationMarker() {
         XCTAssertEqual(InputCoreModule.name, "InputCore")
+    }
+
+    func testAccessibilityWindowMatcherUsesUniqueGeometryWithinPointTolerance() {
+        let selected = InputWindowBounds(originX: 40, originY: 70, width: 800, height: 600)
+        let candidates = [
+            AccessibilityWindowGeometry(
+                title: "Document",
+                bounds: InputWindowBounds(originX: 41, originY: 69, width: 801, height: 600)
+            ),
+            AccessibilityWindowGeometry(
+                title: "Other",
+                bounds: InputWindowBounds(originX: 1000, originY: 70, width: 800, height: 600)
+            )
+        ]
+
+        XCTAssertEqual(
+            AccessibilityWindowMatcher.matchIndex(
+                selectedBounds: selected,
+                selectedTitle: "Document",
+                candidates: candidates
+            ),
+            0
+        )
+    }
+
+    func testAccessibilityWindowMatcherRejectsUniqueGeometryWithMismatchedKnownTitle() {
+        let selected = InputWindowBounds(originX: 40, originY: 70, width: 800, height: 600)
+        let candidates = [
+            AccessibilityWindowGeometry(title: "Different document", bounds: selected)
+        ]
+
+        XCTAssertNil(
+            AccessibilityWindowMatcher.matchIndex(
+                selectedBounds: selected,
+                selectedTitle: "Document",
+                candidates: candidates
+            )
+        )
+    }
+
+    func testAccessibilityWindowMatcherUsesTitleOnlyToResolveGeometryCollision() {
+        let selected = InputWindowBounds(originX: 40, originY: 70, width: 800, height: 600)
+        let candidates = [
+            AccessibilityWindowGeometry(title: "Other", bounds: selected),
+            AccessibilityWindowGeometry(title: "Document", bounds: selected)
+        ]
+
+        XCTAssertEqual(
+            AccessibilityWindowMatcher.matchIndex(
+                selectedBounds: selected,
+                selectedTitle: "Document",
+                candidates: candidates
+            ),
+            1
+        )
+    }
+
+    func testAccessibilityWindowMatcherRejectsAmbiguousGeometryAndTitle() {
+        let selected = InputWindowBounds(originX: 40, originY: 70, width: 800, height: 600)
+        let candidates = [
+            AccessibilityWindowGeometry(title: "Document", bounds: selected),
+            AccessibilityWindowGeometry(title: "Document", bounds: selected)
+        ]
+
+        XCTAssertNil(
+            AccessibilityWindowMatcher.matchIndex(
+                selectedBounds: selected,
+                selectedTitle: "Document",
+                candidates: candidates
+            )
+        )
     }
 
     func testPointerCoordinatesNormalizeToContentRectAndPreserveOrder() throws {

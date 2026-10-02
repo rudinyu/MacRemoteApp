@@ -17,9 +17,11 @@ explicit Host choice, presents a picker for the eligible advertised windows,
 decodes and presents H.264 frames through Metal, and forwards mouse/keyboard
 events from the same aspect-fit surface. The Viewer can request a safe
 same-session window replacement; the Host refreshes the window catalog while
-connected and may foreground the explicitly selected regular application.
-Input is still accepted only after Host-side foreground and PostEvent
-checks pass. The Viewer visibly distinguishes Connecting, Connected, and
+connected and activates the explicitly selected regular application. If the
+Host already has Accessibility trust, it may request a public AXRaise for the
+exact selected window after an unambiguous geometry match. Input is still
+accepted only after a fresh Host-side exact-window foreground and PostEvent
+check pass. The Viewer visibly distinguishes Connecting, Connected, and
 Reconnecting, and disables Connect while active. The Host's default Bonjour
 name is its short macOS hostname, while the Viewer sends its hostname as
 display-only pairing metadata. The Host remains resident when Screen
@@ -117,9 +119,11 @@ is not physical acceptance.
    After a
    Viewer negotiates input and the operator selects a window, the signed Host
    requests PostEvent access from the Host bundle. Accessibility may also be
-   requested as an optional AX/secure-input enhancement. Until PostEvent is
-   authorized, the Host remains view-only and does not authorize mouse/keyboard
-   capabilities.
+   requested as an optional secure-input/exact-window-raise enhancement. If
+   it is unavailable, the Host may still activate the app, but input remains
+   blocked until the selected window is actually foreground. Until PostEvent
+   is authorized, the Host remains view-only and does not authorize
+   mouse/keyboard capabilities.
    The capability may still appear in the negotiation offer; authorization is
    the security gate that reflects the current permission state.
    Install the role-specific app by dragging it onto the DMG's per-user
@@ -172,7 +176,7 @@ from the production bundle's first-pairing flow.
 | Host display name | Host `Rename Host…` changes the Bonjour discovery name and the listener restarts without changing the TLS identity | ☐ |
 | Default/display device names | Host defaults to its macOS short hostname; Viewer pairing UI and trust metadata use the Viewer hostname; names never affect authentication | ☐ |
 | Window selection | Exactly one eligible foreground window is selected | ☐ |
-| Same-session app switching | Start streaming one app, select another eligible app without reconnecting, then verify the new app is foreground on Host and receives mouse/keyboard only while focus and PostEvent checks pass | ☐ |
+| Same-session app/window switching | Start streaming one window, select another eligible window in the same or a different app without reconnecting, then verify the exact selected window is foreground on Host and receives mouse/keyboard only while focus and PostEvent checks pass; repeat without Accessibility trust and confirm input stays blocked until local focus is correct | ☐ |
 | Viewer connection state | Connect changes to disabled `Connected`; disconnect shows `Reconnecting…` during retry and re-enables Connect only when disconnected | ☐ |
 | Native app menus | Both roles expose About with version/build, Settings, Minimize, Hide, and Quit; Host status menu also opens About/Settings | ☐ |
 | Release identity | About, Settings, Viewer title/status, and Host status menu match both installed plists; `major.minor.build` means separate short version and build, not wire protocol version | ☐ |
@@ -182,7 +186,7 @@ from the production bundle's first-pairing flow.
 | Performance | 30-second report has clock probes, valid samples, p50/p95, fps and resource data | ☐ |
 | Input | Each authorized input capability works only while authorized; mouse-only or keyboard-only authorization keeps the other local controls disabled | ☐ |
 | Clipboard | Text-only opt-in works; opt-out and echo prevention work | ☐ |
-| Permission recovery | Local Network, Screen Recording, or PostEvent denial/revocation disables the affected path and gives a recoverable instruction; optional Accessibility loss only disables its AX enhancement | ☐ |
+| Permission recovery | Local Network, Screen Recording, or PostEvent denial/revocation disables the affected path and gives a recoverable instruction; optional Accessibility loss disables AXRaise/secure-input inspection but never bypasses exact-window focus checks | ☐ |
 | Window recovery | Close/change/focus loss disables input and reports a recoverable state | ☐ |
 | LAN recovery | Disconnect shows reconnecting; reauthorization is required before input resumes | ☐ |
 | Stale trust | Revocation or identity mismatch requires explicit re-pairing | ☐ |

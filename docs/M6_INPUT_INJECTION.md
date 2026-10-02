@@ -107,6 +107,16 @@ complete target/focus/permission check
 immediately before posting a `CGEvent`, then uses target-bound process posting
 so a focus change cannot redirect the event to another frontmost application.
 
+On an explicit Viewer window selection, the Host activates the owning regular
+application. If Accessibility trust is already available, it may use the
+public AX window list and raise action to bring the exact selected window
+forward. Matching uses global point geometry and verifies the local window
+title when available; the title also breaks duplicate-geometry ties. Missing,
+ambiguous, or mismatched candidates are not raised. App activation or AXRaise is never proof of focus: input remains
+blocked until a fresh WindowServer snapshot confirms the exact selected window
+is frontmost. Accessibility remains optional and is not a substitute for
+PostEvent permission.
+
 macOS does not expose a general public secure-input status query. The provider
 therefore reports `unknown` when optional Accessibility inspection is
 unavailable; the independent foreground/window checks still protect the base

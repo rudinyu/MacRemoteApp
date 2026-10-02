@@ -79,8 +79,11 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
   fake-adapter tests. M6 deterministic authorization and adapter gates pass.
 - Real OS event posting remains an environment evidence item. It requires the
   documented disposable foreground test application and PostEvent permission.
-  Accessibility is optional for the best-effort secure-input provider, and a
-  detected secure field remains fail-closed.
+  On an explicit Viewer window selection, Accessibility can also provide a
+  best-effort exact-window raise when geometry uniquely matches; missing or
+  ambiguous matches remain blocked by the independent foreground check.
+  Accessibility is optional for secure-input inspection, and a detected
+  secure field remains fail-closed.
 
 ### M7 — Clipboard and session UX
 

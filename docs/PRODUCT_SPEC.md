@@ -108,7 +108,8 @@ available on every macOS version.
 3. The Host accepts events only for the authorized selected window while it is
    eligible for foreground control.
 4. The Host maps and injects events using the authorized CoreGraphics/PostEvent
-   path; Accessibility is optional for local AX/secure-input inspection.
+   path; on explicit window selection, Accessibility may optionally raise the
+   uniquely matched selected window and inspect secure-input state.
 5. If permissions, focus, authorization, or session health are lost, input is
    disabled and the Viewer shows a clear state.
 
@@ -255,7 +256,8 @@ marked verified.
 
 - Screen Recording permission is required for Host window capture.
 - PostEvent permission is required only for Host-side authorized input
-  injection. Accessibility is optional for local AX/secure-input inspection.
+  injection. Accessibility is optional for secure-input inspection and
+  best-effort exact-window raising after explicit selection.
 - Pairing is explicit and user-confirmed; LAN discovery alone never grants
   access.
 - Input is disabled until the session is authenticated, paired, authorized for

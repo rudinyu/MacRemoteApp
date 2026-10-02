@@ -87,7 +87,7 @@ final class ViewerSessionMessageLoop {
                 current.reconnectGeneration != previous.reconnectGeneration ||
                 current.authorized != previous.authorized ||
                 current.authorizedWindowGeneration != previous.authorizedWindowGeneration {
-                clipboardController.resetForSessionLifecycleIfStale(current)
+                await clipboardController.resetForSessionLifecycleIfStale(current)
             }
             previous = current
         }

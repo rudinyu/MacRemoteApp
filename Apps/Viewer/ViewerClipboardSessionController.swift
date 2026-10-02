@@ -38,11 +38,11 @@ final class ViewerClipboardSessionController {
         let expectedLifecycleEpoch = lifecycleEpoch
         let sessionSnapshot = await session.snapshot()
         guard lifecycleEpoch == expectedLifecycleEpoch, !Task.isCancelled else { return }
-        guard hasClipboardAuthorization(sessionSnapshot),
-              bindAuthorizationEpoch(sessionSnapshot.authorizationGeneration) else {
+        guard hasClipboardAuthorization(sessionSnapshot) else {
             resetForSessionLifecycle()
             return
         }
+        guard await bindAuthorizationEpoch(sessionSnapshot) else { return }
         coordinator.updateLimits(sessionSnapshot.effectiveProtocolLimits)
 
         let changeCount = pasteboard.changeCount
@@ -102,10 +102,7 @@ final class ViewerClipboardSessionController {
             resetForSessionLifecycle()
             throw SessionError.unauthorizedMessage(.clipboardOffer)
         }
-        guard bindAuthorizationEpoch(
-            sessionSnapshot.authorizationGeneration,
-            allowRebind: true
-        ) else {
+        guard await bindAuthorizationEpoch(sessionSnapshot) else {
             throw SessionError.authorizationChanged
         }
         coordinator.updateLimits(sessionSnapshot.effectiveProtocolLimits)
@@ -138,7 +135,7 @@ final class ViewerClipboardSessionController {
             resetForSessionLifecycle()
             return
         }
-        guard bindAuthorizationEpoch(entryAuthorization.authorizationGeneration) else {
+        guard await bindAuthorizationEpoch(entryAuthorization) else {
             return
         }
         coordinator.updateLimits(entryAuthorization.effectiveProtocolLimits)
@@ -264,12 +261,15 @@ final class ViewerClipboardSessionController {
         publishStatus()
     }
 
-    func resetForSessionLifecycleIfStale(_ snapshot: SessionSnapshot) {
-        guard !hasClipboardAuthorization(snapshot) ||
-              authorizationEpoch != snapshot.authorizationGeneration else {
+    func resetForSessionLifecycleIfStale(_ snapshot: SessionSnapshot) async {
+        guard hasClipboardAuthorization(snapshot) else {
+            resetForSessionLifecycle()
             return
         }
-        resetForSessionLifecycle()
+        guard authorizationEpoch != snapshot.authorizationGeneration else {
+            return
+        }
+        _ = await bindAuthorizationEpoch(snapshot)
     }
 
     private func processLocalText(
@@ -533,24 +533,37 @@ final class ViewerClipboardSessionController {
         resetForSessionLifecycle()
     }
 
-    private func bindAuthorizationEpoch(
-        _ generation: UInt64,
-        allowRebind: Bool = false
-    ) -> Bool {
+    private func bindAuthorizationEpoch(_ snapshot: SessionSnapshot) async -> Bool {
+        let generation = snapshot.authorizationGeneration
         guard let authorizationEpoch else {
             self.authorizationEpoch = generation
             return true
         }
-        guard authorizationEpoch == generation else {
-            guard allowRebind else {
-                resetForSessionLifecycle()
-                return false
-            }
-            resetForSessionLifecycle()
-            self.authorizationEpoch = generation
-            return true
+        guard authorizationEpoch != generation else { return true }
+
+        let preserveLocalOptIn = coordinator.status.localEnabled
+        lifecycleEpoch &+= 1
+        let reenableOffer = coordinator.resetForAuthorizationEpoch(
+            preservingLocalOptIn: preserveLocalOptIn
+        )
+        self.authorizationEpoch = generation
+        clipboardStateEpoch &+= 1
+        lastChangeCount = pasteboard.changeCount
+        publishStatus()
+
+        guard let reenableOffer else { return true }
+        do {
+            try await send(
+                .clipboardOffer(reenableOffer),
+                expectedAuthorizationGeneration: generation
+            )
+            return authorizationEpoch == generation
+        } catch {
+            // A generation fence is recoverable: the lifecycle monitor will
+            // reconcile the next authorized snapshot. Transport failures are
+            // already closed by `send` and reset this controller.
+            return false
         }
-        return true
     }
 
     private func hasClipboardAuthorization(

@@ -713,6 +713,74 @@ actor HostRuntime {
         }
     }
 
+    /// A catalog can change between the Viewer rendering its picker and the
+    /// Host receiving the selection. That is a normal UI race, not a reason to
+    /// end an authenticated session. Advance the catalog epoch even if the
+    /// descriptors are unchanged so the Viewer can discard its pending choice
+    /// and retry against the refreshed snapshot.
+    private func republishWindowCatalogAfterRejectedSelection(
+        _ session: SessionCoordinator,
+        discoveredWindows: [CaptureWindow]? = nil
+    ) async {
+        guard activeSession === session else { return }
+        let windows: [CaptureWindow]
+        if let discoveredWindows {
+            windows = discoveredWindows
+        } else {
+            windows = (try? await captureSession.discoverWindows()) ?? advertisedWindows
+        }
+        guard activeSession === session else { return }
+
+        if windows == advertisedWindows {
+            guard advertisedWindowCatalogGeneration < UInt64.max else {
+                scheduleTeardown(session: session)
+                return
+            }
+            advertisedWindowCatalogGeneration &+= 1
+        }
+        do {
+            _ = try await publishWindowCatalog(windows, to: session, force: true)
+        } catch {
+            startupLogger.error(
+                "Host window catalog recovery failed (error: \(String(describing: error), privacy: .public))"
+            )
+            scheduleTeardown(session: session)
+        }
+    }
+
+    /// Capture/encoder startup for one app may fail even though the LAN
+    /// session is healthy. Release the old input target, return to the current
+    /// authorized selection epoch, and let the Viewer choose a window again.
+    private func recoverFromSelectionFailure(
+        _ session: SessionCoordinator,
+        fallbackWindowGeneration: UInt64
+    ) async {
+        guard activeSession === session else { return }
+        selectionTransitionInProgress = true
+        defer { selectionTransitionInProgress = false }
+        selectedWindow = nil
+        selectedWindowGeneration = nil
+        stateStore.clearSelection()
+        await stopVideoPipeline()
+
+        let snapshot = await session.snapshot()
+        guard snapshot.authorized,
+              snapshot.state != .failed,
+              snapshot.state != .stopping else {
+            await teardown(session: session)
+            return
+        }
+        advertisedWindowGeneration = snapshot.authorizedWindowGeneration ?? fallbackWindowGeneration
+        stateStore.update(session: snapshot)
+
+        if clipboardOptedInForSession,
+           snapshot.authorizedCapabilities.contains(.textClipboard),
+           let inputRuntime {
+            try? await inputRuntime.setClipboardEnabled(true)
+        }
+        await republishWindowCatalogAfterRejectedSelection(session)
+    }
+
     private func synchronizeInputAuthorization(_ session: SessionCoordinator) async {
         guard selectedWindow != nil, let selectedWindowGeneration else { return }
         let snapshot = await session.snapshot()
@@ -788,11 +856,12 @@ actor HostRuntime {
                   let advertisedWindow = advertisedWindows.first(where: {
                       $0.identifier == selection.windowIdentifier && $0.eligible
                   }) else {
-                scheduleTeardown(session: session)
+                await republishWindowCatalogAfterRejectedSelection(session)
                 return
             }
             do {
                 let windows = try await captureSession.discoverWindows()
+                guard activeSession === session else { return }
                 guard let window = windows.first(where: {
                     $0.identifier == selection.windowIdentifier && $0.eligible
                 }),
@@ -802,13 +871,14 @@ actor HostRuntime {
                 }),
                 currentAdvertisedWindow.hasSameOwner(as: advertisedWindow),
                 window.hasSameOwner(as: currentAdvertisedWindow) else {
-                    scheduleTeardown(session: session)
+                    await republishWindowCatalogAfterRejectedSelection(session, discoveredWindows: windows)
                     return
                 }
                 if selectedWindow?.hasSameOwner(as: window) == true {
                     return
                 }
-                guard advertisedWindowGeneration < UInt64.max else {
+                let previousWindowGeneration = advertisedWindowGeneration
+                guard previousWindowGeneration < UInt64.max else {
                     scheduleTeardown(session: session)
                     return
                 }
@@ -816,15 +886,29 @@ actor HostRuntime {
                 // catalogGeneration above fences the exact WindowList snapshot.
                 // Both are required because WindowServer can reuse a numeric
                 // ID after an app exits.
-                let replacementGeneration = advertisedWindowGeneration &+ 1
+                let replacementGeneration = previousWindowGeneration &+ 1
                 advertisedWindowGeneration = replacementGeneration
-                try await activateSelection(
-                    window,
-                    generation: replacementGeneration,
-                    session: session
-                )
+                do {
+                    try await activateSelection(
+                        window,
+                        generation: replacementGeneration,
+                        session: session
+                    )
+                } catch {
+                    startupLogger.error(
+                        "Host could not start the selected window; keeping the session available for retry (error: \(String(describing: error), privacy: .public))"
+                    )
+                    await recoverFromSelectionFailure(
+                        session,
+                        fallbackWindowGeneration: previousWindowGeneration
+                    )
+                }
             } catch {
-                scheduleTeardown(session: session)
+                guard activeSession === session else { return }
+                startupLogger.error(
+                    "Host could not refresh windows during selection; keeping the session available (error: \(String(describing: error), privacy: .public))"
+                )
+                await republishWindowCatalogAfterRejectedSelection(session)
             }
         case let .keyframeRequest(request):
             // SessionCoordinator already checked the authorized capability
@@ -935,10 +1019,11 @@ actor HostRuntime {
             authorizedCapabilities.remove(.textClipboard)
         }
 
-        // Selecting a listed application is explicit Viewer intent to use it
-        // interactively. Bring its app to the Host foreground before the
-        // authorization/focus checks; InputCore still rejects every event if
-        // macOS does not confirm that the selected window is foreground.
+        // Selecting a listed window is explicit Viewer intent to use it
+        // interactively. Activate its app and, when the Host already has
+        // Accessibility access, raise that exact window before the focus
+        // checks; InputCore still rejects every event until WindowServer
+        // confirms that exact selection is foreground.
         let didForegroundSelectedApplication = await bringSelectedApplicationToForeground(selected)
         if !didForegroundSelectedApplication {
             startupLogger.error(
@@ -972,13 +1057,6 @@ actor HostRuntime {
             )
         )
         stateStore.update(session: await session.snapshot())
-
-        // Re-publish the eligible list after every selection authorization so
-        // the Viewer learns the new selection/authorization generation before
-        // it can request another replacement. The catalog generation changes
-        // only when the exact advertised window ownership set changes.
-        let refreshedWindows = try await captureSession.discoverWindows()
-        _ = try await publishWindowCatalog(refreshedWindows, to: session, force: true)
 
         if clipboardOptedInForSession {
             try await inputRuntime?.setClipboardEnabled(true)
@@ -1016,6 +1094,12 @@ actor HostRuntime {
                 )
             )
         )
+
+        // Announce that the selection succeeded before sending a refreshed
+        // catalog. The Viewer can then distinguish a genuine stream start
+        // from a catalog refresh rejecting an out-of-date picker selection.
+        let refreshedWindows = try await captureSession.discoverWindows()
+        _ = try await publishWindowCatalog(refreshedWindows, to: session, force: true)
 
         let frames = captureSession.frames
         let relay = HostEncodedFrameRelay()
@@ -1262,10 +1346,36 @@ actor HostRuntime {
               application.activationPolicy == .regular else {
             return false
         }
+
+        let selection = HostInputWindowSelection(
+            windowIdentifier: window.identifier,
+            processIdentifier: window.processIdentifier,
+            applicationIdentifier: window.applicationIdentifier,
+            generation: 0,
+            bounds: InputWindowBounds(
+                originX: window.bounds.x,
+                originY: window.bounds.y,
+                width: window.bounds.width,
+                height: window.bounds.height
+            )
+        )
         _ = application.activate(options: [.activateIgnoringOtherApps])
-        for _ in 0 ..< 20 {
-            if NSWorkspace.shared.frontmostApplication?.processIdentifier == window.processIdentifier {
+
+        for attempt in 0 ..< 20 {
+            if CoreGraphicsAccessibilityWindowFocus.isSelectedWindowForeground(selection) {
                 return true
+            }
+            // App activation may complete asynchronously. Make at most two
+            // bounded AXRaise attempts after activation has had time to start;
+            // app-level activation is never treated as focus proof.
+            if attempt == 2 || attempt == 8 {
+                let selectedTitle = window.title
+                _ = await Task.detached(priority: .userInitiated) {
+                    CoreGraphicsAccessibilityWindowFocus.raiseSelectedWindowIfAccessible(
+                        selection,
+                        title: selectedTitle
+                    )
+                }.value
             }
             do {
                 try await Task.sleep(nanoseconds: 50_000_000)
@@ -1273,7 +1383,7 @@ actor HostRuntime {
                 return false
             }
         }
-        return NSWorkspace.shared.frontmostApplication?.processIdentifier == window.processIdentifier
+        return CoreGraphicsAccessibilityWindowFocus.isSelectedWindowForeground(selection)
     }
 
     private func stopVideoPipelineIfCurrent(_ session: SessionCoordinator) async {

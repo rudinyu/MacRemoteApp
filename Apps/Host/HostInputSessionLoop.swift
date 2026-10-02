@@ -112,10 +112,12 @@ final class HostInputSessionLoop: @unchecked Sendable {
                     return
                 }
                 let current = await session.snapshot()
-                if current.authorizationGeneration != previous.authorizationGeneration ||
+                let sessionLifecycleChanged =
+                    current.authorizationGeneration != previous.authorizationGeneration ||
                     current.reconnectGeneration != previous.reconnectGeneration ||
                     current.authorized != previous.authorized ||
-                    current.authorizedWindowGeneration != previous.authorizedWindowGeneration {
+                    current.authorizedWindowGeneration != previous.authorizedWindowGeneration
+                if sessionLifecycleChanged {
                     await onSessionLifecycleReset()
                     await session.discardPendingInputMessages()
                     handler.reset()
@@ -141,6 +143,12 @@ final class HostInputSessionLoop: @unchecked Sendable {
                     await session.discardPendingInputMessages()
                     handler.reset()
                     await onInputStatusChange(handler.status())
+                } else if sessionLifecycleChanged {
+                    // The Viewer fences input status by window generation.
+                    // Re-publish even when the new target is also `.ready`,
+                    // otherwise it can only see the previous generation and
+                    // will remain unable to send input after an app switch.
+                    await onInputStatusChange(inputStatus)
                 }
                 if inputStatus == .inputStateCleanupPending {
                     handler.reconcileInputState()
