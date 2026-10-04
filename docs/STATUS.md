@@ -23,7 +23,7 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 | M6 | Implementation/test gate complete | Real OS event posting (manual disposable-application test) |
 | M7 | Implementation/test gate complete | Physical two-machine clipboard walkthrough |
 | M8 | Deterministic measurement/resilience gate implemented | Physical clock-synchronized performance report |
-| M9 | Release-audit gate implemented; existing `0.2.1006` notarized RC artifacts verified | Notarization profile remains host-specific; subsequent source fixes need a new release |
+| M9 | Release-audit gate implemented; current `0.2.1007` notarized RC artifacts verified | Notarization profile remains host-specific |
 | M10 | Production composition, final gate, pairing UI, and checklist implemented | Physical Intel-to-Apple-Silicon acceptance, including connected UI rows |
 
 ## Milestone detail
@@ -114,11 +114,10 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 - Release-only debug gating, hardened-runtime artifact audit, negative-test
   documentation, and a residual-risk record are implemented; the
   release-audit gate is implemented.
-- The existing `0.2.1006` RC artifacts are signed, notarized, and verified. The
-  authorized `0.2.1007` release candidate includes the reliability fixes below;
-  its signing/notarization remains pending until the release flow succeeds.
-  Until then, `build/rc/` still contains `0.2.1006`. The notarization profile
-  remains host-specific.
+- The current `0.2.1007` RC apps and DMGs are Developer ID signed, Apple
+  notarized, stapled, and verified; they include the reliability fixes below.
+  The notarization profile remains host-specific. See the
+  [release evidence](#021007-notarized-rc).
 
 ### M10 — V1 integration pilot
 
@@ -180,7 +179,7 @@ Pending:
 
 This M10 source review stays within the existing V1 contract; it does not add
 wire messages or post-V1 features. Its changes are included in the
-`0.2.1007` release candidate, not the existing `0.2.1006` DMGs.
+`0.2.1007` notarized RC, not the earlier `0.2.1006` DMGs.
 
 - Capture teardown is generation-bound: a delayed stop or failure from the
   previous engine cannot clear a replacement selection or end its frame
@@ -227,8 +226,8 @@ deterministic benchmark, and the M9 ad-hoc packaging audit. The first attempt
 stopped at the SwiftPM sandbox boundary; the same validation in permitted host
 context passed, including a repeat after the final review fixes. Network.framework
 loopback TLS, ScreenCaptureKit, and VideoToolbox system smokes remain opt-in
-skips in this source-review run. No apps were installed during the review;
-Apple signing/notarization for `0.2.1007` is a subsequent authorized step.
+skips in this source-review run. No apps were installed during the review or
+release; Apple signing/notarization evidence is recorded below.
 The final current-task Codex self-review covered the staged/unstaged/untracked
 diff and the relevant input, capture, transport, and presentation call paths;
 after the two review fixes, no further actionable finding remained. This was
@@ -236,6 +235,40 @@ a self-review, not an independent Desktop/CLI or Claude review.
 
 The expanded physical recovery rows in [M10 acceptance](M10_ACCEPTANCE.md)
 remain unchecked until exercised on the target pair.
+
+#### 0.2.1007 notarized RC
+
+Released locally on 2026-10-04 from source commit `5cdb321`, pushed to
+`origin/main`. The authorized release used the existing
+`scripts/release-notarized.sh rc` flow with Xcode at
+`/Applications/Xcode.app/Contents/Developer`, Developer ID signing, and the
+existing Keychain profile. No signing material was copied into the repository.
+The flow repeated deterministic validation from a clean build cache before
+signing, then promoted the staging payload only after all checks passed.
+
+| Artifact | Apple submission ID | Result |
+| --- | --- | --- |
+| Host app | `0a677fdd-3a2f-4038-b409-a815c6a6ad05` | Accepted; stapled and Gatekeeper accepted |
+| Viewer app | `c5ca1061-eed2-4a12-bc67-647fbd2c455d` | Accepted; stapled and Gatekeeper accepted |
+| Host DMG | `6b04a07d-8297-40ad-bc85-901f18a03b75` | Accepted; stapled and Gatekeeper accepted |
+| Viewer DMG | `d5c6f13e-acf3-41c9-9b3c-5b6a904c4a0c` | Accepted; stapled and Gatekeeper accepted |
+
+`scripts/validate-notarized-release.sh` passed strict signature, hardened
+runtime, role metadata, archive equivalence, DMG payload, notarization-ticket,
+and Gatekeeper checks. Both app plists contain Version `0.2` and Build `1007`;
+the Host is universal (`x86_64`/`arm64`) and the Viewer is `arm64`.
+
+| Distributable in `build/rc/` | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host.dmg` | `a7e60c27aab66b1d95ef91882a42cadad8c1e1d54059e05756234d57802ffd7f` |
+| `MacRemoteApp-Viewer.dmg` | `94373dcfde9c86d0aabf478d3f57906fee7375d793aa9e1ca1d915b9cdce90d7` |
+
+The previous `0.2.1006` RC is preserved in the checkout-local
+`build/rc-build1006.M2caBo/payload/`. The original 1.9 GB `.build` cache was
+moved aside and restored; existing beta/release DMG checksums are unchanged.
+No apps were installed, and no app settings, trust records, identities, or TCC
+grants were reset. Logs and generated artifacts remain ignored, not committed.
+This release does not resolve the physical two-Mac evidence gaps above.
 
 The intentionally deferred capabilities are listed in
 [the post-V1 roadmap](POST_V1_ROADMAP.md).

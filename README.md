@@ -10,10 +10,11 @@ Host; this is deliberately not a full remote-desktop product.
 Milestone state and open evidence gaps are tracked in one place:
 [`docs/STATUS.md`](docs/STATUS.md).
 
-The current release candidate is `0.2.1007` (Version `0.2`, Build `1007`),
-including the capture, input, reconnect, and presentation reliability fixes.
-Signed/notarized artifact evidence is recorded in [`docs/STATUS.md`](docs/STATUS.md);
-passing local tests does not replace the pending two-Mac acceptance run.
+The current signed and notarized test release is `0.2.1007` (Version `0.2`,
+Build `1007`) in `build/rc/`, including the capture, input, reconnect, and
+presentation reliability fixes. Apple submission IDs and verification evidence
+are recorded in [`docs/STATUS.md`](docs/STATUS.md#021007-notarized-rc).
+Passing local tests does not replace the pending two-Mac acceptance run.
 
 ## Native app shell
 
