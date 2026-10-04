@@ -145,6 +145,104 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(firstEngine.stopCount(), 1)
     }
 
+    func testDelayedStopDoesNotClearNewerCaptureGeneration() async throws {
+        let window = makeWindow(identifier: 46)
+        let provider = FakeWindowProvider(windows: [window], permission: .authorized)
+        let firstStopGate = TestAsyncSignal()
+        let firstEngine = GatedCaptureEngine(
+            startGate: TestAsyncSignal(signaled: true),
+            stopGate: firstStopGate
+        )
+        let secondEngine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: SequencedCaptureEngineFactory(engines: [firstEngine, secondEngine]),
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 0)
+        )
+
+        try await session.start(windowIdentifier: window.identifier)
+        let firstStop = Task { await session.stop() }
+        await firstEngine.waitUntilStopEntered()
+
+        try await session.start(windowIdentifier: window.identifier)
+        let restartedSnapshot = await session.snapshot()
+        XCTAssertEqual(
+            restartedSnapshot.state,
+            .capturing(windowIdentifier: window.identifier, generation: 2)
+        )
+
+        await firstStopGate.signal()
+        await firstStop.value
+
+        let finalSnapshot = await session.snapshot()
+        XCTAssertEqual(
+            finalSnapshot.state,
+            .capturing(windowIdentifier: window.identifier, generation: 2)
+        )
+        XCTAssertEqual(finalSnapshot.selectedWindow, window)
+        XCTAssertEqual(
+            finalSnapshot.outputDimensions,
+            CaptureConfiguration().outputDimensions(for: window)
+        )
+        XCTAssertEqual(secondEngine.stopCount(), 0)
+        await session.stop()
+    }
+
+    func testDelayedFailureDoesNotFinishNewerGenerationStream() async throws {
+        let window = makeWindow(identifier: 47)
+        let provider = FakeWindowProvider(windows: [window], permission: .authorized)
+        let firstStopGate = TestAsyncSignal()
+        let firstEngine = GatedCaptureEngine(
+            startGate: TestAsyncSignal(signaled: true),
+            stopGate: firstStopGate
+        )
+        let secondEngine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: SequencedCaptureEngineFactory(engines: [firstEngine, secondEngine]),
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 0)
+        )
+
+        try await session.start(windowIdentifier: window.identifier)
+        await provider.setPermission(.denied)
+        let failedRefresh = Task { await session.refreshSelection() }
+        await firstEngine.waitUntilStopEntered()
+
+        let failedSnapshot = await session.snapshot()
+        XCTAssertEqual(failedSnapshot.state, .failed(.permissionDenied))
+
+        await provider.setPermission(.authorized)
+        try await session.start(windowIdentifier: window.identifier)
+        let restartedSnapshot = await session.snapshot()
+        XCTAssertEqual(
+            restartedSnapshot.state,
+            .capturing(windowIdentifier: window.identifier, generation: 2)
+        )
+
+        let receiveTask = Task { () -> CapturedFrame? in
+            var iterator = session.frames.makeAsyncIterator()
+            return try? await iterator.next()
+        }
+        await firstStopGate.signal()
+        await failedRefresh.value
+
+        secondEngine.emit(try makeFrame(windowIdentifier: window.identifier, generation: 2))
+        let received = await receiveTask.value
+        XCTAssertEqual(received?.generation, 2)
+
+        let finalSnapshot = await session.snapshot()
+        XCTAssertEqual(
+            finalSnapshot.state,
+            .capturing(windowIdentifier: window.identifier, generation: 2)
+        )
+        XCTAssertEqual(finalSnapshot.selectedWindow, window)
+        XCTAssertEqual(
+            finalSnapshot.outputDimensions,
+            CaptureConfiguration().outputDimensions(for: window)
+        )
+        await session.stop()
+    }
+
     func testRelayFailureDuringEngineStartupFailsStart() async throws {
         let window = makeWindow(identifier: 44)
         let provider = FakeWindowProvider(windows: [window], permission: .authorized)
@@ -795,12 +893,18 @@ private final class GatedCaptureEngine: WindowCaptureEngine, @unchecked Sendable
     private let continuation: AsyncThrowingStream<CapturedFrame, Error>.Continuation
     private let startGate: TestAsyncSignal
     private let startEntered = TestAsyncSignal()
+    private let stopGate: TestAsyncSignal
+    private let stopEntered = TestAsyncSignal()
     private let stopped = TestAsyncSignal()
     private let startFailure: CaptureCoreError?
     private let lock = NSLock()
     private var stopCountValue = 0
 
-    init(startGate: TestAsyncSignal, startFailure: CaptureCoreError? = nil) {
+    init(
+        startGate: TestAsyncSignal,
+        startFailure: CaptureCoreError? = nil,
+        stopGate: TestAsyncSignal? = nil
+    ) {
         let output = AsyncThrowingStream<CapturedFrame, Error>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
         )
@@ -808,6 +912,7 @@ private final class GatedCaptureEngine: WindowCaptureEngine, @unchecked Sendable
         self.continuation = output.continuation
         self.startGate = startGate
         self.startFailure = startFailure
+        self.stopGate = stopGate ?? TestAsyncSignal(signaled: true)
     }
 
     func start(window: CaptureWindow, generation: UInt64) async throws {
@@ -824,6 +929,8 @@ private final class GatedCaptureEngine: WindowCaptureEngine, @unchecked Sendable
         lock.withLock {
             stopCountValue += 1
         }
+        await stopEntered.signal()
+        await stopGate.wait()
         continuation.finish()
         await stopped.signal()
     }
@@ -842,6 +949,10 @@ private final class GatedCaptureEngine: WindowCaptureEngine, @unchecked Sendable
 
     func waitUntilStartEntered() async {
         await startEntered.wait()
+    }
+
+    func waitUntilStopEntered() async {
+        await stopEntered.wait()
     }
 
     func waitUntilStopped() async {

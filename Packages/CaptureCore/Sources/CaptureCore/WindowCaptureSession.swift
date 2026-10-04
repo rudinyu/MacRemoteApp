@@ -138,6 +138,7 @@ public actor WindowCaptureSession {
     }
 
     public func stop() async {
+        let stoppingGeneration = generation
         frameGenerationGate.advance(to: generation &+ 1)
         monitorTask?.cancel()
         monitorTask = nil
@@ -154,6 +155,7 @@ public actor WindowCaptureSession {
         }
         state = .stopping
         await activeEngine?.stop()
+        guard generation == stoppingGeneration else { return }
         selectedWindow = nil
         outputDimensions = nil
         state = .stopped(.cancelled)
@@ -323,7 +325,8 @@ public actor WindowCaptureSession {
     }
 
     private func fail(_ failure: CaptureFailure) async {
-        frameGenerationGate.advance(to: generation &+ 1)
+        let failedGeneration = generation
+        frameGenerationGate.advance(to: failedGeneration &+ 1)
         monitorTask?.cancel()
         monitorTask = nil
         relayTask?.cancel()
@@ -332,6 +335,7 @@ public actor WindowCaptureSession {
         engine = nil
         state = .failed(failure)
         await activeEngine?.stop()
+        guard generation == failedGeneration else { return }
         selectedWindow = nil
         outputDimensions = nil
         // End only this generation's stream so a waiting consumer observes

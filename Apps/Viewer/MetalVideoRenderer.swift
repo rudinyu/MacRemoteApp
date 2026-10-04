@@ -15,7 +15,8 @@ final class MetalVideoRenderer: NSObject, MTKViewDelegate {
     private var latestPixelBuffer: CVPixelBuffer?
     private var latestCaptureTimestampValue: UInt64 = 0
     private var latestStreamGenerationValue: UInt64 = 0
-    var onFramePresented: (@MainActor (UInt64, UInt64, UInt64?, TimeInterval) -> Void)?
+    private var activeLifetimeToken = UUID()
+    var onFramePresented: (@MainActor (UUID, UInt64, UInt64, UInt64?, TimeInterval) -> Void)?
 
     init?(view: MTKView) {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -37,16 +38,32 @@ final class MetalVideoRenderer: NSObject, MTKViewDelegate {
     func submit(
         pixelBuffer: CVPixelBuffer,
         captureTimestamp: UInt64,
-        streamGeneration: UInt64
+        streamGeneration: UInt64,
+        lifetimeToken: UUID
     ) -> Bool {
         guard let view else { return false }
-        lock.withLock {
+        let accepted = lock.withLock {
+            guard activeLifetimeToken == lifetimeToken else { return false }
             latestPixelBuffer = pixelBuffer
             latestCaptureTimestampValue = captureTimestamp
             latestStreamGenerationValue = streamGeneration
+            return true
         }
+        guard accepted else { return false }
         view.setNeedsDisplay(view.bounds)
         return true
+    }
+
+    func reset(lifetimeToken: UUID) {
+        lock.withLock {
+            activeLifetimeToken = lifetimeToken
+            latestPixelBuffer = nil
+            latestCaptureTimestampValue = 0
+            latestStreamGenerationValue = 0
+        }
+        if let view {
+            view.setNeedsDisplay(view.bounds)
+        }
     }
 
     func latestCaptureTimestamp() -> UInt64 {
@@ -58,49 +75,53 @@ final class MetalVideoRenderer: NSObject, MTKViewDelegate {
             (
                 pixelBuffer: latestPixelBuffer,
                 captureTimestamp: latestCaptureTimestampValue,
-                streamGeneration: latestStreamGenerationValue
+                streamGeneration: latestStreamGenerationValue,
+                lifetimeToken: activeLifetimeToken
             )
         }
-        guard let pixelBuffer = submittedFrame.pixelBuffer,
-              let drawable = view.currentDrawable,
+        guard let drawable = view.currentDrawable,
               let commandBuffer = commandQueue.makeCommandBuffer() else {
             return
         }
-        let image = CIImage(cvPixelBuffer: pixelBuffer)
         let drawableSize = drawableSize(for: view)
-        guard image.extent.width.isFinite,
-              image.extent.height.isFinite,
-              image.extent.width > 0,
-              image.extent.height > 0,
-              drawableSize.width.isFinite,
+        guard drawableSize.width.isFinite,
               drawableSize.height.isFinite,
               drawableSize.width > 0,
               drawableSize.height > 0 else {
             return
         }
         let bounds = CGRect(origin: .zero, size: drawableSize)
-        let targetRect = VideoContentLayout.aspectFitRect(
-            contentWidth: image.extent.width,
-            contentHeight: image.extent.height,
-            in: bounds
-        )
-        let scale = min(
-            targetRect.width / image.extent.width,
-            targetRect.height / image.extent.height
-        )
-        let scaledImage = image.transformed(
-            by: CGAffineTransform(scaleX: scale, y: scale)
-        )
-        let fittedImage = scaledImage.transformed(
-            by: CGAffineTransform(
-                translationX: targetRect.midX - scaledImage.extent.midX,
-                y: targetRect.midY - scaledImage.extent.midY
-            )
-        )
         let background = CIImage(
             color: CIColor(red: 0, green: 0, blue: 0, alpha: 1)
         ).cropped(to: bounds)
-        let compositedImage = fittedImage.composited(over: background)
+        var compositedImage = background
+        if let pixelBuffer = submittedFrame.pixelBuffer {
+            let image = CIImage(cvPixelBuffer: pixelBuffer)
+            if image.extent.width.isFinite,
+               image.extent.height.isFinite,
+               image.extent.width > 0,
+               image.extent.height > 0 {
+                let targetRect = VideoContentLayout.aspectFitRect(
+                    contentWidth: image.extent.width,
+                    contentHeight: image.extent.height,
+                    in: bounds
+                )
+                let scale = min(
+                    targetRect.width / image.extent.width,
+                    targetRect.height / image.extent.height
+                )
+                let scaledImage = image.transformed(
+                    by: CGAffineTransform(scaleX: scale, y: scale)
+                )
+                let fittedImage = scaledImage.transformed(
+                    by: CGAffineTransform(
+                        translationX: targetRect.midX - scaledImage.extent.midX,
+                        y: targetRect.midY - scaledImage.extent.midY
+                    )
+                )
+                compositedImage = fittedImage.composited(over: background)
+            }
+        }
         ciContext.render(
             compositedImage,
             to: drawable.texture,
@@ -110,6 +131,7 @@ final class MetalVideoRenderer: NSObject, MTKViewDelegate {
         )
         let sourceTimestamp = submittedFrame.captureTimestamp
         let streamGeneration = submittedFrame.streamGeneration
+        let lifetimeToken = submittedFrame.lifetimeToken
         drawable.addPresentedHandler { [weak self] drawable in
             let presentedTime = drawable.presentedTime
             let presentedTimestamp: UInt64?
@@ -122,7 +144,9 @@ final class MetalVideoRenderer: NSObject, MTKViewDelegate {
             }
             let presentationUptime = ProcessInfo.processInfo.systemUptime
             Task { @MainActor [weak self] in
-                self?.onFramePresented?(
+                guard let self, self.acceptsLifetime(lifetimeToken) else { return }
+                self.onFramePresented?(
+                    lifetimeToken,
                     streamGeneration,
                     sourceTimestamp,
                     presentedTimestamp,
@@ -141,5 +165,9 @@ final class MetalVideoRenderer: NSObject, MTKViewDelegate {
 
     private func drawableSize(for view: MTKView) -> CGSize {
         view.drawableSize
+    }
+
+    private func acceptsLifetime(_ token: UUID) -> Bool {
+        lock.withLock { activeLifetimeToken == token }
     }
 }

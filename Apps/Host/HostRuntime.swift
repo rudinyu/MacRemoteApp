@@ -1105,18 +1105,22 @@ actor HostRuntime {
         let relay = HostEncodedFrameRelay()
         encodedFrameRelay = relay
         encodedSendTask = Task { [weak self] in
-            var awaitingKeyframe = false
-            for await result in relay.frames {
+            var continuity = HostEncodedFrameContinuity()
+            for await relayFrame in relay.frames {
                 guard !Task.isCancelled else { return }
-                if relay.takeDroppedFrame() {
-                    awaitingKeyframe = true
+                let decision = continuity.consume(
+                    relayFrame,
+                    droppedFrameObserved: relay.takeDroppedFrame()
+                )
+                if decision.requestKeyframe {
                     await self?.requestKeyframe()
                 }
-                if awaitingKeyframe {
-                    guard case let .success(frame) = result, frame.keyframe else { continue }
-                    awaitingKeyframe = false
-                }
-                await self?.sendEncoded(result, generation: generation, session: session)
+                guard decision.shouldSend else { continue }
+                await self?.sendEncoded(
+                    relayFrame.result,
+                    generation: generation,
+                    session: session
+                )
             }
         }
         captureTask = Task { [weak self, weak encoder] in

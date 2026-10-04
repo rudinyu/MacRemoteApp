@@ -23,7 +23,7 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 | M6 | Implementation/test gate complete | Real OS event posting (manual disposable-application test) |
 | M7 | Implementation/test gate complete | Physical two-machine clipboard walkthrough |
 | M8 | Deterministic measurement/resilience gate implemented | Physical clock-synchronized performance report |
-| M9 | Release-audit gate implemented; current notarized artifacts verified | Notarization profile remains host-specific |
+| M9 | Release-audit gate implemented; existing `0.2.1006` notarized RC artifacts verified | Notarization profile remains host-specific; subsequent source fixes need a new release |
 | M10 | Production composition, final gate, pairing UI, and checklist implemented | Physical Intel-to-Apple-Silicon acceptance, including connected UI rows |
 
 ## Milestone detail
@@ -114,7 +114,10 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 - Release-only debug gating, hardened-runtime artifact audit, negative-test
   documentation, and a residual-risk record are implemented; the
   release-audit gate is implemented.
-- The current notarized artifacts are verified; the notarization profile
+- The existing `0.2.1006` RC artifacts are signed, notarized, and verified. The
+  authorized `0.2.1007` release candidate includes the reliability fixes below;
+  its signing/notarization remains pending until the release flow succeeds.
+  Until then, `build/rc/` still contains `0.2.1006`. The notarization profile
   remains host-specific.
 
 ### M10 — V1 integration pilot
@@ -172,6 +175,67 @@ Pending:
 - The recorded local UI checks do not mark connected two-Mac UI acceptance
   complete: connected page switching (navigation/input release) and Host
   window lifecycle still require the physical acceptance rows.
+
+#### Post-0.2.1006 reliability review
+
+This M10 source review stays within the existing V1 contract; it does not add
+wire messages or post-V1 features. Its changes are included in the
+`0.2.1007` release candidate, not the existing `0.2.1006` DMGs.
+
+- Capture teardown is generation-bound: a delayed stop or failure from the
+  previous engine cannot clear a replacement selection or end its frame
+  stream. Both races were reproduced before the fix; CaptureCore's 23 tests
+  pass afterward, with the live ScreenCaptureKit check still opt-in/skipped.
+- Optional keyframe requests and receiver reports now share the protected
+  queue invalidation rule. Old envelope entries become sequence-preserving
+  tombstones; decoded old messages are removed. Three regression tests
+  reproduced the omission and pass after the fix; the 14 clipboard tests
+  and the authorization-invalidation regression also pass.
+- Input admission can require the authorization epoch observed when an event
+  was queued, so reauthorizing the same window cannot grant an old event a
+  new token. The regression also verifies that fresh input arrives unchanged.
+- Precise scroll deltas retain per-axis fractional remainder rather than
+  rounding every small event to zero; readiness/window changes reset the
+  remainder. InputCore's 41 tests and TransportCore's 68 tests pass.
+- The bounded encoder relay marks the first accepted frame after a drop.
+  Earlier buffered keyframes cannot clear recovery for a later gap; only a
+  post-gap keyframe resumes dependent deltas. Three Host relay regressions
+  pass, including concurrent producer coverage, and the pre-fix recovery
+  behavior reproduced the failure.
+- Viewer input now uses a bounded single-consumer FIFO tied to the original
+  session, authorization epoch, and window generation. Scope changes discard
+  old queued work; saturation closes the affected session instead of silently
+  losing key/button releases. Settings navigation within the same scope keeps
+  ordered releases intact.
+- Viewer decode/drawable callbacks carry an app-local presentation lifetime,
+  in addition to session and authorization checks; stream invalidation clears
+  the retained image to black. H.264 capability revocation is checked even if
+  other capabilities remain authorized. Connection attempts are serialized,
+  and old callbacks cannot reset a replacement session. The Viewer rebuild
+  and nine deterministic lifecycle tests pass; these do not exercise a real
+  Metal drawable or the desktop.
+- Final self-review fixes keep automatic-retry cleanup visibly Reconnecting
+  with disabled controls before awaiting teardown, guarded by all original
+  owners. Older authorization snapshots are rejected without applying their
+  readiness/video/failure state; a replacement session may restart at a lower
+  epoch. The added regressions cover blocked teardown and late snapshot order.
+
+Local verification on 2026-10-04: the final source passes
+`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./.codex/ci.sh`,
+including Host `arm64`/`x86_64`, Viewer `arm64`, root/package tests, the M8
+deterministic benchmark, and the M9 ad-hoc packaging audit. The first attempt
+stopped at the SwiftPM sandbox boundary; the same validation in permitted host
+context passed, including a repeat after the final review fixes. Network.framework
+loopback TLS, ScreenCaptureKit, and VideoToolbox system smokes remain opt-in
+skips in this source-review run. No apps were installed during the review;
+Apple signing/notarization for `0.2.1007` is a subsequent authorized step.
+The final current-task Codex self-review covered the staged/unstaged/untracked
+diff and the relevant input, capture, transport, and presentation call paths;
+after the two review fixes, no further actionable finding remained. This was
+a self-review, not an independent Desktop/CLI or Claude review.
+
+The expanded physical recovery rows in [M10 acceptance](M10_ACCEPTANCE.md)
+remain unchecked until exercised on the target pair.
 
 The intentionally deferred capabilities are listed in
 [the post-V1 roadmap](POST_V1_ROADMAP.md).

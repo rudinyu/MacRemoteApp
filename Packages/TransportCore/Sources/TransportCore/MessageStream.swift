@@ -271,7 +271,7 @@ private extension MessagePayload {
         switch self {
         case .windowList, .windowSelection, .streamConfig, .videoConfig,
              .videoFrame, .inputEvent, .clipboardOffer, .clipboardText,
-             .clipboardAcknowledgement:
+             .clipboardAcknowledgement, .keyframeRequest, .receiverReport:
             return true
         default:
             return false

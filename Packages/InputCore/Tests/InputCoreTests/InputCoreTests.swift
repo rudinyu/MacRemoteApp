@@ -216,6 +216,59 @@ final class InputCoreTests: XCTestCase {
         }
     }
 
+    func testPreciseScrollFractionsAccumulatePerAxis() throws {
+        var normalizer = InputEventNormalizer(
+            contentRect: InputContentRect(originX: 0, originY: 0, width: 100, height: 100),
+            readiness: .ready(windowGeneration: 1)
+        )
+        var totalDeltaX: Int32 = 0
+        var totalDeltaY: Int32 = 0
+
+        for sequence in 0 ..< 5 {
+            let event = try normalizer.scroll(
+                at: InputPoint(x: 50, y: 50),
+                deltaX: 0.2,
+                deltaY: -0.2,
+                timestampNanoseconds: UInt64(sequence + 1)
+            )
+            totalDeltaX += try XCTUnwrap(event.deltaX)
+            totalDeltaY += try XCTUnwrap(event.deltaY)
+        }
+
+        XCTAssertEqual(totalDeltaX, 1)
+        XCTAssertEqual(totalDeltaY, -1)
+    }
+
+    func testScrollFractionalRemainderDoesNotCrossReadinessEpoch() throws {
+        var normalizer = InputEventNormalizer(
+            contentRect: InputContentRect(originX: 0, originY: 0, width: 100, height: 100),
+            readiness: .ready(windowGeneration: 1)
+        )
+
+        let first = try normalizer.scroll(
+            at: InputPoint(x: 50, y: 50),
+            deltaX: 0.4,
+            deltaY: 0.4,
+            timestampNanoseconds: 1
+        )
+        normalizer.update(
+            contentRect: InputContentRect(originX: 0, originY: 0, width: 100, height: 100),
+            readiness: .ready(windowGeneration: 2)
+        )
+        let nextEpoch = try normalizer.scroll(
+            at: InputPoint(x: 50, y: 50),
+            deltaX: 0.4,
+            deltaY: 0.4,
+            timestampNanoseconds: 2
+        )
+
+        XCTAssertEqual(first.deltaX, 0)
+        XCTAssertEqual(first.deltaY, 0)
+        XCTAssertEqual(nextEpoch.windowGeneration, 2)
+        XCTAssertEqual(nextEpoch.deltaX, 0)
+        XCTAssertEqual(nextEpoch.deltaY, 0)
+    }
+
     func testFocusIntentIsTypedForTheCurrentWindowGeneration() throws {
         var normalizer = InputEventNormalizer(
             contentRect: InputContentRect(originX: 0, originY: 0, width: 100, height: 100),

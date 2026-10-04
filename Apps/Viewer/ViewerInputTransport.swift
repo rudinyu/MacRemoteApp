@@ -28,7 +28,10 @@ final class ViewerInputTransport {
         self.limits = limits
     }
 
-    func send(_ record: InputEventRecord) async throws {
+    func send(
+        _ record: InputEventRecord,
+        expectedAuthorizationGeneration: UInt64? = nil
+    ) async throws {
         try record.validate(limits: limits)
         guard record.estimatedEncodedPayloadBytes <= limits.maxEncodedPayloadBytes else {
             throw InputCoreError.eventTooLarge(
@@ -49,7 +52,10 @@ final class ViewerInputTransport {
         }
         let admission: SessionInputAdmissionToken
         do {
-            admission = try await session.makeInputAdmission(for: message)
+            admission = try await session.makeInputAdmission(
+                for: message,
+                expectedAuthorizationGeneration: expectedAuthorizationGeneration
+            )
         } catch let error as SessionError {
             switch error {
             case .unauthorizedMessage(.inputEvent):

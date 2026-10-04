@@ -68,6 +68,24 @@ let package = Package(
             path: "Tests/MacRemoteAppSmokeTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        .testTarget(
+            name: "HostRuntimeTests",
+            dependencies: [
+                "Host",
+                .product(name: "CodecCore", package: "CodecCore")
+            ],
+            path: "Tests/HostRuntimeTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "ViewerRuntimeTests",
+            dependencies: [
+                "Viewer",
+                .product(name: "InputCore", package: "InputCore")
+            ],
+            path: "Tests/ViewerRuntimeTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .executableTarget(
             name: "M8Benchmark",
             dependencies: [

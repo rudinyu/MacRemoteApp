@@ -183,12 +183,16 @@ from the production bundle's first-pairing flow.
 | Viewer settings navigation | Settings uses the same main window; Back, Command-0, and Command-W return to remote view; switching during a connected session releases held input and preserves the session | ☐ |
 | Host settings lifecycle | Runtime and permission status refresh; closing settings keeps Host running, and the app returns to menu-bar operation after its windows close | ☐ |
 | Capture/display | Viewer renders the selected window with aspect preservation | ☐ |
+| Display lifetime | Disconnect or window replacement clears the previous image immediately; late decode/presentation callbacks from the old session cannot restore it, including reconnects that reuse a wire generation | ☐ |
+| Capture replacement race | Rapid window replacement during a slow capture stop/failure keeps the new selection and its stream alive | ☐ |
+| Video backlog recovery | After encoder-relay overflow, pre-gap frames stay ordered; only a post-gap keyframe permits post-gap deltas to resume | ☐ |
 | Performance | 30-second report has clock probes, valid samples, p50/p95, fps and resource data | ☐ |
 | Input | Each authorized input capability works only while authorized; mouse-only or keyboard-only authorization keeps the other local controls disabled | ☐ |
 | Clipboard | Text-only opt-in works; opt-out and echo prevention work | ☐ |
 | Permission recovery | Local Network, Screen Recording, or PostEvent denial/revocation disables the affected path and gives a recoverable instruction; optional Accessibility loss disables AXRaise/secure-input inspection but never bypasses exact-window focus checks | ☐ |
 | Window recovery | Close/change/focus loss disables input and reports a recoverable state | ☐ |
 | LAN recovery | Disconnect shows reconnecting; reauthorization is required before input resumes | ☐ |
+| Queued-input isolation | Held input is released on Settings navigation within the same authorization; window switch, reauthorization, and reconnect never replay queued old input, and a saturated input queue closes the affected session instead of losing a release | ☐ |
 | Stale trust | Revocation or identity mismatch requires explicit re-pairing | ☐ |
 | Failure UX | Malformed/unsupported/oversized input fails closed without sensitive diagnostics | ☐ |
 | Post-test cleanup | After collecting evidence, stop test apps, clear scoped settings/trust/identity and permissions, remove test installations/review output, verify absence, and preserve source/release artifacts | ☐ |

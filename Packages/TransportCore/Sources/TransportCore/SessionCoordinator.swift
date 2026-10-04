@@ -905,11 +905,18 @@ public actor SessionCoordinator {
     /// Issues an opaque admission for a Viewer input message.  The caller may
     /// do local encoding or UI work after this returns, but the token is
     /// single-epoch: a reconnect or authorization transition invalidates it.
+    /// Supplying the epoch observed when input was queued rejects stale input
+    /// before a token for a newer authorization can be issued.
     public func makeInputAdmission(
-        for input: InputEventMessage
+        for input: InputEventMessage,
+        expectedAuthorizationGeneration: UInt64? = nil
     ) throws -> SessionInputAdmissionToken {
         let payload = MessagePayload.inputEvent(input)
         try validateMessageDirection(for: payload.messageType, incoming: false)
+        if let expectedAuthorizationGeneration,
+           expectedAuthorizationGeneration != authorizationGeneration {
+            throw SessionError.authorizationChanged
+        }
         try validateAuthorization(for: payload)
         guard let capability = requiredCapabilities(for: payload).first else {
             throw SessionError.unauthorizedMessage(.inputEvent)

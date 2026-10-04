@@ -313,6 +313,10 @@ size is fixed per capture generation. It must stop or degrade safely when
 the window disappears, the permission is revoked, or the selected window
 becomes ineligible.
 
+Stopping an engine can suspend while a replacement capture starts. Cleanup
+must remain bound to the engine and generation being stopped: a late stop or
+failure must not clear the replacement selection or finish its frame stream.
+
 ### Encode path
 
 `CodecCore` wraps VideoToolbox. It receives frames from `CaptureCore`, applies
@@ -468,12 +472,31 @@ surface, preserving aspect ratio. `MetalVideoRenderer` attaches a
 drawable reaches the display handoff boundary; queue-entry time is not used as
 the display timestamp.
 
+Decode and presentation callbacks are bound to the local session/stream
+lifetime as well as the wire generation, which may repeat after reconnect.
+Selection replacement, authorization loss, and disconnect invalidate that
+lifetime and clear the renderer's retained frame. A redraw without a current
+frame clears the drawable to black instead of redisplaying the previous target.
+Asynchronous authorization snapshots must not move a session back to an older
+epoch. A rejected snapshot cannot update input readiness, configure/decode
+video, record a presentation, or initiate teardown. A new local session may
+restart its authorization counter independently.
+
 ### Viewer input path
 
 `InputCore` captures events only inside the remote-content surface, normalizes
 coordinates against the displayed content rectangle, preserves key/modifier
 ordering, and submits events through `TransportCore`. Local UI shortcuts that
 must not be forwarded remain owned by the Viewer.
+
+Waiting events use a bounded FIFO with one sender. Each event retains its
+original session transport and authorization epoch; teardown or reauthorization
+invalidates queued work before it can enter a replacement session. Queue
+overflow ends the affected session so Host-side held-input cleanup runs rather
+than silently losing a key or button release. Settings navigation within the
+same session still sends the surface's ordered release events.
+Precise scroll input retains a bounded per-axis fractional remainder before
+integer wire encoding; readiness/window changes clear that remainder.
 
 ## Shared runtime model
 
@@ -512,6 +535,14 @@ policy; control is prioritized between individual writes, while TCP
 head-of-line blocking remains an M8 measurement concern. M8 may evaluate a
 different Network.framework binding only if the measured baseline misses the
 documented target. WebRTC is not a V1 option.
+
+The bounded encoder-callback relay also preserves the H.264 reference chain.
+After an overflow, an older keyframe already waiting in that relay cannot
+repair the later dropped frame; recovery requires a keyframe produced after
+the gap. Authorization invalidation includes optional `KeyframeRequest` and
+`ReceiverReport` control messages in every raw-envelope and decoded-message
+queue, applying the same ordered tombstone policy where envelope sequences
+must be preserved.
 
 The protocol envelope is shared, but the media plane must not be allowed to
 block control/input progress indefinitely.

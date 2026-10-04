@@ -46,6 +46,15 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case connected
         case retryableFailure
         case pairingDenied
+        case superseded
+    }
+
+    private struct AuthorizationFingerprint: Equatable {
+        let sessionID: UUID
+        let generation: UInt64
+        let authorized: Bool
+        let windowGeneration: UInt64?
+        let capabilities: Set<Capability>
     }
 
     private static let capabilities: Set<Capability> = [
@@ -82,12 +91,15 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var discoveryStateTask: Task<Void, Never>?
     private var sessionMonitorTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    private var reconnectTaskID: UUID?
+    private var connectionAttemptID: UUID?
+    private var authorizationSnapshotGate = ViewerAuthorizationSnapshotGate()
     private var discoveredServices: [DiscoveredService] = []
     private var lastDiscoveredService: DiscoveredService?
     private var selectedServiceIdentifier: String?
     private var pairingRetryRequired = false
-    private var inputSendTail: Task<Void, Never>?
     private var session: SessionCoordinator?
+    private var sessionLifetimeID: UUID?
     private var messageLoop: ViewerSessionMessageLoop?
     private var inputTransport: ViewerInputTransport?
     private var contentView: ViewerContentView?
@@ -100,6 +112,12 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         didSet { refreshSettings() }
     }
     private var localIdentity: ProvisionedIdentity?
+    private lazy var inputSendQueue = ViewerInputSendQueue { [weak self] scope in
+        self?.handleInputQueueFailure(scope)
+    }
+    private var activeInputSendScope: ViewerInputSendScope?
+    private let presentationLifetime = ViewerPresentationLifetime()
+    private var authorizationFingerprint: AuthorizationFingerprint?
     private var selectedGeneration: UInt64?
     private var selectedWindowIdentifier: UInt64?
     private var pendingWindowSelection: (identifier: UInt64, catalogGeneration: UInt64)?
@@ -240,7 +258,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     continue
                 }
                 self.lastDiscoveredService = service
-                guard self.session == nil, self.reconnectTask == nil else { continue }
+                guard self.session == nil,
+                      self.connectionAttemptID == nil,
+                      self.reconnectTask == nil else { continue }
                 guard !self.pairingRetryRequired else { continue }
                 // A previously selected Host may reappear after a network
                 // interruption. Initial connection is always explicit; only a
@@ -385,16 +405,33 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         if let renderer = MetalVideoRenderer(view: content.videoView) {
             self.renderer = renderer
-            renderer.onFramePresented = { [weak self] generation, captureTimestamp, presentedTimestamp, presentationUptime in
+            renderer.reset(lifetimeToken: presentationLifetime.token)
+            renderer.onFramePresented = { [weak self] lifetimeToken, generation, captureTimestamp, presentedTimestamp, presentationUptime in
                 guard let self,
+                      let sourceSession = self.session,
+                      let sourceSessionID = self.sessionLifetimeID,
+                      self.presentationLifetime.accepts(lifetimeToken),
                       self.selectedGeneration == generation,
                       self.streamGenerationGate.accepts(generation) else { return }
-                self.recordPresentation(
-                    captureTimestamp: captureTimestamp,
-                    presentedTimestamp: presentedTimestamp,
-                    presentationUptime: presentationUptime
-                )
-                self.contentView?.markFramePresented()
+                Task { @MainActor [weak self] in
+                    let snapshot = await sourceSession.snapshot()
+                    guard let self,
+                          self.session === sourceSession,
+                          self.sessionLifetimeID == sourceSessionID else { return }
+                    guard self.synchronizeAuthorization(for: sourceSession, snapshot: snapshot) else { return }
+                    guard snapshot.authorized,
+                          snapshot.authorizedCapabilities.contains(.h264Video),
+                          snapshot.authorizedWindowGeneration == generation,
+                          self.presentationLifetime.accepts(lifetimeToken),
+                          self.selectedGeneration == generation,
+                          self.streamGenerationGate.accepts(generation) else { return }
+                    self.recordPresentation(
+                        captureTimestamp: captureTimestamp,
+                        presentedTimestamp: presentedTimestamp,
+                        presentationUptime: presentationUptime
+                    )
+                    self.contentView?.markFramePresented()
+                }
             }
         } else {
             macRemoteAppStartupLogger.error(
@@ -408,6 +445,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard index >= 0,
               index < discoveredServices.count,
               session == nil,
+              connectionAttemptID == nil,
               reconnectTask == nil else { return }
         let service = discoveredServices[index]
         selectedServiceIdentifier = service.identifier
@@ -426,20 +464,38 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 break
             case .retryableFailure:
                 scheduleReconnect()
+            case .superseded:
+                break
             }
         }
     }
 
     private func connect(
         to service: DiscoveredService,
-        reconnecting: Bool = false
+        reconnectID: UUID? = nil
     ) async -> ConnectResult {
-        guard session == nil, !isShuttingDown else { return .retryableFailure }
-        contentView?.setConnectionState(reconnecting ? .reconnecting : .connecting)
+        guard session == nil,
+              connectionAttemptID == nil,
+              reconnectID == nil || reconnectTaskID == reconnectID,
+              !isShuttingDown else { return .superseded }
+        let attemptID = UUID()
+        connectionAttemptID = attemptID
+        defer {
+            if connectionAttemptID == attemptID {
+                connectionAttemptID = nil
+            }
+        }
+
+        contentView?.setConnectionState(reconnectID != nil ? .reconnecting : .connecting)
         contentView?.setPeerName(service.name)
         contentView?.setPairingRetryVisible(false)
+        var attemptSession: SessionCoordinator?
+        var retryCleanupOwnership: ViewerRetryCleanupOwnership?
         do {
             let localIdentity = try await loadLocalIdentity()
+            guard ownsConnectionAttempt(attemptID), !Task.isCancelled, !isShuttingDown else {
+                return .superseded
+            }
             let authenticationMode: TLSAuthenticationMode
             if let peerCertificateURL = configuration.peerCertificateURL {
                 let peerIdentity = try PublicCertificateIdentity.load(from: peerCertificateURL)
@@ -461,7 +517,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 localIdentity: localIdentity.peerIdentity,
                 trustStore: KeychainTrustStore(service: Configuration.defaultTrustStoreService)
             )
-            let session = SessionCoordinator(
+            let candidateSession = SessionCoordinator(
                 configuration: SessionConfiguration(
                     role: .viewer,
                     implementationIdentifier: "MacRemoteApp-Viewer-M10",
@@ -475,32 +531,64 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 transport: transport,
                 pairingCoordinator: pairingCoordinator
             )
-            self.session = session
-            self.inputTransport = ViewerInputTransport(session: session)
-            let loop = ViewerSessionMessageLoop(session: session) { [weak self] message in
-                await self?.handle(message)
+            guard ownsConnectionAttempt(attemptID), !Task.isCancelled, !isShuttingDown else {
+                await candidateSession.stop(reason: .normal)
+                return .superseded
+            }
+            attemptSession = candidateSession
+            self.session = candidateSession
+            let candidateSessionID = UUID()
+            sessionLifetimeID = candidateSessionID
+            if let reconnectID {
+                retryCleanupOwnership = ViewerRetryCleanupOwnership(
+                    sessionID: candidateSessionID,
+                    attemptID: attemptID,
+                    reconnectID: reconnectID
+                )
+            }
+            authorizationFingerprint = nil
+            updateInputSendScope(nil)
+            advancePresentationLifetime(resetDecoder: true)
+            self.inputTransport = ViewerInputTransport(session: candidateSession)
+            let loop = ViewerSessionMessageLoop(session: candidateSession) { [weak self] message in
+                await self?.handle(message, from: candidateSession)
             }
             loop.onClipboardStatusChange = { [weak self] in
                 Task { @MainActor [weak self] in
-                    await self?.refreshInputSurface()
+                    await self?.refreshInputSurface(for: candidateSession)
                 }
             }
             messageLoop = loop
             loop.start()
             contentView?.updateStream(size: .zero, readiness: .awaitingAuthentication)
-            try await session.start()
-            try await waitForPairing(session, pairingCoordinator: pairingCoordinator)
-            let sessionSnapshot = await session.snapshot()
+            try await candidateSession.start()
+            guard ownsConnectionAttempt(attemptID), self.session === candidateSession,
+                  !Task.isCancelled, !isShuttingDown else { return .superseded }
+            try await waitForPairing(
+                candidateSession,
+                pairingCoordinator: pairingCoordinator,
+                attemptID: attemptID
+            )
+            guard ownsConnectionAttempt(attemptID), self.session === candidateSession,
+                  !Task.isCancelled, !isShuttingDown else { return .superseded }
+            let sessionSnapshot = await candidateSession.snapshot()
+            guard ownsConnectionAttempt(attemptID), self.session === candidateSession,
+                  !Task.isCancelled, !isShuttingDown else { return .superseded }
             contentView?.setPeerName(sessionSnapshot.peerDeviceName ?? service.name)
             sessionMonitorTask = Task { @MainActor [weak self] in
-                await self?.monitorSession(session)
+                await self?.monitorSession(candidateSession)
             }
             contentView?.setConnectionState(.connected)
             setStatus("Connected; waiting for a selected window")
             contentView?.setPairingRetryVisible(false)
-            await refreshInputSurface()
+            await refreshInputSurface(for: candidateSession)
+            guard self.session === candidateSession else { return .superseded }
             return .connected
         } catch let error as SessionError {
+            guard ownsConnectionAttempt(attemptID) else {
+                if let attemptSession { await attemptSession.stop(reason: .normal) }
+                return .superseded
+            }
             if error == .pairingDenied {
                 pairingRetryRequired = true
                 setStatus("Pairing was denied; click Retry pairing to try again")
@@ -509,22 +597,32 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 setStatus("Connection unavailable; check trusted identities and Local Network permission")
                 contentView?.setPairingRetryVisible(false)
             }
-            await resetSession()
-            if reconnecting, error != .pairingDenied {
-                contentView?.setConnectionState(.reconnecting)
-                contentView?.setHostSelectionEnabled(false)
+            if let attemptSession {
+                await resetSession(
+                    expectedSession: attemptSession,
+                    retryCleanupOwnership: error == .pairingDenied ? nil : retryCleanupOwnership
+                )
             }
             return error == .pairingDenied ? .pairingDenied : .retryableFailure
         } catch {
+            guard ownsConnectionAttempt(attemptID) else {
+                if let attemptSession { await attemptSession.stop(reason: .normal) }
+                return .superseded
+            }
             setStatus("Connection unavailable; check trusted identities and Local Network permission")
             contentView?.setPairingRetryVisible(false)
-            await resetSession()
-            if reconnecting {
-                contentView?.setConnectionState(.reconnecting)
-                contentView?.setHostSelectionEnabled(false)
+            if let attemptSession {
+                await resetSession(
+                    expectedSession: attemptSession,
+                    retryCleanupOwnership: retryCleanupOwnership
+                )
             }
             return .retryableFailure
         }
+    }
+
+    private func ownsConnectionAttempt(_ attemptID: UUID) -> Bool {
+        connectionAttemptID == attemptID
     }
 
     private func monitorSession(_ observedSession: SessionCoordinator) async {
@@ -537,8 +635,12 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             guard session === observedSession else { return }
             let current = await observedSession.snapshot()
+            guard session === observedSession else { return }
+            let clockSyncEstimate = await observedSession.clockSyncEstimate()
+            guard session === observedSession else { return }
+            guard synchronizeAuthorization(for: observedSession, snapshot: current) else { continue }
             refreshPresentedFPS(now: ProcessInfo.processInfo.systemUptime)
-            latestClockSyncEstimate = await observedSession.clockSyncEstimate()
+            latestClockSyncEstimate = clockSyncEstimate
             contentView?.setConnectionLatency(latestClockSyncEstimate)
             latestPerformanceSnapshot = performanceCollector.snapshot(
                 clockSync: latestClockSyncEstimate
@@ -548,22 +650,27 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 current.authorized != previous.authorized ||
                 current.authorizedWindowGeneration != previous.authorizedWindowGeneration ||
                 current.authorizedCapabilities != previous.authorizedCapabilities {
-                await refreshInputSurface()
+                await refreshInputSurface(for: observedSession)
             }
+            guard session === observedSession else { return }
+            guard synchronizeAuthorization(for: observedSession, snapshot: current) else { continue }
             previous = current
             guard current.state == .failed else { continue }
 
             // This task owns the failure transition, so resetSession must not
             // cancel and join this task recursively.
             sessionMonitorTask = nil
-            await resetSession(cancelMonitor: false)
+            await resetSession(expectedSession: observedSession, cancelMonitor: false)
             scheduleReconnect()
             return
         }
     }
 
     private func scheduleReconnect(immediate: Bool = false) {
-        guard reconnectTask == nil, !isShuttingDown else { return }
+        guard reconnectTask == nil,
+              connectionAttemptID == nil,
+              session == nil,
+              !isShuttingDown else { return }
         guard !pairingRetryRequired else { return }
         guard let service = lastDiscoveredService else {
             setStatus("Connection lost; rediscover the Host to reconnect")
@@ -573,7 +680,15 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setStatus("Connection lost; reconnecting…")
         contentView?.setConnectionState(.reconnecting)
         contentView?.setHostSelectionEnabled(false)
+        let reconnectID = UUID()
+        reconnectTaskID = reconnectID
         reconnectTask = Task { @MainActor [weak self] in
+            defer {
+                if let self, self.reconnectTaskID == reconnectID {
+                    self.reconnectTask = nil
+                    self.reconnectTaskID = nil
+                }
+            }
             let delays: [UInt64] = immediate ? [0, 1, 2, 3, 4] : [1, 2, 3, 4, 5]
             for delay in delays {
                 if delay > 0 {
@@ -583,33 +698,49 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         return
                     }
                 }
-                guard let self, self.session == nil else { return }
-                switch await self.connect(to: service, reconnecting: true) {
+                guard let self,
+                      self.reconnectTaskID == reconnectID,
+                      !self.isShuttingDown,
+                      self.session == nil,
+                      self.connectionAttemptID == nil else { return }
+                switch await self.connect(to: service, reconnectID: reconnectID) {
                 case .connected:
-                    self.reconnectTask = nil
                     return
                 case .pairingDenied:
-                    self.reconnectTask = nil
                     return
                 case .retryableFailure:
                     continue
+                case .superseded:
+                    return
                 }
             }
-            guard let self, self.session == nil else { return }
-            self.reconnectTask = nil
+            guard let self,
+                  self.reconnectTaskID == reconnectID,
+                  !self.isShuttingDown,
+                  self.session == nil,
+                  self.connectionAttemptID == nil else { return }
             self.contentView?.setConnectionState(.disconnected)
             self.contentView?.setHostSelectionEnabled(true)
             self.setStatus("Host unavailable; start the Viewer to retry")
         }
     }
 
+    private func cancelReconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectTaskID = nil
+    }
+
     private func waitForPairing(
         _ session: SessionCoordinator,
-        pairingCoordinator: PairingCoordinator
+        pairingCoordinator: PairingCoordinator,
+        attemptID: UUID
     ) async throws {
         var promptedChallengeID: UInt64?
         while !Task.isCancelled {
             let snapshot = await session.snapshot()
+            guard ownsConnectionAttempt(attemptID), self.session === session,
+                  !isShuttingDown else { throw CancellationError() }
             switch snapshot.state {
             case .trusted, .capabilitiesNegotiated, .windowSelectionAuthorized, .streaming:
                 return
@@ -618,7 +749,11 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if let challenge = await pairingCoordinator.pendingChallenge(),
                    challenge.isVerificationReady,
                    promptedChallengeID != challenge.challengeID {
+                    guard ownsConnectionAttempt(attemptID), self.session === session,
+                          !isShuttingDown else { throw CancellationError() }
                     let consent = await pairingCoordinator.consentState()
+                    guard ownsConnectionAttempt(attemptID), self.session === session,
+                          !isShuttingDown else { throw CancellationError() }
                     guard consent?.localConsent != true else {
                         try await Task.sleep(nanoseconds: 100_000_000)
                         continue
@@ -653,7 +788,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         group.cancelAll()
                         return outcome
                     }
-                    guard !Task.isCancelled else { throw CancellationError() }
+                    guard !Task.isCancelled,
+                          ownsConnectionAttempt(attemptID), self.session === session,
+                          !isShuttingDown else { throw CancellationError() }
                     switch outcome {
                     case .consent(accepted: true):
                         try await session.confirmPairing(
@@ -698,12 +835,15 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return identity
     }
 
-    private func handle(_ message: MessagePayload) async {
+    private func handle(_ message: MessagePayload, from sourceSession: SessionCoordinator) async {
+        guard session === sourceSession else { return }
         switch message {
         case let .windowList(windowList):
-            guard let session,
-                  let generation = (await session.snapshot()).authorizedWindowGeneration else {
-                await refreshInputSurface()
+            let snapshot = await sourceSession.snapshot()
+            guard session === sourceSession else { return }
+            guard synchronizeAuthorization(for: sourceSession, snapshot: snapshot) else { return }
+            guard let generation = snapshot.authorizedWindowGeneration else {
+                await refreshInputSurface(for: sourceSession)
                 return
             }
             let selectionWasRejected = pendingWindowSelection.map {
@@ -730,12 +870,19 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             } else {
                 setStatus("Connected — select a Host window to start video")
             }
-            await refreshInputSurface()
+            await refreshInputSurface(for: sourceSession)
+            guard session === sourceSession else { return }
             if selectionWasRejected {
                 setStatus("Host window list changed — select a window again")
             }
 
         case let .streamConfig(config):
+            let snapshot = await sourceSession.snapshot()
+            guard session === sourceSession else { return }
+            guard synchronizeAuthorization(for: sourceSession, snapshot: snapshot) else { return }
+            guard snapshot.authorized,
+                  snapshot.authorizedCapabilities.contains(.h264Video),
+                  snapshot.authorizedWindowGeneration == config.generation else { return }
             guard config.codec == .h264 else {
                 setStatus("Unsupported video codec")
                 return
@@ -750,23 +897,38 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             latestPerformanceSnapshot = nil
             receiveToPresentCollector.reset()
             pendingFrameReceiptNanoseconds.removeAll()
-            decoder.reset()
+            advancePresentationLifetime(resetDecoder: true)
             contentView?.updateStream(size: streamDimensions, readiness: .awaitingAuthorization)
             contentView?.setWindowSelectionEnabled(true)
-            await refreshInputSurface()
+            await refreshInputSurface(for: sourceSession)
+            guard session === sourceSession else { return }
             setStatus("Receiving video")
 
         case let .videoConfig(config):
-            guard config.generation == selectedGeneration else { return }
+            let snapshot = await sourceSession.snapshot()
+            guard session === sourceSession else { return }
+            guard synchronizeAuthorization(for: sourceSession, snapshot: snapshot) else { return }
+            guard snapshot.authorized,
+                  snapshot.authorizedCapabilities.contains(.h264Video),
+                  snapshot.authorizedWindowGeneration == config.generation,
+                  config.generation == selectedGeneration,
+                  streamGenerationGate.accepts(config.generation) else { return }
             do {
                 let decoderConfiguration = try H264DecoderConfiguration.decode(config.decoderConfiguration)
+                advancePresentationLifetime(resetDecoder: true)
                 try decoder.configure(configuration: decoderConfiguration, generation: config.generation)
             } catch {
                 setStatus("Video decoder configuration failed")
             }
 
         case let .videoFrame(frame):
-            guard frame.generation == selectedGeneration,
+            let snapshot = await sourceSession.snapshot()
+            guard session === sourceSession else { return }
+            guard synchronizeAuthorization(for: sourceSession, snapshot: snapshot) else { return }
+            guard snapshot.authorized,
+                  snapshot.authorizedCapabilities.contains(.h264Video),
+                  snapshot.authorizedWindowGeneration == frame.generation,
+                  frame.generation == selectedGeneration,
                   streamGenerationGate.accepts(frame.generation) else { return }
             notePendingFrameReceipt(captureTimestamp: frame.captureTimestamp)
             do {
@@ -780,14 +942,30 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     accessUnit: frame.accessUnit
                 )
                 let decodeGeneration = encoded.generation
+                let decodeSessionID = sessionLifetimeID
+                let decodeAuthorizationGeneration = snapshot.authorizationGeneration
+                let decodeLifetimeToken = presentationLifetime.token
                 try decoder.decode(encoded) { [weak self] result in
                     Task { @MainActor [weak self] in
+                        let decodedSnapshot = await sourceSession.snapshot()
                         guard let self,
+                              self.session === sourceSession,
+                              self.sessionLifetimeID == decodeSessionID else { return }
+                        guard self.synchronizeAuthorization(for: sourceSession, snapshot: decodedSnapshot) else { return }
+                        guard decodedSnapshot.authorized,
+                              decodedSnapshot.authorizedCapabilities.contains(.h264Video),
+                              decodedSnapshot.authorizationGeneration == decodeAuthorizationGeneration,
+                              decodedSnapshot.authorizedWindowGeneration == decodeGeneration,
+                              self.presentationLifetime.accepts(decodeLifetimeToken),
                               self.selectedGeneration == decodeGeneration,
                               self.streamGenerationGate.accepts(decodeGeneration) else {
                             return
                         }
-                        self.present(result)
+                        self.present(
+                            result,
+                            from: sourceSession,
+                            lifetimeToken: decodeLifetimeToken
+                        )
                     }
                 }
             } catch let error as CodecError {
@@ -804,14 +982,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
 
         case let .sessionState(message):
-            guard let session else {
-                hostInputPermission = .unknown
-                hostInputFocusEligible = false
-                hostInputStatusGeneration = nil
-                await refreshInputSurface()
-                return
-            }
-            let snapshot = await session.snapshot()
+            let snapshot = await sourceSession.snapshot()
+            guard session === sourceSession else { return }
+            guard synchronizeAuthorization(for: sourceSession, snapshot: snapshot) else { return }
             if message.state == .failed || message.state == .stopping {
                 hostInputPermission = .unknown
                 hostInputFocusEligible = false
@@ -829,7 +1002,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 hostInputFocusEligible = false
                 hostInputStatusGeneration = nil
             }
-            await refreshInputSurface()
+            await refreshInputSurface(for: sourceSession)
+            guard session === sourceSession else { return }
             if hostInputPermission == .missing || hostInputPermission == .revoked {
                 setStatus("Connected — enable PostEvent permission for MacRemoteApp Host")
             } else if hostInputPermission == .unknown {
@@ -844,13 +1018,13 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // the message-loop task itself. A peer close is recoverable; only
             // application termination uses disconnect(), which stops Bonjour.
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                await self.resetSession()
+                guard let self, self.session === sourceSession else { return }
+                await self.resetSession(expectedSession: sourceSession)
                 self.scheduleReconnect()
             }
 
         default:
-            await refreshInputSurface()
+            await refreshInputSurface(for: sourceSession)
         }
     }
 
@@ -864,6 +1038,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             let snapshot = await session.snapshot()
+            guard self.session === session else { return }
+            guard synchronizeAuthorization(for: session, snapshot: snapshot) else { return }
             guard snapshot.authorizedWindowGeneration == generation else {
                 setStatus("Window list expired; waiting for Host")
                 return
@@ -880,14 +1056,16 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             resetPresentedFPS()
             selectedGeneration = nil
             streamGenerationGate.revoke()
-            decoder.reset()
+            updateInputSendScope(nil)
+            advancePresentationLifetime(resetDecoder: true)
             streamDimensions = .zero
             hostInputPermission = .unknown
             hostInputFocusEligible = false
             hostInputStatusGeneration = nil
             contentView?.updateStream(size: .zero, readiness: .awaitingAuthorization)
             contentView?.setWindowSelectionEnabled(false)
-            await refreshInputSurface()
+            await refreshInputSurface(for: session)
+            guard self.session === session else { return }
             do {
                 try await session.send(
                     .windowSelection(
@@ -898,18 +1076,23 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         )
                     )
                 )
+                guard self.session === session else { return }
                 selectedWindowIdentifier = windowIdentifier
                 contentView?.setSelectedWindowIdentifier(windowIdentifier)
                 pendingWindowSelection = (windowIdentifier, catalogGeneration)
                 setStatus("Window selected; starting video")
-                await refreshInputSurface()
+                await refreshInputSurface(for: session)
+                guard self.session === session else { return }
             } catch {
+                guard self.session === session else { return }
                 pendingWindowSelection = nil
                 selectedWindowIdentifier = nil
                 contentView?.setWindowSelectionEnabled(true)
                 setStatus("Window selection was rejected")
             }
-            windowSelectionInFlight = false
+            if self.session === session {
+                windowSelectionInFlight = false
+            }
         }
     }
 
@@ -917,7 +1100,13 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         contentView?.containsWindow(identifier) == true
     }
 
-    private func present(_ result: Result<DecodedH264Frame, CodecError>) {
+    private func present(
+        _ result: Result<DecodedH264Frame, CodecError>,
+        from sourceSession: SessionCoordinator,
+        lifetimeToken: UUID
+    ) {
+        guard session === sourceSession,
+              presentationLifetime.accepts(lifetimeToken) else { return }
         guard case let .success(frame) = result else {
             if case let .failure(error) = result,
                error != .cancelled,
@@ -934,7 +1123,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard renderer.submit(
             pixelBuffer: frame.pixelBuffer,
             captureTimestamp: frame.captureTimestamp,
-            streamGeneration: frame.generation
+            streamGeneration: frame.generation,
+            lifetimeToken: lifetimeToken
         ) else {
             setStatus("Video decoded, but the Metal view is unavailable")
             return
@@ -1061,27 +1251,35 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func enqueueInput(_ record: InputEventRecord) {
-        let previous = inputSendTail
-        inputSendTail = Task { @MainActor [weak self] in
-            await previous?.value
-            guard let self, let inputTransport else { return }
-            try? await inputTransport.send(record)
+        guard let scope = activeInputSendScope,
+              record.windowGeneration == scope.windowGeneration,
+              let transport = inputTransport else { return }
+        _ = inputSendQueue.enqueue(record, in: scope) { event, authorizationGeneration in
+            try await transport.send(
+                event,
+                expectedAuthorizationGeneration: authorizationGeneration
+            )
         }
     }
 
-    private func refreshInputSurface() async {
-        guard let session else {
+    private func refreshInputSurface(for observedSession: SessionCoordinator? = nil) async {
+        guard let session = observedSession ?? self.session else {
+            updateInputSendScope(nil)
             let readiness = InputReadiness.awaitingAuthentication
             contentView?.updateStream(size: streamDimensions, readiness: readiness)
             contentView?.updateClipboard(status: nil, available: false)
             return
         }
         let snapshot = await session.snapshot()
+        guard self.session === session else { return }
+        guard synchronizeAuthorization(for: session, snapshot: snapshot) else { return }
         var readiness: InputReadiness = .awaitingAuthorization
         var inputCapabilities = ViewerInputCapabilities.none
         if snapshot.state == .connecting || snapshot.state == .reconnecting {
             readiness = .awaitingAuthentication
-        } else if snapshot.authorizedWindowGeneration == nil || selectedGeneration == nil {
+        } else if !snapshot.authorized ||
+                    snapshot.authorizedWindowGeneration == nil ||
+                    selectedGeneration == nil {
             readiness = .awaitingAuthorization
         } else if let generation = selectedGeneration {
             let availability = SessionCapabilityProjection.inputAvailability(
@@ -1104,6 +1302,18 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     keyboardInputEnabled: availability.keyboardInputEnabled
                 )
             }
+        }
+        if case let .ready(windowGeneration) = readiness,
+           let sessionLifetimeID {
+            updateInputSendScope(
+                ViewerInputSendScope(
+                    sessionID: sessionLifetimeID,
+                    authorizationGeneration: snapshot.authorizationGeneration,
+                    windowGeneration: windowGeneration
+                )
+            )
+        } else {
+            updateInputSendScope(nil)
         }
         contentView?.updateStream(
             size: streamDimensions,
@@ -1135,6 +1345,69 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
     }
 
+    private func synchronizeAuthorization(
+        for session: SessionCoordinator,
+        snapshot: SessionSnapshot
+    ) -> Bool {
+        guard self.session === session,
+              let sessionLifetimeID,
+              authorizationSnapshotGate.admit(
+                sessionID: sessionLifetimeID,
+                authorizationGeneration: snapshot.authorizationGeneration
+              ) else { return false }
+        let next = AuthorizationFingerprint(
+            sessionID: sessionLifetimeID,
+            generation: snapshot.authorizationGeneration,
+            authorized: snapshot.authorized,
+            windowGeneration: snapshot.authorizedWindowGeneration,
+            capabilities: snapshot.authorizedCapabilities
+        )
+        guard authorizationFingerprint != next else { return true }
+        authorizationFingerprint = next
+        updateInputSendScope(nil)
+        advancePresentationLifetime(resetDecoder: true)
+        return true
+    }
+
+    private func updateInputSendScope(_ scope: ViewerInputSendScope?) {
+        activeInputSendScope = scope
+        inputSendQueue.updateScope(scope)
+    }
+
+    private func advancePresentationLifetime(resetDecoder: Bool) {
+        let token = presentationLifetime.advance()
+        renderer?.reset(lifetimeToken: token)
+        if resetDecoder {
+            decoder.reset()
+        }
+        pendingFrameReceiptNanoseconds.removeAll(keepingCapacity: true)
+    }
+
+    private func handleInputQueueFailure(_ scope: ViewerInputSendScope) {
+        if activeInputSendScope == scope {
+            activeInputSendScope = nil
+        }
+        guard sessionLifetimeID == scope.sessionID,
+              let observedSession = session else { return }
+        Task { @MainActor [weak self] in
+            guard let self,
+                  self.session === observedSession,
+                  self.sessionLifetimeID == scope.sessionID else { return }
+            let snapshot = await observedSession.snapshot()
+            guard self.session === observedSession,
+                  self.sessionLifetimeID == scope.sessionID else { return }
+            guard self.synchronizeAuthorization(for: observedSession, snapshot: snapshot) else { return }
+            guard snapshot.authorizationGeneration == scope.authorizationGeneration,
+                  snapshot.authorized,
+                  snapshot.authorizedWindowGeneration == scope.windowGeneration else {
+                await self.refreshInputSurface(for: observedSession)
+                return
+            }
+            await self.resetSession(expectedSession: observedSession)
+            self.scheduleReconnect()
+        }
+    }
+
     private func toggleClipboard() {
         guard let messageLoop else {
             setStatus("Text clipboard is unavailable until the session is authorized")
@@ -1158,7 +1431,10 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func retryPairing() {
-        guard !isShuttingDown, session == nil, reconnectTask == nil else { return }
+        guard !isShuttingDown,
+              session == nil,
+              connectionAttemptID == nil,
+              reconnectTask == nil else { return }
         guard lastDiscoveredService != nil else {
             setStatus("No Host is currently discovered")
             return
@@ -1185,6 +1461,10 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         selectedServiceIdentifier = nil
         lastDiscoveredService = nil
         pairingRetryRequired = false
+        connectionAttemptID = nil
+        cancelReconnect()
+        updateInputSendScope(nil)
+        advancePresentationLifetime(resetDecoder: true)
         contentView?.clearHostSelection()
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1206,9 +1486,10 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func disconnect() async {
         isShuttingDown = true
-        reconnectTask?.cancel()
-        reconnectTask = nil
+        connectionAttemptID = nil
+        cancelReconnect()
         discovery.cancel()
+        await resetSession()
         if let discoveryStateTask {
             discoveryStateTask.cancel()
             await discoveryStateTask.value
@@ -1219,25 +1500,36 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             await discoveryTask.value
             self.discoveryTask = nil
         }
-        await resetSession()
     }
 
-    private func resetSession(cancelMonitor: Bool = true) async {
+    private func resetSession(
+        expectedSession: SessionCoordinator? = nil,
+        cancelMonitor: Bool = true,
+        retryCleanupOwnership: ViewerRetryCleanupOwnership? = nil
+    ) async {
+        if let expectedSession, session !== expectedSession { return }
+        guard let cleanupPresentation = ViewerSessionCleanupPresentation.resolve(
+            retryOwnership: retryCleanupOwnership,
+            sessionID: sessionLifetimeID,
+            attemptID: connectionAttemptID,
+            reconnectID: reconnectTaskID
+        ) else { return }
+        if retryCleanupOwnership != nil {
+            guard !isShuttingDown, !pairingRetryRequired else { return }
+        }
         if cancelMonitor {
             sessionMonitorTask?.cancel()
             sessionMonitorTask = nil
         }
-        inputSendTail?.cancel()
-        inputSendTail = nil
-        if let messageLoop {
-            await messageLoop.stop()
-        }
-        messageLoop = nil
-        if let session {
-            await session.stop(reason: .normal)
-        }
+        connectionAttemptID = nil
+        let previousSession = session
+        let previousMessageLoop = messageLoop
         session = nil
+        sessionLifetimeID = nil
+        messageLoop = nil
         inputTransport = nil
+        authorizationFingerprint = nil
+        updateInputSendScope(nil)
         selectedGeneration = nil
         selectedWindowIdentifier = nil
         pendingWindowSelection = nil
@@ -1253,15 +1545,24 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hostInputFocusEligible = false
         hostInputStatusGeneration = nil
         streamGenerationGate.revoke()
-        decoder.reset()
+        advancePresentationLifetime(resetDecoder: true)
         streamDimensions = .zero
         contentView?.clearWindowOptions()
         contentView?.updateStream(size: .zero, readiness: .awaitingAuthentication)
         contentView?.setPeerName(nil)
         contentView?.setConnectionLatency(nil)
         contentView?.updateClipboard(status: nil, available: false)
-        contentView?.setConnectionState(.disconnected)
-        contentView?.setHostSelectionEnabled(true)
+        // Set the cleanup UI before suspension; never restore it after old
+        // teardown, which may outlive a replacement session or manual attempt.
+        contentView?.setConnectionState(cleanupPresentation == .reconnecting ? .reconnecting : .disconnected)
+        contentView?.setHostSelectionEnabled(cleanupPresentation.hostSelectionEnabled)
+
+        if let previousMessageLoop {
+            await previousMessageLoop.stop()
+        }
+        if let previousSession {
+            await previousSession.stop(reason: .normal)
+        }
     }
 }
 

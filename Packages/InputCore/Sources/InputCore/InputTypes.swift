@@ -363,6 +363,8 @@ public struct InputEventNormalizer: Sendable {
     private var nextSequence: UInt64 = 0
     private var activeButtons: Set<UInt8> = []
     private var lastValidCoordinate: NormalizedInputCoordinate?
+    private var pendingScrollDeltaX = 0.0
+    private var pendingScrollDeltaY = 0.0
 
     public init(
         contentRect: InputContentRect,
@@ -381,6 +383,8 @@ public struct InputEventNormalizer: Sendable {
         if readiness != self.readiness {
             activeButtons.removeAll(keepingCapacity: false)
             lastValidCoordinate = nil
+            pendingScrollDeltaX = 0
+            pendingScrollDeltaY = 0
         }
         self.contentRect = contentRect
         self.readiness = readiness
@@ -442,14 +446,24 @@ public struct InputEventNormalizer: Sendable {
               abs(deltaY) <= limits.maxScrollDelta else {
             throw InputCoreError.invalidEvent
         }
+        let (normalizedDeltaX, nextPendingDeltaX) = try quantizedScrollDelta(
+            deltaX,
+            pendingDelta: pendingScrollDeltaX
+        )
+        let (normalizedDeltaY, nextPendingDeltaY) = try quantizedScrollDelta(
+            deltaY,
+            pendingDelta: pendingScrollDeltaY
+        )
         let record = try makeRecord(
             timestampNanoseconds: timestampNanoseconds,
             kind: .scroll,
             x: coordinate.x,
             y: coordinate.y,
-            deltaX: try boundedInt32(deltaX),
-            deltaY: try boundedInt32(deltaY)
+            deltaX: normalizedDeltaX,
+            deltaY: normalizedDeltaY
         )
+        pendingScrollDeltaX = nextPendingDeltaX
+        pendingScrollDeltaY = nextPendingDeltaY
         lastValidCoordinate = coordinate
         return record
     }
@@ -542,6 +556,25 @@ public struct InputEventNormalizer: Sendable {
             throw InputCoreError.invalidEvent
         }
         return Int32(rounded)
+    }
+
+    private func quantizedScrollDelta(
+        _ delta: Double,
+        pendingDelta: Double
+    ) throws -> (value: Int32, pendingDelta: Double) {
+        let accumulated = pendingDelta + delta
+        let rounded = accumulated.rounded()
+        if rounded.isFinite,
+           rounded >= Double(Int32.min),
+           rounded <= Double(Int32.max),
+           abs(rounded) <= limits.maxScrollDelta {
+            return (Int32(rounded), accumulated - rounded)
+        }
+
+        // Preserve the pre-accumulator behavior at the configured event or
+        // Int32 boundary instead of letting fractional carry make an
+        // otherwise valid individual scroll event fail.
+        return (try boundedInt32(delta), 0)
     }
 }
 
