@@ -5,6 +5,7 @@ import TransportCore
 enum ViewerInputTransportError: Error, Equatable, Sendable, CustomStringConvertible {
     case inputNotReady
     case capabilityUnavailable
+    case inputSourceRequestNotAdmitted
 
     var description: String {
         switch self {
@@ -12,6 +13,8 @@ enum ViewerInputTransportError: Error, Equatable, Sendable, CustomStringConverti
             return "authenticated input is not ready"
         case .capabilityUnavailable:
             return "the negotiated session does not authorize this input kind"
+        case .inputSourceRequestNotAdmitted:
+            return "the input-source request is no longer current"
         }
     }
 }
@@ -76,6 +79,27 @@ final class ViewerInputTransport {
             try await session.sendInput(message, using: admission)
         } catch SessionError.authorizationChanged, SessionError.reconnectRequired {
             throw ViewerInputTransportError.inputNotReady
+        }
+    }
+
+    func sendInputSourceSelection(
+        _ request: ViewerInputSourceSyncRequest,
+        localAdmission: @escaping @MainActor @Sendable () -> Bool
+    ) async throws {
+        let message = InputSourceSelectionMessage(
+            windowGeneration: request.scope.windowGeneration,
+            requestID: request.requestID,
+            kind: request.source.kind == .english ? .english : .chinese,
+            sourceIdentifier: request.source.identifier
+        )
+        do {
+            try await session.send(
+                .inputSourceSelection(message),
+                expectedAuthorizationGeneration: request.scope.authorizationGeneration,
+                localAdmission: localAdmission
+            )
+        } catch SessionError.authorizationChanged, SessionError.reconnectRequired {
+            throw ViewerInputTransportError.inputSourceRequestNotAdmitted
         }
     }
 

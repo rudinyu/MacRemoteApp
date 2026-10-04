@@ -153,6 +153,17 @@ Manual OS evidence should include one mismatched-layout check (for example a
 US Viewer with a Dvorak or JIS Host input source), one dead-key sequence, and
 one Host IME composition in the disposable test application.
 
+The approved M10 extension in
+[ADR-0007](decisions/0007-m10-input-source-following.md) can select the enabled
+Host input source before the physical-key sequence starts. This uses public
+TIS source selection behind a fakeable `InputCore` policy boundary, not text
+insertion. The same target, focus, permission, console, and secure-input
+conditions apply immediately before selection, inside the session admission
+and window-replacement fences. Chinese requires the matching enabled mode;
+EN on an already-English Host is unchanged. Real source selection/composition
+still requires physical acceptance, and automated tests must not change the
+desktop's actual source.
+
 ## Verification
 
 `InputCoreTests` cover:

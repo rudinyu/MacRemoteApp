@@ -433,6 +433,31 @@ in [Input safety](SECURITY.md#input-safety).
 
 ## Viewer architecture
 
+### Optional Viewer-led input-source synchronization
+
+The approved M10 extension in
+[ADR-0007](decisions/0007-m10-input-source-following.md) keeps physical key
+transport and Host-side IME composition. `RemoteProtocol` defines a bounded
+source-selection request and acknowledgement; `TransportCore` owns their
+direction, negotiated capability, selected-window, authorization-epoch, and
+protected-queue gates. `InputCore` owns source classification, enabled-source
+selection policy, and a public macOS TIS adapter behind deterministic fakes.
+The app layers own actual-source observation and focused-surface lifetime.
+
+Host selection uses the same selected-window replacement barrier as event
+injection and a non-reentrant session-admission operation. It performs fresh
+keyboard eligibility checks at the OS-selection boundary. Viewer keyboard
+delivery waits for the acknowledgement matching its session/epoch/window/
+request; mouse delivery need not wait. A source change supersedes pending old
+work. Focus loss, Settings navigation, window replacement, revocation, and
+reconnect invalidate the gate, including late acknowledgements. Reentry
+requires a fresh request rather than relying on a stale synchronized label.
+
+The selected source is observed directly; the underlying keyboard layout is
+not treated as the active IME. No `NSTextInputClient` composition or Unicode
+event insertion is introduced. Older peers use the existing manual Host IME
+path and never receive the optional new messages.
+
 ### Viewer UI and session state
 
 The Viewer owns discovery results, pairing UX, session state, stream status,

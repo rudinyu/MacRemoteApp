@@ -18,7 +18,8 @@ extension Envelope {
     var isProtectedSessionMessage: Bool {
         switch messageType {
         case .windowList, .windowSelection, .streamConfig, .videoConfig,
-             .videoFrame, .inputEvent, .clipboardOffer, .clipboardText,
+             .videoFrame, .inputEvent, .inputSourceSelection,
+             .inputSourceAcknowledgement, .clipboardOffer, .clipboardText,
              .clipboardAcknowledgement, .keyframeRequest, .receiverReport:
             return true
         default:

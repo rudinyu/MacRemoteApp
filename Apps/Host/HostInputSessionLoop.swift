@@ -168,6 +168,45 @@ final class HostInputSessionLoop: @unchecked Sendable {
                     await session.discardPendingInputMessages()
                     handler.reset()
                 }
+                if case let .inputSourceSelection(selection) = message {
+                    guard await admissionGate.beginInput() else { continue }
+                    let admitted: InputSourceSelectionAdmissionResult<InputSourceSelectionOutcome>
+                    do {
+                        admitted = try await session.withIncomingInputSourceSelectionAdmission(
+                            for: selection
+                        ) {
+                            handler.synchronizeInputSource(
+                                descriptor: InputSourceDescriptor(
+                                    identifier: selection.sourceIdentifier,
+                                    kind: selection.kind == .english ? .english : .chinese
+                                ),
+                                windowGeneration: selection.windowGeneration
+                            )
+                        }
+                    } catch {
+                        await admissionGate.endInput()
+                        continue
+                    }
+                    // The OS selection is synchronous and complete. Do not
+                    // keep window replacement waiting on network backpressure;
+                    // the captured epoch fences the ACK independently.
+                    await admissionGate.endInput()
+                    let acknowledgement = InputSourceAcknowledgementMessage(
+                        windowGeneration: admitted.windowGeneration,
+                        requestID: admitted.requestID,
+                        status: Self.wireStatus(for: admitted.value)
+                    )
+                    do {
+                        try await session.send(
+                            .inputSourceAcknowledgement(acknowledgement),
+                            expectedAuthorizationGeneration: admitted.authorizationGeneration
+                        )
+                    } catch {
+                        // A stale receive lease or an authorization transition
+                        // suppresses the ACK. The session remains available.
+                    }
+                    continue
+                }
                 guard case let .inputEvent(input) = message else {
                     await onNonInputMessage(message)
                     continue
@@ -342,5 +381,16 @@ final class HostInputSessionLoop: @unchecked Sendable {
             }
         }
         return false
+    }
+
+    private static func wireStatus(
+        for outcome: InputSourceSelectionOutcome
+    ) -> InputSourceSelectionStatus {
+        switch outcome {
+        case .applied: .applied
+        case .unavailable: .unavailable
+        case .denied: .denied
+        case .failed: .failed
+        }
     }
 }

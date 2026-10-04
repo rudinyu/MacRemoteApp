@@ -366,6 +366,21 @@ final class RemoteProtocolTests: XCTestCase {
                     deltaY: 4
                 )
             ),
+            .inputSourceSelection(
+                InputSourceSelectionMessage(
+                    windowGeneration: 9,
+                    requestID: 0x0102_0304_0506_0708,
+                    kind: .english,
+                    sourceIdentifier: "ABC"
+                )
+            ),
+            .inputSourceAcknowledgement(
+                InputSourceAcknowledgementMessage(
+                    windowGeneration: 9,
+                    requestID: 0x0102_0304_0506_0708,
+                    status: .applied
+                )
+            ),
             .clipboardOffer(
                 ClipboardOfferMessage(generation: 12, origin: .viewer, textByteCount: 5, enabled: true)
             ),
@@ -413,6 +428,8 @@ final class RemoteProtocolTests: XCTestCase {
             .videoConfig: "010101000000080000000000000009020100000003010203",
             .videoFrame: "010101000000080000000000000009020100000008000000000000006403010000000800000000000000650401000000040000078005010000000400000438060100000001010701000000050000000165",
             .inputEvent: "01010100000001030201000000080000000000000009030000000002014004000000000200B4070000000004FFFFFFFE08000000000400000004",
+            .inputSourceSelection: "010101000000080000000000000009020100000008010203040506070803010000000101040100000003414243",
+            .inputSourceAcknowledgement: "010101000000080000000000000009020100000008010203040506070803010000000101",
             .clipboardOffer: "01010100000008000000000000000C020100000001020301000000040000000504010000000101",
             .clipboardText: "01010100000008000000000000000C02010000000568656C6C6F",
             .clipboardAcknowledgement: "01010100000008000000000000000C020100000001020301000000010104010000000101",
@@ -546,6 +563,10 @@ final class RemoteProtocolTests: XCTestCase {
         XCTAssertFalse(ProtocolVersion(major: 2, minor: 1).isCompatible())
         XCTAssertEqual(MessageType(rawValue: 0x7FFF), .unknown(0x7FFF))
         XCTAssertEqual(Capability(rawValue: 0x7FFF), .unknown(0x7FFF))
+        XCTAssertEqual(MessageType(rawValue: 0x0019), .inputSourceSelection)
+        XCTAssertEqual(MessageType(rawValue: 0x001A), .inputSourceAcknowledgement)
+        XCTAssertEqual(Capability(rawValue: 0x0009), .inputSourceSync)
+        XCTAssertEqual(ProtocolVersion.current, ProtocolVersion(major: 2, minor: 0))
 
         let knownMandatory = CapabilitiesMessage(
             capabilities: [.h264Video],
@@ -574,6 +595,71 @@ final class RemoteProtocolTests: XCTestCase {
 
         assertProtocolError(.invalidLimits) {
             _ = try FrameParser(limits: ProtocolLimits(maxPayloadLength: 1, maxControlPayloadLength: 2))
+        }
+    }
+
+    func testInputSourceMessagesEnforceBoundsAndRejectControlCharacters() throws {
+        let validMaximumIdentifier = String(repeating: "a", count: 256)
+        let selection = InputSourceSelectionMessage(
+            windowGeneration: 1,
+            requestID: 1,
+            kind: .chinese,
+            sourceIdentifier: validMaximumIdentifier
+        )
+        XCTAssertLessThanOrEqual(try selection.encoded().count, InputSourceSelectionMessage.maximumPayloadLength)
+        XCTAssertEqual(
+            try InputSourceSelectionMessage.decode(selection.encoded()),
+            selection
+        )
+
+        for invalidIdentifier in [String(repeating: "a", count: 257), "", "line\nbreak", "nul\0byte", "\u{0085}"] {
+            let invalid = InputSourceSelectionMessage(
+                windowGeneration: 1,
+                requestID: 1,
+                kind: .english,
+                sourceIdentifier: invalidIdentifier
+            )
+            assertProtocolError(.invalidFieldValue(message: .inputSourceSelection, fieldID: 4)) {
+                _ = try invalid.encoded()
+            }
+        }
+
+        let zeroGeneration = InputSourceSelectionMessage(
+            windowGeneration: 0,
+            requestID: 1,
+            kind: .english,
+            sourceIdentifier: "com.apple.keylayout.US"
+        )
+        assertProtocolError(.invalidFieldValue(message: .inputSourceSelection, fieldID: 1)) {
+            _ = try zeroGeneration.encoded()
+        }
+        let zeroRequest = InputSourceAcknowledgementMessage(
+            windowGeneration: 1,
+            requestID: 0,
+            status: .failed
+        )
+        assertProtocolError(.invalidFieldValue(message: .inputSourceAcknowledgement, fieldID: 2)) {
+            _ = try zeroRequest.encoded()
+        }
+
+        assertProtocolError(.controlPayloadTooLarge(actual: 513, maximum: 512)) {
+            _ = try InputSourceAcknowledgementMessage.decode(Data(repeating: 0, count: 513))
+        }
+
+        let narrowLimits = ProtocolLimits(
+            maxPayloadLength: 1_024,
+            maxControlPayloadLength: 32,
+            maxClipboardTextBytes: 11,
+            maxFieldLength: 1_024,
+            maxIdentifierBytes: 256
+        )
+        assertProtocolError(.controlPayloadTooLarge(actual: 45, maximum: 32)) {
+            _ = try InputSourceSelectionMessage(
+                windowGeneration: 1,
+                requestID: 1,
+                kind: .english,
+                sourceIdentifier: "ABC"
+            ).encoded(using: narrowLimits)
         }
     }
 

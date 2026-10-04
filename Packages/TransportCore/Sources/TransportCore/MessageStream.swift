@@ -201,10 +201,12 @@ internal final class MessageStreamStorage: @unchecked Sendable {
     func removePendingInputMessages() {
         lock.withLock {
             queue.removeAll { message in
-                if case .inputEvent = message {
+                switch message {
+                case .inputEvent, .inputSourceSelection, .inputSourceAcknowledgement:
                     return true
+                default:
+                    return false
                 }
-                return false
             }
         }
     }
@@ -270,7 +272,8 @@ private extension MessagePayload {
     var isProtectedSessionMessage: Bool {
         switch self {
         case .windowList, .windowSelection, .streamConfig, .videoConfig,
-             .videoFrame, .inputEvent, .clipboardOffer, .clipboardText,
+             .videoFrame, .inputEvent, .inputSourceSelection,
+             .inputSourceAcknowledgement, .clipboardOffer, .clipboardText,
              .clipboardAcknowledgement, .keyframeRequest, .receiverReport:
             return true
         default:

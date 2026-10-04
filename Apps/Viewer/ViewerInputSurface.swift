@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import InputCore
 
 struct ViewerInputCapabilities: Equatable {
@@ -34,6 +35,8 @@ final class ViewerInputSurface: NSView {
     private var inputState = InputStateTracker()
     private var modifierKeyTracker = ModifierKeyTracker()
     private var admittedModifierKeyCodes: Set<UInt16> = []
+    private var locallyConsumedSourceKeys: Set<UInt16> = []
+    private var isRemoteSurfaceFocused = false
     private(set) var inputCapabilities: ViewerInputCapabilities
 
     private(set) var inputReadiness: InputReadiness {
@@ -46,6 +49,9 @@ final class ViewerInputSurface: NSView {
 
     var onInputEvent: (@MainActor (InputEventRecord) -> Void)?
     var onInputRejected: (@MainActor (InputCoreError) -> Void)?
+    var onRemoteFocusChange: (@MainActor (Bool) -> Void)?
+    var onJISEisuKey: (@MainActor () -> Bool)?
+    var onJISKanaKey: (@MainActor () -> Bool)?
 
     var inputReady: Bool {
         inputReadiness.isReady &&
@@ -127,6 +133,7 @@ final class ViewerInputSurface: NSView {
             self.windowBecomeKeyObserver = nil
         }
         releasePressedState()
+        updateRemoteSurfaceFocus(false)
         super.viewWillMove(toWindow: newWindow)
     }
 
@@ -140,6 +147,7 @@ final class ViewerInputSurface: NSView {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.releasePressedState()
+                self?.updateRemoteSurfaceFocus(false)
             }
         }
         windowBecomeKeyObserver = NotificationCenter.default.addObserver(
@@ -149,10 +157,12 @@ final class ViewerInputSurface: NSView {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.beginModifierResynchronization()
+                self?.updateRemoteSurfaceFocus(self?.window?.firstResponder === self)
             }
         }
         if window.isKeyWindow {
             beginModifierResynchronization()
+            updateRemoteSurfaceFocus(window.firstResponder === self)
         }
     }
 
@@ -160,6 +170,7 @@ final class ViewerInputSurface: NSView {
         let resigned = super.resignFirstResponder()
         if resigned {
             releasePressedState()
+            updateRemoteSurfaceFocus(false)
         }
         return resigned
     }
@@ -168,6 +179,7 @@ final class ViewerInputSurface: NSView {
         let became = super.becomeFirstResponder()
         if became {
             beginModifierResynchronization()
+            updateRemoteSurfaceFocus(window?.isKeyWindow == true)
         }
         return became
     }
@@ -275,11 +287,22 @@ final class ViewerInputSurface: NSView {
 
     override func keyDown(with event: NSEvent) {
         guard inputCapabilities.keyboardInputEnabled else { return }
+        if event.keyCode == UInt16(kVK_JIS_Eisu), onJISEisuKey?() == true {
+            locallyConsumedSourceKeys.insert(event.keyCode)
+            return
+        }
+        if event.keyCode == UInt16(kVK_JIS_Kana) {
+            if onJISKanaKey?() == true {
+                locallyConsumedSourceKeys.insert(event.keyCode)
+                return
+            }
+        }
         emitKey(event, pressed: true)
     }
 
     override func keyUp(with event: NSEvent) {
         guard inputCapabilities.keyboardInputEnabled else { return }
+        if locallyConsumedSourceKeys.remove(event.keyCode) != nil { return }
         emitKey(event, pressed: false)
     }
 
@@ -385,6 +408,32 @@ final class ViewerInputSurface: NSView {
         }
     }
 
+    /// Builds wire cleanup records selected by the send gate's Host-admitted
+    /// held-key ledger. These do not change physical input state or consume its
+    /// reserved release admission; the physical key-up/focus cleanup owns both.
+    func makeOrderedKeyReleases(for keyCodes: [UInt16]) -> [InputEventRecord] {
+        let ordinary = keyCodes.filter { modifierFlag(for: $0) == nil }.sorted()
+        let modifiers = keyCodes.filter { modifierFlag(for: $0) != nil }.sorted()
+        return (ordinary + modifiers).compactMap { keyCode in
+            do {
+                let timestamp = now()
+                let record = try normalizer.key(
+                    keyCode: keyCode,
+                    modifiers: 0,
+                    pressed: false,
+                    timestampNanoseconds: timestamp
+                )
+                return record
+            } catch let error as InputCoreError {
+                onInputRejected?(error)
+                return nil
+            } catch {
+                onInputRejected?(.invalidEvent)
+                return nil
+            }
+        }
+    }
+
     @discardableResult
     private func emit(
         priority: InputEventPriority = .regular,
@@ -476,6 +525,12 @@ final class ViewerInputSurface: NSView {
         if flags.intersection(Self.resynchronizationModifierFlags).isEmpty {
             _ = modifierKeyTracker.observeAggregateState(isPressed: false)
         }
+    }
+
+    private func updateRemoteSurfaceFocus(_ focused: Bool) {
+        guard focused != isRemoteSurfaceFocused else { return }
+        isRemoteSurfaceFocused = focused
+        onRemoteFocusChange?(focused)
     }
 
     private func updateStateReservation(for transition: InputStateTransition) {

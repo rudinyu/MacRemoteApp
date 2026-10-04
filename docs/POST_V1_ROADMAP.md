@@ -74,11 +74,14 @@ V1 defect.
 
 ### Sketch of option (b) if chosen
 
-- Capability: next free identifier (`0x0007`, `cursorShape`), always
+- Capability: allocate a free identifier at the P0.5 decision gate
+  (`0x000A` is currently next after the approved M10 input-source capability), always
   optional and never mandatory. A peer that did not negotiate it never receives
   `CursorState`. Receiving it without negotiation is a protocol violation that
   fails closed like any other ungated protected message.
-- Message: next free message type (`0x0017`, `CursorState`). Host → Viewer on
+- Message: allocate a free message type at the P0.5 decision gate
+  (`0x001B` is currently next; these planning values are not reservations).
+  `CursorState` is Host → Viewer on
   the control channel. Fields: `windowGeneration` (u64, mandatory) and
   `cursorKind` (u8, mandatory). Fixed size, so no variable-length payload.
 - Kinds: a closed enum mapped to public `NSCursor` standard cursors (arrow,

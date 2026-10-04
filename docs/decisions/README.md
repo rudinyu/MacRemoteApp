@@ -15,3 +15,4 @@ evidence gaps live in [the status page](../STATUS.md).
 | [ADR-0004](0004-m5-viewer-input-binding.md) | M5 | Viewer coordinate, ordinal, rate, and transport binding | [Protocol](../PROTOCOL.md#input-contract) |
 | [ADR-0005](0005-m6-host-input-binding.md) | M6 | Host input admission, mapping, and cleanup binding | [Protocol](../PROTOCOL.md#input-contract) |
 | [ADR-0006](0006-m8-transport-baseline-and-benchmark.md) | M8 | Transport baseline, clock-sync probes, video queue | [Architecture](../ARCHITECTURE.md#architecture-decisions-to-record-during-implementation) |
+| [ADR-0007](0007-m10-input-source-following.md) | M10 | Viewer-led Chinese/English input-source synchronization | [Protocol](../PROTOCOL.md#viewer-led-input-source-synchronization-m10) |

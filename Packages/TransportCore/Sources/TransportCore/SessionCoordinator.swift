@@ -164,9 +164,21 @@ public struct SessionInputAdmissionToken: Equatable, Sendable {
     fileprivate let capability: Capability
 }
 
+/// The result of a synchronous Host input-source selection admission. The
+/// authorization and reconnect generations are captured atomically with the
+/// operation and can fence its acknowledgement send.
+public struct InputSourceSelectionAdmissionResult<Value: Sendable>: Sendable {
+    public let value: Value
+    public let authorizationGeneration: UInt64
+    public let reconnectGeneration: UInt64
+    public let windowGeneration: UInt64
+    public let requestID: UInt64
+}
+
 public actor SessionCoordinator {
     private static let incomingControlMessageCapacity = 64
     private static let incomingMediaMessageCapacity = 3
+    private static let inputSourceSelectionAdmissionCapacity = incomingControlMessageCapacity
     private static let maximumClockSyncProbes = 64
     /// Minimum spacing between Viewer keyframe requests. One forced keyframe
     /// recovers every gap that occurred before it, so closer requests only
@@ -180,6 +192,8 @@ public actor SessionCoordinator {
         .videoConfig,
         .videoFrame,
         .inputEvent,
+        .inputSourceSelection,
+        .inputSourceAcknowledgement,
         .clipboardOffer,
         .clipboardText,
         .clipboardAcknowledgement,
@@ -192,6 +206,7 @@ public actor SessionCoordinator {
         .h264Video,
         .keyframeRequest,
         .receiverReport,
+        .inputSourceSync,
         .mouseInput,
         .keyboardInput
     ]
@@ -210,6 +225,7 @@ public actor SessionCoordinator {
         .clipboardOffer,
         .clipboardText,
         .clipboardAcknowledgement,
+        .inputSourceAcknowledgement,
         .ping,
         .pong,
         .sessionState,
@@ -225,6 +241,7 @@ public actor SessionCoordinator {
         .pairingConfirmation,
         .windowSelection,
         .inputEvent,
+        .inputSourceSelection,
         .keyframeRequest,
         .receiverReport,
         .clipboardOffer,
@@ -245,6 +262,7 @@ public actor SessionCoordinator {
         .pairingConfirmation,
         .windowSelection,
         .inputEvent,
+        .inputSourceSelection,
         .keyframeRequest,
         .receiverReport,
         .clipboardOffer,
@@ -268,6 +286,7 @@ public actor SessionCoordinator {
         .streamConfig,
         .videoConfig,
         .videoFrame,
+        .inputSourceAcknowledgement,
         .clipboardOffer,
         .clipboardText,
         .clipboardAcknowledgement,
@@ -277,6 +296,25 @@ public actor SessionCoordinator {
         .error,
         .close
     ]
+
+    private struct InputSourceSelectionAdmissionScope: Equatable {
+        let receiveGeneration: UInt64
+        let reconnectGeneration: UInt64
+        let authorizationGeneration: UInt64
+        let discardGeneration: UInt64
+        let windowGeneration: UInt64
+    }
+
+    private struct PendingInputSourceSelectionAdmission {
+        let selection: InputSourceSelectionMessage
+        let scope: InputSourceSelectionAdmissionScope
+    }
+
+    private struct InputSourceSelectionRequestFence {
+        let receiveGeneration: UInt64
+        let reconnectGeneration: UInt64
+        let requestID: UInt64
+    }
 
     private var configuration: SessionConfiguration
     private var transport: any SessionTransport
@@ -293,6 +331,9 @@ public actor SessionCoordinator {
     private var authorized = false
     private var authorizedWindowGeneration: UInt64?
     private var authorizedCapabilities: Set<Capability> = []
+    private var pendingInputSourceSelectionAdmissions: [PendingInputSourceSelectionAdmission] = []
+    private var lastInputSourceSelectionRequest: InputSourceSelectionRequestFence?
+    private var inputSourceSelectionDiscardGeneration: UInt64 = 0
     private var lastKeyframeRequestNanoseconds: UInt64?
     private var congestionMonitor = ReceiverCongestionMonitor()
     private var helloSent = false
@@ -410,6 +451,8 @@ public actor SessionCoordinator {
     /// session's wire sequence state.
     public func discardPendingInputMessages() {
         incomingMessageStorage.removePendingInputMessages()
+        pendingInputSourceSelectionAdmissions.removeAll(keepingCapacity: true)
+        inputSourceSelectionDiscardGeneration &+= 1
     }
 
     public func start() async throws {
@@ -902,6 +945,66 @@ public actor SessionCoordinator {
         return try operation()
     }
 
+    /// Runs one actually received Host-side input-source selection while the
+    /// session actor remains non-reentrant. The receive path creates a bounded
+    /// lease with the authorization scope that was current when the message
+    /// arrived. Reauthorization, even for the same window, invalidates that
+    /// lease before an app callback can use it. A request ID is accepted only
+    /// once and in increasing order within the current receive/reconnect
+    /// session, including across same-session authorization, window, and
+    /// input-discard invalidations. The ID is consumed before
+    /// invoking `operation`, including when the platform operation fails.
+    ///
+    /// Use the returned authorization generation when sending the matching
+    /// acknowledgement; a later authorization transition then rejects that
+    /// send instead of attaching the result to a newer epoch.
+    public func withIncomingInputSourceSelectionAdmission<T: Sendable>(
+        for selection: InputSourceSelectionMessage,
+        operation: @Sendable () throws -> T
+    ) throws -> InputSourceSelectionAdmissionResult<T> {
+        let payload = MessagePayload.inputSourceSelection(selection)
+        try validateMessageDirection(for: payload.messageType, incoming: true)
+
+        guard let leaseIndex = pendingInputSourceSelectionAdmissions.firstIndex(where: {
+            $0.selection == selection
+        }) else {
+            throw SessionError.authorizationChanged
+        }
+        let lease = pendingInputSourceSelectionAdmissions.remove(at: leaseIndex)
+        let scope = InputSourceSelectionAdmissionScope(
+            receiveGeneration: receiveGeneration,
+            reconnectGeneration: reconnectGeneration,
+            authorizationGeneration: authorizationGeneration,
+            discardGeneration: inputSourceSelectionDiscardGeneration,
+            windowGeneration: selection.windowGeneration
+        )
+        guard lease.scope == scope else {
+            throw SessionError.authorizationChanged
+        }
+        try validateAuthorization(for: payload)
+        _ = try selection.encoded(using: effectiveProtocolLimits())
+
+        if let previous = lastInputSourceSelectionRequest,
+           previous.receiveGeneration == scope.receiveGeneration,
+           previous.reconnectGeneration == scope.reconnectGeneration,
+           selection.requestID <= previous.requestID {
+            throw SessionError.replayDetected
+        }
+        lastInputSourceSelectionRequest = InputSourceSelectionRequestFence(
+            receiveGeneration: scope.receiveGeneration,
+            reconnectGeneration: scope.reconnectGeneration,
+            requestID: selection.requestID
+        )
+        let value = try operation()
+        return InputSourceSelectionAdmissionResult(
+            value: value,
+            authorizationGeneration: scope.authorizationGeneration,
+            reconnectGeneration: scope.reconnectGeneration,
+            windowGeneration: scope.windowGeneration,
+            requestID: selection.requestID
+        )
+    }
+
     /// Issues an opaque admission for a Viewer input message.  The caller may
     /// do local encoding or UI work after this returns, but the token is
     /// single-epoch: a reconnect or authorization transition invalidates it.
@@ -1331,6 +1434,7 @@ public actor SessionCoordinator {
         ) else { return }
         guard state != .stopping, state != .failed else { return }
         let operationAuthorizationGeneration = authorizationGeneration
+        let inputSourceSelectionDiscardGenerationAtReceipt = inputSourceSelectionDiscardGeneration
         do {
             try validateIncomingSequence(envelope)
             if case .unknown = envelope.messageType,
@@ -1350,6 +1454,8 @@ public actor SessionCoordinator {
                 message,
                 generation: generation,
                 reconnectGeneration: sessionGeneration,
+                authorizationGenerationAtReceipt: operationAuthorizationGeneration,
+                inputSourceSelectionDiscardGenerationAtReceipt: inputSourceSelectionDiscardGenerationAtReceipt,
                 senderTimestampNanoseconds: envelope.timestamp,
                 receivedTimestampNanoseconds: receivedTimestampNanoseconds
             )
@@ -1384,6 +1490,8 @@ public actor SessionCoordinator {
         _ message: MessagePayload,
         generation: UInt64,
         reconnectGeneration sessionGeneration: UInt64,
+        authorizationGenerationAtReceipt: UInt64,
+        inputSourceSelectionDiscardGenerationAtReceipt: UInt64,
         senderTimestampNanoseconds: UInt64,
         receivedTimestampNanoseconds: UInt64
     ) async throws {
@@ -1607,6 +1715,24 @@ public actor SessionCoordinator {
                 generation: generation,
                 reconnectGeneration: sessionGeneration,
                 authorizationGeneration: operationAuthorizationGeneration
+            )
+        case let .inputSourceSelection(selection):
+            guard authorizationGenerationAtReceipt == authorizationGeneration else {
+                throw SessionError.authorizationChanged
+            }
+            guard inputSourceSelectionDiscardGenerationAtReceipt == inputSourceSelectionDiscardGeneration else {
+                return
+            }
+            let scope = InputSourceSelectionAdmissionScope(
+                receiveGeneration: generation,
+                reconnectGeneration: sessionGeneration,
+                authorizationGeneration: authorizationGenerationAtReceipt,
+                discardGeneration: inputSourceSelectionDiscardGenerationAtReceipt,
+                windowGeneration: selection.windowGeneration
+            )
+            try publish(
+                message,
+                inputSourceSelectionScope: scope
             )
         case .error:
             try publish(message)
@@ -1979,6 +2105,7 @@ public actor SessionCoordinator {
         authorized = false
         authorizedWindowGeneration = nil
         authorizedCapabilities.removeAll()
+        pendingInputSourceSelectionAdmissions.removeAll(keepingCapacity: true)
         incomingMessageStorage.removeProtectedMessages()
         if state == .windowSelectionAuthorized {
             state = .capabilitiesNegotiated
@@ -2002,6 +2129,8 @@ public actor SessionCoordinator {
             case .pointerMove, .pointerButton, .scroll, .focusIntent:
                 return [.mouseInput]
             }
+        case .inputSourceSelection, .inputSourceAcknowledgement:
+            return [.keyboardInput, .inputSourceSync]
         case .clipboardOffer, .clipboardText, .clipboardAcknowledgement:
             return [.textClipboard]
         default:
@@ -2025,6 +2154,10 @@ public actor SessionCoordinator {
             return report.generation
         case let .inputEvent(input):
             return input.windowGeneration
+        case let .inputSourceSelection(selection):
+            return selection.windowGeneration
+        case let .inputSourceAcknowledgement(acknowledgement):
+            return acknowledgement.windowGeneration
         default:
             return nil
         }
@@ -2114,9 +2247,27 @@ public actor SessionCoordinator {
         return configuration.role == .host ? "MacRemoteApp Viewer" : "MacRemoteApp Host"
     }
 
-    private func publish(_ message: MessagePayload) throws {
+    private func publish(
+        _ message: MessagePayload,
+        inputSourceSelectionScope: InputSourceSelectionAdmissionScope? = nil
+    ) throws {
+        if inputSourceSelectionScope != nil {
+            guard configuration.role == .host,
+                  pendingInputSourceSelectionAdmissions.count < Self.inputSourceSelectionAdmissionCapacity else {
+                throw SessionError.incomingMessageBackpressure(.control)
+            }
+        }
         do {
             let result = try incomingMessageStorage.yield(message)
+            if let inputSourceSelectionScope,
+               case let .inputSourceSelection(selection) = message {
+                pendingInputSourceSelectionAdmissions.append(
+                    PendingInputSourceSelectionAdmission(
+                        selection: selection,
+                        scope: inputSourceSelectionScope
+                    )
+                )
+            }
             if result == .replacedMedia {
                 congestionMonitor.recordDiscarded(1, at: DispatchTime.now().uptimeNanoseconds)
                 noteIncomingMediaGap()

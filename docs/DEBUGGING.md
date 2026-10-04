@@ -116,6 +116,28 @@ path and never copy a `.p12` file to the other Mac.
 - Clipboard is text-only and opt-in; confirm it is enabled on both endpoints
   and do not use it as a binary/file-transfer channel.
 
+### Check input-source synchronization
+
+- Click the remote surface before switching Chinese/English. Local Viewer
+  settings and other apps do not drive Host source changes.
+- A pending source waits for the matching Host acknowledgement before sending
+  keyboard events. If it times out, check the existing connection, selected
+  Host foreground window, PostEvent permission, console, and secure-input
+  state; use `Retry source sync` or return to the remote surface after
+  correcting the cause.
+- An unavailable Chinese source requires the same enabled input method/mode
+  on both Macs. Enable it locally on Host; the app never installs/enables a
+  source or substitutes Pinyin for Zhuyin automatically.
+- EN on an already-English Host is deliberately a no-op. Source following is
+  state synchronization, not forwarding the switch shortcut a second time.
+- A peer without the optional `inputSourceSync` capability uses manual Host
+  source selection. Third-party IME internal mode changes that are not exposed
+  as macOS source changes are not claimed supported.
+- For unsupported layouts or input methods, turn off `Follow Viewer input
+  source` in Viewer Settings and select the Host source manually.
+- Reports may include the sanitized synchronization state and release/build,
+  not raw keys, input-source identifiers/names, or arbitrary platform errors.
+
 ## Debug-only commands
 
 Release binaries intentionally reject or omit these diagnostics. Run them from

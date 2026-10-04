@@ -41,6 +41,14 @@ The local input surface enforces the 240-events-per-second default and the
 readiness/validation failures and are not serialized as arbitrary platform
 events.
 
+The user-approved M10 extension adds a focused-surface acknowledgement gate
+before keyboard delivery when `inputSourceSync` is authorized. It synchronizes
+the selected Chinese/English source state rather than composing text in the
+Viewer. Source switching stays local; pending keyboard events are bounded and
+cannot cross source/session/authorization/window lifetimes. Older peers retain
+the physical-key/manual Host-source path. See
+[ADR-0007](decisions/0007-m10-input-source-following.md).
+
 ## Verification
 
 - `InputCoreTests` cover edge normalization, resize/content bounds, readiness,

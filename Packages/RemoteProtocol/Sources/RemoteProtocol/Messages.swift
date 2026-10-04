@@ -956,6 +956,207 @@ public struct InputEventMessage: MessagePayloadValue {
     }
 }
 
+private func validateInputSourceMessagePayload(
+    _ data: Data,
+    limits: ProtocolLimits
+) throws {
+    guard limits.isSane else { throw ProtocolError.invalidLimits }
+    let maximum = min(512, limits.maxControlPayloadLength, limits.maxPayloadLength)
+    guard data.count <= maximum else {
+        throw ProtocolError.controlPayloadTooLarge(actual: data.count, maximum: maximum)
+    }
+}
+
+private func validateInputSourceIdentifier(
+    _ identifier: String,
+    message: MessageType,
+    limits: ProtocolLimits
+) throws {
+    guard limits.isSane else { throw ProtocolError.invalidLimits }
+    let maximum = min(256, min(limits.maxIdentifierBytes, limits.maxFieldLength))
+    guard !identifier.isEmpty,
+          identifier.utf8.count <= maximum,
+          !identifier.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+        throw ProtocolError.invalidFieldValue(message: message, fieldID: 4)
+    }
+}
+
+public struct InputSourceSelectionMessage: MessagePayloadValue {
+    public static let messageType: MessageType = .inputSourceSelection
+    public static let maximumPayloadLength = 512
+    public static let maximumSourceIdentifierLength = 256
+
+    public let windowGeneration: UInt64
+    public let requestID: UInt64
+    public let kind: KeyboardInputSourceKind
+    public let sourceIdentifier: String
+
+    public init(
+        windowGeneration: UInt64,
+        requestID: UInt64,
+        kind: KeyboardInputSourceKind,
+        sourceIdentifier: String
+    ) {
+        self.windowGeneration = windowGeneration
+        self.requestID = requestID
+        self.kind = kind
+        self.sourceIdentifier = sourceIdentifier
+    }
+
+    public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
+        try validate(using: limits)
+        var fields = try MessageFieldWriter(message: .inputSourceSelection, limits: limits)
+        try fields.append(fieldID: 1, mandatory: true, value: WireValue.uint64(windowGeneration))
+        try fields.append(fieldID: 2, mandatory: true, value: WireValue.uint64(requestID))
+        try fields.append(
+            fieldID: 3,
+            mandatory: true,
+            value: WireValue.byte(kind.rawValue, message: .inputSourceSelection, fieldID: 3)
+        )
+        try fields.append(
+            fieldID: 4,
+            mandatory: true,
+            value: WireValue.string(
+                sourceIdentifier,
+                message: .inputSourceSelection,
+                fieldID: 4,
+                maximumBytes: min(Self.maximumSourceIdentifierLength, limits.maxIdentifierBytes)
+            )
+        )
+        let data = fields.data
+        try validateInputSourceMessagePayload(data, limits: limits)
+        return data
+    }
+
+    public static func decode(
+        _ data: Data,
+        using limits: ProtocolLimits = .default
+    ) throws -> InputSourceSelectionMessage {
+        try validateInputSourceMessagePayload(data, limits: limits)
+        let fields = try MessageFieldReader(data: data, message: .inputSourceSelection, limits: limits)
+        try fields.ensureKnown(Set(1 ... 4))
+        guard let kind = KeyboardInputSourceKind(
+            rawValue: try WireValue.decodeByte(
+                try fields.required(3),
+                message: .inputSourceSelection,
+                fieldID: 3
+            )
+        ) else {
+            throw ProtocolError.invalidFieldValue(message: .inputSourceSelection, fieldID: 3)
+        }
+        let message = InputSourceSelectionMessage(
+            windowGeneration: try WireValue.decodeUInt64(
+                try fields.required(1),
+                message: .inputSourceSelection,
+                fieldID: 1
+            ),
+            requestID: try WireValue.decodeUInt64(
+                try fields.required(2),
+                message: .inputSourceSelection,
+                fieldID: 2
+            ),
+            kind: kind,
+            sourceIdentifier: try WireValue.decodeString(
+                try fields.required(4),
+                message: .inputSourceSelection,
+                fieldID: 4,
+                maximumBytes: min(
+                    Self.maximumSourceIdentifierLength,
+                    min(limits.maxIdentifierBytes, limits.maxFieldLength)
+                )
+            )
+        )
+        try message.validate(using: limits)
+        return message
+    }
+
+    private func validate(using limits: ProtocolLimits) throws {
+        guard windowGeneration > 0 else {
+            throw ProtocolError.invalidFieldValue(message: .inputSourceSelection, fieldID: 1)
+        }
+        guard requestID > 0 else {
+            throw ProtocolError.invalidFieldValue(message: .inputSourceSelection, fieldID: 2)
+        }
+        try validateInputSourceIdentifier(sourceIdentifier, message: .inputSourceSelection, limits: limits)
+    }
+}
+
+public struct InputSourceAcknowledgementMessage: MessagePayloadValue {
+    public static let messageType: MessageType = .inputSourceAcknowledgement
+    public static let maximumPayloadLength = 512
+
+    public let windowGeneration: UInt64
+    public let requestID: UInt64
+    public let status: InputSourceSelectionStatus
+
+    public init(
+        windowGeneration: UInt64,
+        requestID: UInt64,
+        status: InputSourceSelectionStatus
+    ) {
+        self.windowGeneration = windowGeneration
+        self.requestID = requestID
+        self.status = status
+    }
+
+    public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
+        try validate()
+        var fields = try MessageFieldWriter(message: .inputSourceAcknowledgement, limits: limits)
+        try fields.append(fieldID: 1, mandatory: true, value: WireValue.uint64(windowGeneration))
+        try fields.append(fieldID: 2, mandatory: true, value: WireValue.uint64(requestID))
+        try fields.append(
+            fieldID: 3,
+            mandatory: true,
+            value: WireValue.byte(status.rawValue, message: .inputSourceAcknowledgement, fieldID: 3)
+        )
+        let data = fields.data
+        try validateInputSourceMessagePayload(data, limits: limits)
+        return data
+    }
+
+    public static func decode(
+        _ data: Data,
+        using limits: ProtocolLimits = .default
+    ) throws -> InputSourceAcknowledgementMessage {
+        try validateInputSourceMessagePayload(data, limits: limits)
+        let fields = try MessageFieldReader(data: data, message: .inputSourceAcknowledgement, limits: limits)
+        try fields.ensureKnown(Set(1 ... 3))
+        guard let status = InputSourceSelectionStatus(
+            rawValue: try WireValue.decodeByte(
+                try fields.required(3),
+                message: .inputSourceAcknowledgement,
+                fieldID: 3
+            )
+        ) else {
+            throw ProtocolError.invalidFieldValue(message: .inputSourceAcknowledgement, fieldID: 3)
+        }
+        let message = InputSourceAcknowledgementMessage(
+            windowGeneration: try WireValue.decodeUInt64(
+                try fields.required(1),
+                message: .inputSourceAcknowledgement,
+                fieldID: 1
+            ),
+            requestID: try WireValue.decodeUInt64(
+                try fields.required(2),
+                message: .inputSourceAcknowledgement,
+                fieldID: 2
+            ),
+            status: status
+        )
+        try message.validate()
+        return message
+    }
+
+    private func validate() throws {
+        guard windowGeneration > 0 else {
+            throw ProtocolError.invalidFieldValue(message: .inputSourceAcknowledgement, fieldID: 1)
+        }
+        guard requestID > 0 else {
+            throw ProtocolError.invalidFieldValue(message: .inputSourceAcknowledgement, fieldID: 2)
+        }
+    }
+}
+
 public struct ClipboardOfferMessage: MessagePayloadValue {
     public static let messageType: MessageType = .clipboardOffer
 
@@ -1497,6 +1698,8 @@ public enum MessagePayload: Equatable, Sendable {
     case videoConfig(VideoConfigMessage)
     case videoFrame(VideoFrameMessage)
     case inputEvent(InputEventMessage)
+    case inputSourceSelection(InputSourceSelectionMessage)
+    case inputSourceAcknowledgement(InputSourceAcknowledgementMessage)
     case clipboardOffer(ClipboardOfferMessage)
     case clipboardText(ClipboardTextMessage)
     case clipboardAcknowledgement(ClipboardAcknowledgementMessage)
@@ -1524,6 +1727,8 @@ public enum MessagePayload: Equatable, Sendable {
         case .videoConfig: return .videoConfig
         case .videoFrame: return .videoFrame
         case .inputEvent: return .inputEvent
+        case .inputSourceSelection: return .inputSourceSelection
+        case .inputSourceAcknowledgement: return .inputSourceAcknowledgement
         case .clipboardOffer: return .clipboardOffer
         case .clipboardText: return .clipboardText
         case .clipboardAcknowledgement: return .clipboardAcknowledgement
@@ -1553,6 +1758,8 @@ public enum MessagePayload: Equatable, Sendable {
         case let .videoConfig(value): return try value.encoded(using: limits)
         case let .videoFrame(value): return try value.encoded(using: limits)
         case let .inputEvent(value): return try value.encoded(using: limits)
+        case let .inputSourceSelection(value): return try value.encoded(using: limits)
+        case let .inputSourceAcknowledgement(value): return try value.encoded(using: limits)
         case let .clipboardOffer(value): return try value.encoded(using: limits)
         case let .clipboardText(value): return try value.encoded(using: limits)
         case let .clipboardAcknowledgement(value): return try value.encoded(using: limits)
@@ -1586,6 +1793,10 @@ public enum MessagePayload: Equatable, Sendable {
         case .videoConfig: return .videoConfig(try VideoConfigMessage.decode(data, using: limits))
         case .videoFrame: return .videoFrame(try VideoFrameMessage.decode(data, using: limits))
         case .inputEvent: return .inputEvent(try InputEventMessage.decode(data, using: limits))
+        case .inputSourceSelection:
+            return .inputSourceSelection(try InputSourceSelectionMessage.decode(data, using: limits))
+        case .inputSourceAcknowledgement:
+            return .inputSourceAcknowledgement(try InputSourceAcknowledgementMessage.decode(data, using: limits))
         case .clipboardOffer: return .clipboardOffer(try ClipboardOfferMessage.decode(data, using: limits))
         case .clipboardText: return .clipboardText(try ClipboardTextMessage.decode(data, using: limits))
         case .clipboardAcknowledgement:

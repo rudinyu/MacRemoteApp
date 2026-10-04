@@ -64,6 +64,8 @@ public enum MessageType: Equatable, Hashable, Sendable {
     case videoConfig
     case videoFrame
     case inputEvent
+    case inputSourceSelection
+    case inputSourceAcknowledgement
     case clipboardOffer
     case clipboardText
     case clipboardAcknowledgement
@@ -92,6 +94,8 @@ public enum MessageType: Equatable, Hashable, Sendable {
         case 0x0009: self = .videoConfig
         case 0x000A: self = .videoFrame
         case 0x000B: self = .inputEvent
+        case 0x0019: self = .inputSourceSelection
+        case 0x001A: self = .inputSourceAcknowledgement
         case 0x000C: self = .clipboardOffer
         case 0x000D: self = .clipboardText
         case 0x0013: self = .clipboardAcknowledgement
@@ -122,6 +126,8 @@ public enum MessageType: Equatable, Hashable, Sendable {
         case .videoConfig: return 0x0009
         case .videoFrame: return 0x000A
         case .inputEvent: return 0x000B
+        case .inputSourceSelection: return 0x0019
+        case .inputSourceAcknowledgement: return 0x001A
         case .clipboardOffer: return 0x000C
         case .clipboardText: return 0x000D
         case .clipboardAcknowledgement: return 0x0013
@@ -164,6 +170,9 @@ public enum Capability: Equatable, Hashable, Sendable {
     /// Optional: the Viewer sends periodic `ReceiverReport` congestion
     /// feedback so the Host can adapt its video bitrate.
     case receiverReport
+    /// Optional: the Viewer may request that the Host follow its Chinese or
+    /// English input-source state for the selected window.
+    case inputSourceSync
     case unknown(UInt16)
 
     public init(rawValue: UInt16) {
@@ -176,6 +185,7 @@ public enum Capability: Equatable, Hashable, Sendable {
         case 0x0006: self = .pingPong
         case 0x0007: self = .keyframeRequest
         case 0x0008: self = .receiverReport
+        case 0x0009: self = .inputSourceSync
         default: self = .unknown(rawValue)
         }
     }
@@ -190,6 +200,7 @@ public enum Capability: Equatable, Hashable, Sendable {
         case .pingPong: return 0x0006
         case .keyframeRequest: return 0x0007
         case .receiverReport: return 0x0008
+        case .inputSourceSync: return 0x0009
         case let .unknown(rawValue): return rawValue
         }
     }
@@ -227,6 +238,18 @@ public enum InputEventKind: UInt8, Equatable, Hashable, Sendable {
     case keyDown = 4
     case keyUp = 5
     case focusIntent = 6
+}
+
+public enum KeyboardInputSourceKind: UInt8, Equatable, Hashable, Sendable {
+    case english = 1
+    case chinese = 2
+}
+
+public enum InputSourceSelectionStatus: UInt8, Equatable, Hashable, Sendable {
+    case applied = 1
+    case unavailable = 2
+    case denied = 3
+    case failed = 4
 }
 
 public enum SessionState: UInt8, Equatable, Hashable, Sendable {

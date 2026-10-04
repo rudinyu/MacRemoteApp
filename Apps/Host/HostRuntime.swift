@@ -82,6 +82,7 @@ actor HostRuntime {
         .h264Video,
         .mouseInput,
         .keyboardInput,
+        .inputSourceSync,
         .textClipboard,
         .keyframeRequest,
         .receiverReport
@@ -799,6 +800,13 @@ actor HostRuntime {
         } else {
             desired.subtract(Self.inputCapabilities)
         }
+        if permission == .authorized,
+           desired.contains(.keyboardInput),
+           snapshot.negotiatedCapabilities.contains(.inputSourceSync) {
+            desired.insert(.inputSourceSync)
+        } else {
+            desired.remove(.inputSourceSync)
+        }
         if clipboardOptedInForSession,
            snapshot.negotiatedCapabilities.contains(.textClipboard) {
             desired.insert(.textClipboard)
@@ -1014,6 +1022,9 @@ actor HostRuntime {
         var authorizedCapabilities = Self.capabilities.intersection(negotiatedCapabilities)
         if permission != .authorized {
             authorizedCapabilities.subtract(Self.inputCapabilities)
+            authorizedCapabilities.remove(.inputSourceSync)
+        } else if !authorizedCapabilities.contains(.keyboardInput) {
+            authorizedCapabilities.remove(.inputSourceSync)
         }
         if !clipboardOptedInForSession {
             authorizedCapabilities.remove(.textClipboard)

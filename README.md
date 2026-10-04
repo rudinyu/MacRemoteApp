@@ -10,11 +10,22 @@ Host; this is deliberately not a full remote-desktop product.
 Milestone state and open evidence gaps are tracked in one place:
 [`docs/STATUS.md`](docs/STATUS.md).
 
-The current signed and notarized test release is `0.2.1007` (Version `0.2`,
-Build `1007`) in `build/rc/`, including the capture, input, reconnect, and
-presentation reliability fixes. Apple submission IDs and verification evidence
-are recorded in [`docs/STATUS.md`](docs/STATUS.md#021007-notarized-rc).
+The current signed and notarized test release is `0.2.1008` (Version `0.2`,
+Build `1008`) in `build/rc/`, including Viewer-led input-source following and
+the earlier capture, input, reconnect, and presentation reliability fixes.
+Apple submission IDs and verification evidence are recorded in
+[`docs/STATUS.md`](docs/STATUS.md#021008-notarized-rc).
 Passing local tests does not replace the pending two-Mac acceptance run.
+
+This build adds Viewer-led Chinese/English input-source
+following. The Host sets the requested state instead of replaying a toggle:
+an already-English Host stays English, while Chinese requires the same enabled
+input method on both Macs. Keyboard delivery waits for the matching Host
+acknowledgement; mouse control remains independent. Settings includes
+**Follow Viewer input source**, and the remote view offers retry after a
+sync failure. See the
+[input guide](docs/USER_GUIDE.md) and
+[design decision](docs/decisions/0007-m10-input-source-following.md).
 
 ## Native app shell
 

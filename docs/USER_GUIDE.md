@@ -127,6 +127,38 @@ disconnect, or failed reauthorization stops the affected operation. Optional
 Accessibility loss only removes the AX/secure-input enhancement. Recheck the
 Host permission and select the window again before reconnecting.
 
+### Chinese/English input-source following
+
+When both updated peers authorize input-source synchronization, click inside
+the Viewer remote surface and use the Viewer's normal Chinese/English switch.
+The Host follows the selected state, not another toggle: if Viewer becomes EN
+and Host is already EN, Host stays EN. Keyboard delivery waits for the matching
+Host acknowledgement. Composition and candidate selection still occur on the
+Host. Visibility of a separate IME candidate panel needs checking with the
+target app; the stream captures the selected window, not the entire desktop.
+
+For Chinese, add and enable the same input method/mode on **both Macs** in
+System Settings > Keyboard > Text Input. Pinyin and Zhuyin are not interchangeable.
+If the Host lacks the matching enabled source, keyboard input pauses with an
+input-source status; mouse control can remain available. Enable the matching
+source locally on Host, then use `Retry source sync` in the Viewer or return
+to the remote surface to retry. Do not use
+clipboard sharing as a workaround for source synchronization.
+
+Switching windows/apps, reconnecting, reauthorization, and returning from
+Settings require a fresh acknowledgement. Source changes while using local
+Viewer settings or another app do not control Host in the background. Older
+peers continue to require manual Host input-source selection. Third-party IME
+internal English/Chinese modes that are not exposed as separate macOS sources
+are not guaranteed to follow.
+
+Viewer Settings includes `Follow Viewer input source`, enabled by default.
+Turn following off to choose the Host source manually for an unsupported
+layout or input method. Returning to the remote view starts a fresh sync;
+use that view's `Retry source sync` button after a failure. The Settings-page
+retry action is inactive while the remote surface is unfocused. Turning
+following off does not restore or change the Host's source in the background.
+
 ## App menus and settings
 
 Both apps provide native macOS menus. `About MacRemoteApp Host/Viewer` shows

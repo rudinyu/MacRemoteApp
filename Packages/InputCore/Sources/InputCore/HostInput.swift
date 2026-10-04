@@ -581,6 +581,89 @@ public final class HostInputController: @unchecked Sendable {
         return activeInputTarget
     }
 
+    /// Follows an exact Viewer input-source request while holding the same
+    /// serialization lock as keyboard injection. TIS is main-thread-only for
+    /// UI applications, so this operation is main-actor isolated and repeats
+    /// all keyboard authorization, target, permission, and focus checks just
+    /// before a platform source change. The caller must run this synchronous
+    /// operation inside the existing session admission fence on the main actor;
+    /// do not hold a background admission/controller lock while hopping here.
+    @MainActor
+    public func synchronizeInputSource(
+        descriptor requested: InputSourceDescriptor,
+        windowGeneration: UInt64,
+        provider: any InputSourceProvider
+    ) -> InputSourceSelectionOutcome {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !inputStateCleanupPending else { return .denied }
+        let initialContext = contextProvider.currentContext()
+        guard Self.inputSourceContextIsEligible(
+            initialContext,
+            windowGeneration: windowGeneration,
+            expectedTarget: nil
+        ), let initialSelection = initialContext.selectedWindow else {
+            return .denied
+        }
+        let expectedTarget = HostInputTarget(selection: initialSelection)
+
+        let plan = InputSourceSelectionPolicy.plan(
+            requested: requested,
+            current: provider.currentInputSource(),
+            enabled: provider.enabledInputSources()
+        )
+        switch plan {
+        case .alreadyMatches:
+            let finalContext = contextProvider.currentContext()
+            guard Self.inputSourceContextIsEligible(
+                finalContext,
+                windowGeneration: windowGeneration,
+                expectedTarget: expectedTarget
+            ) else {
+                return .denied
+            }
+            return .applied
+        case .unavailable:
+            return .unavailable
+        case let .select(target):
+            return provider.selectInputSource(
+                target,
+                validatingImmediatelyBeforeSelection: {
+                    let finalContext = self.contextProvider.currentContext()
+                    return Self.inputSourceContextIsEligible(
+                        finalContext,
+                        windowGeneration: windowGeneration,
+                        expectedTarget: expectedTarget
+                    )
+                }
+            )
+        }
+    }
+
+    private static func inputSourceContextIsEligible(
+        _ context: HostInputContext,
+        windowGeneration: UInt64,
+        expectedTarget: HostInputTarget?
+    ) -> Bool {
+        guard context.sessionAuthorized,
+              context.authorizedWindowGeneration == windowGeneration,
+              let selection = context.selectedWindow,
+              selection.generation == windowGeneration,
+              context.currentWindowIdentifier == selection.windowIdentifier,
+              context.currentProcessIdentifier == selection.processIdentifier,
+              context.currentApplicationIdentifier == selection.applicationIdentifier,
+              let currentBounds = context.currentWindowBounds,
+              currentBounds.isValid,
+              context.permission == .authorized,
+              context.focus == .eligible,
+              context.keyboardInputEnabled else {
+            return false
+        }
+        guard let expectedTarget else { return true }
+        return HostInputTarget(selection: selection) == expectedTarget
+    }
+
     public func inject(_ record: InputEventRecord) throws -> HostInputInjectionReceipt {
         lock.lock()
         defer { lock.unlock() }

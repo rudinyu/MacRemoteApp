@@ -170,6 +170,26 @@ The app name is local UI only; it is not logged or sent to the Viewer.
 
 ## macOS permission boundaries
 
+The user-approved M10 input-source extension is another protected keyboard
+operation, not an exception to the input-safety predicate above. It requires
+both `keyboardInput` and `inputSourceSync`, the selected generation, and a
+fresh foreground/target/permission/console/secure-input check immediately
+before changing the Host's selected source. Host source selection must run
+inside the synchronous session-admission fence and the window-replacement
+barrier; an intervening revocation cannot admit queued old work.
+
+The Viewer sends a bounded source identifier only through the authenticated
+control channel. It is not an identity, authorization credential, arbitrary
+text-insertion command, or diagnostic field. Neither endpoint logs source
+identifiers, input-method names, raw keys, or platform error descriptions.
+Missing Chinese sources fail closed without installing/enabling input methods
+or selecting a different Chinese mode. Acknowledgements and pending keyboard
+delivery are scoped to the original session, authorization epoch, window,
+and request ID. Losing Viewer surface focus stops new source requests and
+invalidates pending keyboard delivery; an operation already admitted by Host
+can complete. There is no background restoration of the Host's prior source. See
+[ADR-0007](decisions/0007-m10-input-source-following.md).
+
 - Screen Recording is required for Host-side ScreenCaptureKit capture.
 - PostEvent permission is required for Host-side Quartz keyboard, pointer, and
   scroll injection. Accessibility is optional for secure-input inspection and

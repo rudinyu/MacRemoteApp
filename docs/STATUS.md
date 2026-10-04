@@ -23,7 +23,7 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 | M6 | Implementation/test gate complete | Real OS event posting (manual disposable-application test) |
 | M7 | Implementation/test gate complete | Physical two-machine clipboard walkthrough |
 | M8 | Deterministic measurement/resilience gate implemented | Physical clock-synchronized performance report |
-| M9 | Release-audit gate implemented; current `0.2.1007` notarized RC artifacts verified | Notarization profile remains host-specific |
+| M9 | Release-audit gate implemented; current `0.2.1008` notarized RC artifacts verified | Notarization profile remains host-specific |
 | M10 | Production composition, final gate, pairing UI, and checklist implemented | Physical Intel-to-Apple-Silicon acceptance, including connected UI rows |
 
 ## Milestone detail
@@ -114,10 +114,11 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 - Release-only debug gating, hardened-runtime artifact audit, negative-test
   documentation, and a residual-risk record are implemented; the
   release-audit gate is implemented.
-- The current `0.2.1007` RC apps and DMGs are Developer ID signed, Apple
-  notarized, stapled, and verified; they include the reliability fixes below.
+- The current `0.2.1008` RC apps and DMGs are Developer ID signed, Apple
+  notarized, stapled, and verified; they include input-source following and
+  the reliability fixes below.
   The notarization profile remains host-specific. See the
-  [release evidence](#021007-notarized-rc).
+  [release evidence](#021008-notarized-rc).
 
 ### M10 — V1 integration pilot
 
@@ -174,6 +175,85 @@ Pending:
 - The recorded local UI checks do not mark connected two-Mac UI acceptance
   complete: connected page switching (navigation/input release) and Host
   window lifecycle still require the physical acceptance rows.
+
+#### 0.2.1008 input-source following
+
+The user-approved M10 extension follows the Viewer's selected Chinese/English
+input source using an optional negotiated capability. The Host applies a
+desired state, never a toggle: English/English is a no-op, and Chinese requires
+the exact enabled input method. Physical key delivery and Host-side IME
+composition remain unchanged. See
+[ADR-0007](decisions/0007-m10-input-source-following.md).
+
+- Source selection retains the selected-window, permission, foreground,
+  secure-input, session, and authorization-epoch admission checks.
+- Viewer keyboard input waits for the matching acknowledgement. Pending work
+  is bounded and invalidated across source changes, focus loss, window
+  replacement, reconnect, and reauthorization; mouse input is independent.
+- Missing sources and failed synchronization show a retry action. Settings
+  can disable following for manual source selection; older peers use that
+  manual behavior without receiving unsupported wire messages.
+- Local verification: `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+  ./.codex/ci.sh` passed the architecture matrix, root/package tests, M8
+  benchmark, and M9 ad-hoc packaging audit. The sandbox attempt stopped at
+  SwiftPM manifest loading; the identical permitted-host retry passed.
+  InputCore has 48 tests, RemoteProtocol 21, and TransportCore 72. After the
+  final physical-modifier cleanup fix, root tests passed again, including
+  20 Viewer lifecycle tests. The release flow repeated the full canonical
+  validation against that final tree successfully before signing/notarization.
+- Current-task Codex self-review covered the complete diff and directly
+  relevant source-selection, input-delivery, lifecycle, and queue call paths.
+  Review fixes cover first-scope synchronization, acknowledgement dispatch,
+  stale epoch/request rejection, ordered key release on focus loss, and
+  preserving physical modifier state through synthetic remote cleanup.
+  No P0–P2 finding remained; this was not an independent Desktop/CLI or
+  Claude review. A P3 UI limitation remains: the Settings-page retry action
+  is inactive while the remote surface is unfocused. Returning to the remote
+  view starts a fresh sync and its failure-state retry button works, so this
+  redundant-action polish is deferred from the input-correctness release.
+- Actual macOS input-source switching, Chinese composition, and the two-Mac
+  keyboard/mouse walkthrough remain manual acceptance items. Third-party IME
+  modes not exposed as macOS input sources are not claimed supported.
+
+#### 0.2.1008 notarized RC
+
+Created locally on 2026-10-04 using the existing
+`scripts/release-notarized.sh rc` workflow, Xcode at
+`/Applications/Xcode.app/Contents/Developer`, Developer ID signing, and the
+existing Keychain profile. The final code tree passed the workflow's clean
+canonical validation before signing. No credential material was copied into
+the repository, and no apps were installed during this release.
+
+| Artifact | Apple submission ID | Result |
+| --- | --- | --- |
+| Host app | `43f7e265-0758-4ef6-8f0f-66f79946f3b3` | Accepted; stapled and Gatekeeper accepted |
+| Viewer app | `1ee8c1f7-3920-440e-afa5-605802e85bce` | Accepted; stapled and Gatekeeper accepted |
+| Host DMG | `90b07b1e-bdbb-43cb-bb65-e209f34afe16` | Accepted; stapled and Gatekeeper accepted |
+| Viewer DMG | `f60ce944-1cd9-423f-8cbf-227d263cae95` | Accepted; stapled and Gatekeeper accepted |
+
+`scripts/validate-notarized-release.sh` passed strict signatures, hardened
+runtime, role metadata, archive equivalence, DMG payload, ticket, and
+Gatekeeper checks before atomic promotion into `build/rc/`. Both bundle
+plists contain Version `0.2`, Build `1008`; the Host is universal
+(`x86_64`/`arm64`) and the Viewer is `arm64`.
+
+| Distributable in `build/rc/` | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host.dmg` | `c05b63f5886959034f200f468d42d1c1ab4e68844e267748bda9679bb97439c8` |
+| `MacRemoteApp-Viewer.dmg` | `8c49cd99bbf5d87323185291f924d60c033cfb8e8ea994defbefd39dcb189b46` |
+
+After verification, the old `0.2.1007` RC payload and its two build logs were
+moved into the recoverable local Trash directory
+`MacRemoteApp-0.2.1007.nV1ka0/`. A filesystem audit found no remaining `1007`
+release payload under `build/` or `.build`. The original build cache was
+restored, and existing beta/release DMG checksums are unchanged. Installed
+apps, preferences, Keychain trust/identities, TCC grants, and other versions
+were not reset or removed. New logs and generated artifacts remain ignored.
+The historical `1007` submission evidence below is retained as a release record.
+
+Both endpoints must use the updated build to negotiate source following.
+Real Chinese/English switching, composition/candidate panels, and physical
+Intel-to-Apple-Silicon input remain pending in [M10 acceptance](M10_ACCEPTANCE.md).
 
 #### Post-0.2.1006 reliability review
 

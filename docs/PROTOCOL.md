@@ -106,6 +106,8 @@ The exact binary field widths and serialization format are fixed by M1 in
 | `VideoConfig` | Host → Viewer | H.264 decoder configuration and codec generation identifier |
 | `VideoFrame` | Host → Viewer | One encoded access unit with timing and keyframe metadata |
 | `InputEvent` | Viewer → Host | Validated mouse, keyboard, modifier, and scroll event model |
+| `InputSourceSelection` | Viewer → Host | Optional, authorized request to set the Host input source to the Viewer's desired Chinese/English state |
+| `InputSourceAcknowledgement` | Host → Viewer | Optional, scoped result for that exact input-source request |
 | `ClipboardOffer` | Both | Text clipboard generation/metadata and opt-in state |
 | `ClipboardText` | Both | Bounded UTF-8 text payload for an accepted offer |
 | `ClipboardAcknowledgement` | Both | Accept/reject result for one clipboard offer |
@@ -269,7 +271,10 @@ active input source interprets them.**
   Host's active keyboard layout, keyboard type, and input source. A Viewer
   key produces the character that the same physical position produces on the
   Host; it can differ from the Viewer keycap when the layouts differ. The
-  operator selects the matching layout on the Host when that matters.
+  operator selects the matching layout on the Host when that matters. The
+  user-approved M10 synchronization below follows Chinese/English source
+  state when both endpoints support it. It does not force an already-English
+  Host to use the same English physical layout as the Viewer.
 - Dead keys and Option-composed characters are forwarded as ordinary key
   events (for example Option down, E down/up with the Option bit, Option up,
   E down/up). Dead-key state lives in the Host application's text system, so
@@ -279,8 +284,9 @@ active input source interprets them.**
   surface is not an `NSTextInputClient` and does not call
   `interpretKeyEvents`, so a Viewer-side input method does not compose text
   for the remote surface. Candidate windows, marked text, and input-source
-  switching (for example JIS Eisu/Kana, key codes 102/104, when they reach
-  the surface) are handled by the Host's active input source. Keyboard
+  switching are normally handled by the Host's active input source. With the
+  M10 synchronization capability, switching is Viewer-local and the actual
+  desired source is sent instead of replaying the toggle. Keyboard
   shortcuts consumed by the Viewer's own system or menus are not forwarded.
 - Caps Lock and Fn are not forwarded as key events. Their state reaches the
   Host only as the corresponding bit in each key event's `modifiers` mask;
@@ -302,6 +308,16 @@ codes pass through unmapped; and key rejection/status/receipt text contains no
 key value. `scripts/validate.sh` rejects character translation, text-insertion,
 and secure-input-bypass APIs in the input path. Behavior with a real Host
 layout or input method is part of the M6 manual OS evidence.
+
+### Viewer-led input-source synchronization (M10)
+
+[ADR-0007](decisions/0007-m10-input-source-following.md) records the explicitly
+approved extension, exact bounded request/acknowledgement contract, ownership,
+ordering gate, older-peer compatibility, and security requirements. The Host
+follows the actual Viewer Chinese/English source state; an already-matching
+state is a no-op, not another toggle. Chinese alignment requires the matching
+enabled input method/mode. Composition and candidate selection remain on the
+Host, and no Unicode text-insertion message is introduced.
 
 ## Clipboard contract
 

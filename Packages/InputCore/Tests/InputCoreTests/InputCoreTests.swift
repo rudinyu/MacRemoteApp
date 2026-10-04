@@ -6,6 +6,250 @@ final class InputCoreTests: XCTestCase {
         XCTAssertEqual(InputCoreModule.name, "InputCore")
     }
 
+    func testInputSourcePolicyKeepsEnglishNoOpAndMatchesChineseModeExactly() {
+        let englishRequested = InputSourceDescriptor(
+            identifier: "com.apple.keylayout.US",
+            kind: .english
+        )
+        let anotherEnglish = InputSourceDescriptor(
+            identifier: "com.apple.keylayout.Dvorak",
+            kind: .english
+        )
+        XCTAssertEqual(
+            InputSourceSelectionPolicy.plan(
+                requested: englishRequested,
+                current: anotherEnglish,
+                enabled: []
+            ),
+            .alreadyMatches
+        )
+
+        let chineseRequested = InputSourceDescriptor(
+            identifier: "com.example.ime.zhuyin",
+            kind: .chinese
+        )
+        let differentChineseMode = InputSourceDescriptor(
+            identifier: "com.example.ime.pinyin",
+            kind: .chinese
+        )
+        XCTAssertEqual(
+            InputSourceSelectionPolicy.plan(
+                requested: chineseRequested,
+                current: chineseRequested,
+                enabled: []
+            ),
+            .alreadyMatches
+        )
+        XCTAssertEqual(
+            InputSourceSelectionPolicy.plan(
+                requested: chineseRequested,
+                current: anotherEnglish,
+                enabled: [differentChineseMode]
+            ),
+            .unavailable
+        )
+        XCTAssertEqual(
+            InputSourceSelectionPolicy.plan(
+                requested: chineseRequested,
+                current: anotherEnglish,
+                enabled: [differentChineseMode, chineseRequested]
+            ),
+            .select(chineseRequested)
+        )
+    }
+
+    func testInputSourcePolicyPrefersRequestedEnglishThenUsesStableEnabledFallback() {
+        let requested = InputSourceDescriptor(
+            identifier: "com.apple.keylayout.US",
+            kind: .english
+        )
+        let fallbackZ = InputSourceDescriptor(identifier: "layout.z", kind: .english)
+        let fallbackA = InputSourceDescriptor(identifier: "layout.a", kind: .english)
+        let currentChinese = InputSourceDescriptor(identifier: "ime.zh", kind: .chinese)
+
+        XCTAssertEqual(
+            InputSourceSelectionPolicy.plan(
+                requested: requested,
+                current: currentChinese,
+                enabled: [fallbackZ, requested, fallbackA]
+            ),
+            .select(requested)
+        )
+        XCTAssertEqual(
+            InputSourceSelectionPolicy.plan(
+                requested: requested,
+                current: currentChinese,
+                enabled: [fallbackZ, fallbackA]
+            ),
+            .select(fallbackA)
+        )
+        XCTAssertEqual(
+            InputSourceSelectionPolicy.plan(
+                requested: requested,
+                current: currentChinese,
+                enabled: [currentChinese]
+            ),
+            .unavailable
+        )
+    }
+
+    func testInputSourcePolicyRejectsInvalidAndMismatchedDescriptors() {
+        let invalid = InputSourceDescriptor(identifier: "bad\nidentifier", kind: .chinese)
+        let oversized = InputSourceDescriptor(
+            identifier: String(repeating: "a", count: 257),
+            kind: .chinese
+        )
+        let englishWithChineseIdentifier = InputSourceDescriptor(
+            identifier: "ime.zh",
+            kind: .english
+        )
+        let enabledChinese = InputSourceDescriptor(identifier: "ime.zh", kind: .chinese)
+
+        XCTAssertEqual(
+            InputSourceSelectionPolicy.plan(
+                requested: invalid,
+                current: nil,
+                enabled: [enabledChinese]
+            ),
+            .unavailable
+        )
+        XCTAssertEqual(
+            InputSourceSelectionPolicy.plan(
+                requested: oversized,
+                current: nil,
+                enabled: [enabledChinese]
+            ),
+            .unavailable
+        )
+        XCTAssertEqual(
+            InputSourceSelectionPolicy.plan(
+                requested: englishWithChineseIdentifier,
+                current: nil,
+                enabled: [enabledChinese]
+            ),
+            .unavailable
+        )
+    }
+
+    @MainActor
+    func testHostControllerSynchronizesInputSourceOnlyForCurrentEligibleTarget() {
+        let chinese = InputSourceDescriptor(identifier: "ime.zhuyin", kind: .chinese)
+        let english = InputSourceDescriptor(identifier: "layout.us", kind: .english)
+        let deniedContexts = [
+            authorizedHostContext(sessionAuthorized: false),
+            authorizedHostContext(authorizedWindowGeneration: 8),
+            authorizedHostContext(currentWindowIdentifier: 999),
+            authorizedHostContext(permission: .missing),
+            authorizedHostContext(focus: .lockedScreen),
+            authorizedHostContext(focus: .notForeground),
+            authorizedHostContext(focus: .secureInput),
+            authorizedHostContext(keyboardInputEnabled: false)
+        ]
+
+        for context in deniedContexts {
+            let contextProvider = FakeHostInputContextProvider(context: context)
+            let sourceProvider = FakeInputSourceProvider(
+                current: english,
+                enabled: [chinese]
+            )
+            let controller = HostInputController(
+                contextProvider: contextProvider,
+                injectionAdapter: RecordingHostInputAdapter()
+            )
+
+            XCTAssertEqual(
+                controller.synchronizeInputSource(
+                    descriptor: chinese,
+                    windowGeneration: 9,
+                    provider: sourceProvider
+                ),
+                .denied
+            )
+            XCTAssertTrue(sourceProvider.selections.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testHostControllerRechecksEligibilityAtTheFinalSelectionBoundary() {
+        let contextProvider = FakeHostInputContextProvider(context: authorizedHostContext())
+        let chinese = InputSourceDescriptor(identifier: "ime.zhuyin", kind: .chinese)
+        let english = InputSourceDescriptor(identifier: "layout.us", kind: .english)
+        let sourceProvider = FakeInputSourceProvider(current: english, enabled: [chinese])
+        sourceProvider.onSelectionValidation = {
+            contextProvider.context = self.authorizedHostContext(focus: .secureInput)
+        }
+        let controller = HostInputController(
+            contextProvider: contextProvider,
+            injectionAdapter: RecordingHostInputAdapter()
+        )
+
+        XCTAssertEqual(
+            controller.synchronizeInputSource(
+                descriptor: chinese,
+                windowGeneration: 9,
+                provider: sourceProvider
+            ),
+            .denied
+        )
+        XCTAssertTrue(sourceProvider.selections.isEmpty)
+    }
+
+    @MainActor
+    func testHostControllerRechecksEligibilityBeforeAcknowledgingNoOp() {
+        let contextProvider = FakeHostInputContextProvider(context: authorizedHostContext())
+        let english = InputSourceDescriptor(identifier: "layout.us", kind: .english)
+        let sourceProvider = FakeInputSourceProvider(current: english, enabled: [english])
+        sourceProvider.onEnabledSourcesRead = {
+            contextProvider.context = self.authorizedHostContext(focus: .lockedScreen)
+        }
+        let controller = HostInputController(
+            contextProvider: contextProvider,
+            injectionAdapter: RecordingHostInputAdapter()
+        )
+
+        XCTAssertEqual(
+            controller.synchronizeInputSource(
+                descriptor: InputSourceDescriptor(identifier: "layout.dvorak", kind: .english),
+                windowGeneration: 9,
+                provider: sourceProvider
+            ),
+            .denied
+        )
+        XCTAssertTrue(sourceProvider.selections.isEmpty)
+    }
+
+    @MainActor
+    func testHostControllerUsesPolicyNoOpAndSelectsExactChineseDescriptor() {
+        let contextProvider = FakeHostInputContextProvider(context: authorizedHostContext())
+        let english = InputSourceDescriptor(identifier: "layout.us", kind: .english)
+        let chinese = InputSourceDescriptor(identifier: "ime.zhuyin", kind: .chinese)
+        let sourceProvider = FakeInputSourceProvider(current: english, enabled: [chinese])
+        let controller = HostInputController(
+            contextProvider: contextProvider,
+            injectionAdapter: RecordingHostInputAdapter()
+        )
+
+        XCTAssertEqual(
+            controller.synchronizeInputSource(
+                descriptor: InputSourceDescriptor(identifier: "layout.dvorak", kind: .english),
+                windowGeneration: 9,
+                provider: sourceProvider
+            ),
+            .applied
+        )
+        XCTAssertTrue(sourceProvider.selections.isEmpty)
+
+        XCTAssertEqual(
+            controller.synchronizeInputSource(
+                descriptor: chinese,
+                windowGeneration: 9,
+                provider: sourceProvider
+            ),
+            .applied
+        )
+        XCTAssertEqual(sourceProvider.selections, [chinese])
+    }
+
     func testAccessibilityWindowMatcherUsesUniqueGeometryWithinPointTolerance() {
         let selected = InputWindowBounds(originX: 40, originY: 70, width: 800, height: 600)
         let candidates = [
@@ -1247,7 +1491,45 @@ private struct KeyCommandValues: Equatable {
     }
 }
 
-private final class FakeHostInputContextProvider:HostInputContextProvider, @unchecked Sendable {
+@MainActor
+private final class FakeInputSourceProvider: InputSourceProvider {
+    let current: InputSourceDescriptor?
+    let enabled: [InputSourceDescriptor]
+    var selectionOutcome: InputSourceSelectionOutcome = .applied
+    var onEnabledSourcesRead: (@MainActor () -> Void)?
+    var onSelectionValidation: (@MainActor () -> Void)?
+    private(set) var selections: [InputSourceDescriptor] = []
+
+    init(current: InputSourceDescriptor?, enabled: [InputSourceDescriptor]) {
+        self.current = current
+        self.enabled = enabled
+    }
+
+    func currentInputSource() -> InputSourceDescriptor? {
+        current
+    }
+
+    func enabledInputSources() -> [InputSourceDescriptor] {
+        onEnabledSourcesRead?()
+        return enabled
+    }
+
+    func selectInputSource(_ descriptor: InputSourceDescriptor) -> InputSourceSelectionOutcome {
+        selections.append(descriptor)
+        return selectionOutcome
+    }
+
+    func selectInputSource(
+        _ descriptor: InputSourceDescriptor,
+        validatingImmediatelyBeforeSelection isStillEligible: @MainActor () -> Bool
+    ) -> InputSourceSelectionOutcome {
+        onSelectionValidation?()
+        guard isStillEligible() else { return .denied }
+        return selectInputSource(descriptor)
+    }
+}
+
+private final class FakeHostInputContextProvider: HostInputContextProvider, @unchecked Sendable {
     var context: HostInputContext
     var releaseContext: HostInputContext?
 

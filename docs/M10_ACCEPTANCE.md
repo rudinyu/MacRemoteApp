@@ -2,9 +2,11 @@
 
 ## Scope
 
-M10 is the final Intel Host to Apple Silicon Viewer acceptance run. It does
-not add features beyond the V1 specification. Use a disposable foreground test
-application whose content contains no private data.
+M10 is the final Intel Host to Apple Silicon Viewer acceptance run. Its sole
+user-approved input-source extension is defined by
+[ADR-0007](decisions/0007-m10-input-source-following.md); physical key transport
+and Host-side IME composition remain unchanged. Use a disposable foreground
+test application whose content contains no private data.
 
 The repository now contains a production runtime composition in
 `Apps/Host/HostRuntime.swift` and `Apps/Viewer/ViewerRuntime.swift`. On first
@@ -188,6 +190,9 @@ from the production bundle's first-pairing flow.
 | Video backlog recovery | After encoder-relay overflow, pre-gap frames stay ordered; only a post-gap keyframe permits post-gap deltas to resume | ☐ |
 | Performance | 30-second report has clock probes, valid samples, p50/p95, fps and resource data | ☐ |
 | Input | Each authorized input capability works only while authorized; mouse-only or keyboard-only authorization keeps the other local controls disabled | ☐ |
+| Viewer-led input source | EN/EN stays EN; Chinese/EN and EN/Chinese reach the Viewer's selected state without double toggling; matching Chinese mode composes/candidates on Host; missing/disabled Chinese source pauses keyboard with a clear status and leaves mouse available | ☐ |
+| Input-source lifetime | Change source while typing, return from Settings, switch windows/apps, reauthorize, and reconnect; no old acknowledgement or queued key releases a different source/session; focus loss or secure input prevents Host source mutation | ☐ |
+| Input-source compatibility | A peer without `inputSourceSync` continues manual Host IME input without receiving new messages; unsupported third-party internal modes are not presented as synchronized | ☐ |
 | Clipboard | Text-only opt-in works; opt-out and echo prevention work | ☐ |
 | Permission recovery | Local Network, Screen Recording, or PostEvent denial/revocation disables the affected path and gives a recoverable instruction; optional Accessibility loss disables AXRaise/secure-input inspection but never bypasses exact-window focus checks | ☐ |
 | Window recovery | Close/change/focus loss disables input and reports a recoverable state | ☐ |

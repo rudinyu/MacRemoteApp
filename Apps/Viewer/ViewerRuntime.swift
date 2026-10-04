@@ -63,6 +63,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         .h264Video,
         .mouseInput,
         .keyboardInput,
+        .inputSourceSync,
         .textClipboard,
         .keyframeRequest,
         .receiverReport
@@ -143,6 +144,17 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var hostInputFocusEligible = false
     private var hostInputStatusGeneration: UInt64?
     private var isShuttingDown = false
+    private let inputSourceProvider = SystemInputSourceProvider()
+    private var inputSourceObserver: SystemInputSourceObserver?
+    private var inputSourceSyncGate = ViewerInputSourceSyncGate()
+    private var inputSourceRetryGate = ViewerInputSourceRetryGate()
+    private var inputSourceSyncTimeoutTask: Task<Void, Never>?
+    private var inputSourceFollowViewer = true
+    private var inputSourceSyncCapabilityAvailable = false
+    private var remoteSurfaceFocused = false
+    private var inputSourceSyncStatus = "Waiting for remote keyboard"
+
+    private static let inputSourceSyncTimeoutNanoseconds: UInt64 = 3_000_000_000
 
     init(configuration: Configuration) {
         self.configuration = configuration
@@ -313,7 +325,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         .init("connection", "Status"), .init("host", "Host"),
                         .init("transport", "Transport", "LAN / TLS"),
                         .init("discovery", "Local discovery"), .init("latency", "Round-trip time"),
-                        .init("input", "Remote input"), .init("message", "Details")
+                        .init("input", "Remote input"),
+                        .init("inputSource", "Input-source sync"), .init("message", "Details")
                     ]),
                     .init("Session settings", fields: [
                         .init("filter", "Host filter", configuration.hostName ?? "All LAN Hosts"),
@@ -330,6 +343,13 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self?.toggleClipboard()
             }
             controller.addNote("Clipboard sharing requires consent on both Macs and resets when the session ends. Local discovery reflects browser activity; macOS manages the permission.")
+            controller.addAction("followInputSource", title: "Follow Viewer input source", checkbox: true) { [weak self] in
+                self?.toggleInputSourceFollowing()
+            }
+            controller.addAction("retryInputSource", title: "Retry input-source sync") { [weak self] in
+                self?.retryInputSourceSynchronization()
+            }
+            controller.addNote("Input-source following matches enabled English or Chinese TIS sources. Both Macs need the same enabled Chinese method; some third-party IME internal modes require manual matching.")
             controller.addAction("network", title: "Local Network Settings…") {
                 ViewerStartupOnboarding.openLocalNetworkSettings()
             }
@@ -354,6 +374,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         settingsView.setValue(discoveryStatus, for: "discovery")
         settingsView.setAction("clipboard", enabled: contentView.clipboardAvailable, checked: contentView.clipboardEnabled)
+        settingsView.setValue(inputSourceSyncStatus, for: "inputSource")
+        settingsView.setAction("followInputSource", enabled: true, checked: inputSourceFollowViewer)
+        settingsView.setAction("retryInputSource", enabled: contentView.inputSourceRetryAvailable)
     }
 
     private func makeWindow() {
@@ -381,11 +404,28 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         content.onClipboardToggle = { [weak self] in
             self?.toggleClipboard()
         }
+        content.onRetryInputSource = { [weak self] in
+            self?.retryInputSourceSynchronization()
+        }
+        content.onRemoteFocusChange = { [weak self] focused in
+            self?.remoteSurfaceFocusChanged(focused)
+        }
+        content.onJISEisuKey = { [weak self] in
+            self?.handleJISEisuKey() ?? false
+        }
+        content.onJISKanaKey = { [weak self] in
+            self?.handleJISKanaKey() ?? false
+        }
         content.onInputRejected = { [weak self] error in
             self?.setStatus(error.description)
         }
         contentView = content
         content.onSettingsChange = { [weak self] in self?.refreshSettings() }
+        inputSourceObserver = SystemInputSourceObserver { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.observedInputSourceChange()
+            }
+        }
 
         let window = NSWindow(
             contentRect: frame,
@@ -1012,6 +1052,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 setStatus("Connected — the selected app must be foreground on the Host")
             }
 
+        case let .inputSourceAcknowledgement(acknowledgement):
+            await handleInputSourceAcknowledgement(acknowledgement, from: sourceSession)
+
         case .close:
             // The callback is running inside ViewerSessionMessageLoop. Defer
             // teardown until the callback returns so stop() never waits on
@@ -1254,17 +1297,429 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let scope = activeInputSendScope,
               record.windowGeneration == scope.windowGeneration,
               let transport = inputTransport else { return }
-        _ = inputSendQueue.enqueue(record, in: scope) { event, authorizationGeneration in
+
+        if record.kind == .keyDown || record.kind == .keyUp {
+            prepareInputSourceStateBeforeKey(in: scope)
+            switch inputSourceSyncGate.routeKeyboard(record, in: scope) {
+            case .send:
+                enqueueInputRecord(
+                    record,
+                    in: scope,
+                    transport: transport,
+                    keyboardDeliveryToken: inputSourceSyncGate.keyboardDeliveryToken
+                )
+            case .buffered, .discarded:
+                break
+            case .overflow:
+                setInputSourceSyncStatus(
+                    "Input-source sync queue is full — enable the same Chinese input method on Host, then retry",
+                    retryAvailable: true
+                )
+            }
+            return
+        }
+        enqueueInputRecord(record, in: scope, transport: transport)
+    }
+
+    private func enqueueInputRecord(
+        _ record: InputEventRecord,
+        in scope: ViewerInputSendScope,
+        transport: ViewerInputTransport,
+        keyboardDeliveryToken: UUID? = nil
+    ) {
+        _ = inputSendQueue.enqueue(record, in: scope) { [weak self] event, authorizationGeneration in
+            guard let self else { return }
+            if let keyboardDeliveryToken,
+               !self.inputSourceSyncGate.allowsQueuedKeyboardSend(
+                   event,
+                   in: scope,
+                   deliveryToken: keyboardDeliveryToken
+               ) {
+                return
+            }
             try await transport.send(
                 event,
                 expectedAuthorizationGeneration: authorizationGeneration
             )
+            if keyboardDeliveryToken != nil {
+                self.inputSourceSyncGate.noteDelivered(event, in: scope)
+            }
+        }
+    }
+
+    private func prepareInputSourceStateBeforeKey(in scope: ViewerInputSendScope) {
+        guard inputSourceFollowViewer,
+              inputSourceSyncCapabilityAvailable,
+              remoteSurfaceFocused else {
+            if inputSourceSyncGate.scope != scope || inputSourceSyncGate.state == .inactive {
+                inputSourceSyncGate.useManualSelection(in: scope)
+            }
+            return
+        }
+        guard let source = inputSourceProvider.currentInputSource() else {
+            inputSourceSyncGate.useManualSelection(in: scope)
+            setInputSourceSyncStatus(
+                "Unsupported Viewer input source — match sources manually",
+                retryAvailable: false
+            )
+            return
+        }
+        if inputSourceSyncGate.needsSynchronization(to: source, in: scope) {
+            beginInputSourceSynchronization(to: source, in: scope)
+        }
+    }
+
+    private func enqueueInputSourceSelection(
+        _ request: ViewerInputSourceSyncRequest,
+        in scope: ViewerInputSendScope,
+        transport: ViewerInputTransport
+    ) {
+        _ = inputSendQueue.enqueueOperation(in: scope) { [weak self] queuedScope in
+            guard let self else { return }
+
+            // This operation is behind every previously admitted input event.
+            // Releases are derived from the transport-confirmed held-key set,
+            // not from locally queued keyDowns that never reached the Host.
+            let heldKeys = self.inputSourceSyncGate.takeRemoteKeysForOrderedRelease(in: queuedScope)
+            let releases = self.contentView?.surface.makeOrderedKeyReleases(for: heldKeys) ?? []
+            for release in releases {
+                try await transport.send(
+                    release,
+                    expectedAuthorizationGeneration: queuedScope.authorizationGeneration
+                )
+                self.inputSourceSyncGate.noteDelivered(release, in: queuedScope)
+            }
+
+            guard self.inputSourceSyncGate.isCurrent(request) else { return }
+            do {
+                try await transport.sendInputSourceSelection(request) { [weak self] in
+                    guard let self,
+                          self.activeInputSendScope == queuedScope,
+                          self.remoteSurfaceFocused,
+                          self.inputSourceFollowViewer,
+                          self.inputSourceSyncCapabilityAvailable,
+                          self.inputSourceSyncGate.isCurrent(request),
+                          self.inputSourceProvider.currentInputSource() == request.source else {
+                        return false
+                    }
+                    return true
+                }
+            } catch ViewerInputTransportError.inputSourceRequestNotAdmitted {
+                // Focus/source/request changed while waiting for the session's
+                // outbound mutex. The current lifecycle callback will either
+                // start a fresh request or leave keyboard input in manual mode.
+            }
+        }
+    }
+
+    private func beginInputSourceSynchronization(
+        to source: InputSourceDescriptor,
+        in scope: ViewerInputSendScope
+    ) {
+        guard let transport = inputTransport,
+              let request = inputSourceSyncGate.beginSynchronization(in: scope, source: source) else {
+            setInputSourceSyncStatus(
+                "Input-source sync unavailable — match sources manually",
+                retryAvailable: true
+            )
+            return
+        }
+        inputSourceSyncTimeoutTask?.cancel()
+        setInputSourceSyncStatus("Waiting for Host input-source change…", retryAvailable: false)
+        enqueueInputSourceSelection(request, in: scope, transport: transport)
+        inputSourceSyncTimeoutTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: Self.inputSourceSyncTimeoutNanoseconds)
+            } catch {
+                return
+            }
+            guard let self,
+                  self.inputSourceSyncGate.timeout(scope: scope, requestID: request.requestID) else {
+                return
+            }
+            self.setInputSourceSyncStatus(
+                "Input source sync timed out — enable the same Chinese input method on Host, then retry",
+                retryAvailable: true
+            )
+        }
+    }
+
+    private func handleInputSourceAcknowledgement(
+        _ acknowledgement: InputSourceAcknowledgementMessage,
+        from sourceSession: SessionCoordinator
+    ) async {
+        guard session === sourceSession else { return }
+        let snapshot = await sourceSession.snapshot()
+        guard session === sourceSession,
+              synchronizeAuthorization(for: sourceSession, snapshot: snapshot) else { return }
+        guard let scope = activeInputSendScope,
+              scope.sessionID == sessionLifetimeID,
+              snapshot.authorized,
+              scope.authorizationGeneration == snapshot.authorizationGeneration,
+              snapshot.authorizedWindowGeneration == scope.windowGeneration,
+              scope.windowGeneration == acknowledgement.windowGeneration else {
+            await refreshInputSurface(for: sourceSession)
+            return
+        }
+        let disposition = inputSourceSyncGate.acknowledge(
+            scope: scope,
+            requestID: acknowledgement.requestID,
+            applied: acknowledgement.status == .applied
+        )
+        switch disposition {
+        case .stale:
+            return
+        case .failed:
+            inputSourceSyncTimeoutTask?.cancel()
+            switch acknowledgement.status {
+            case .unavailable:
+                setInputSourceSyncStatus(
+                    "Source unavailable on Host — enable the same Chinese input method, then retry",
+                    retryAvailable: true
+                )
+            case .denied:
+                setInputSourceSyncStatus(
+                    "Host could not safely change its input source — return to the remote view, then retry",
+                    retryAvailable: true
+                )
+            case .failed, .applied:
+                setInputSourceSyncStatus(
+                    "Host could not change its input source — enable the same Chinese input method, then retry",
+                    retryAvailable: true
+                )
+            }
+        case let .applied(bufferedEvents):
+            inputSourceSyncTimeoutTask?.cancel()
+            guard remoteSurfaceFocused,
+                  inputSourceFollowViewer,
+                  inputSourceProvider.currentInputSource() == inputSourceSyncGate.synchronizedSource else {
+                if let current = inputSourceProvider.currentInputSource(),
+                   let scope = activeInputSendScope {
+                    beginInputSourceSynchronization(to: current, in: scope)
+                } else {
+                    setInputSourceSyncStatus(
+                        "Unsupported Viewer input source — match sources manually",
+                        retryAvailable: false
+                    )
+                }
+                return
+            }
+            setInputSourceSyncStatus("Synchronized", retryAvailable: false)
+            guard let transport = inputTransport else { return }
+            for event in bufferedEvents {
+                guard inputSourceSyncGate.routeKeyboard(event, in: scope) == .send else { continue }
+                enqueueInputRecord(
+                    event,
+                    in: scope,
+                    transport: transport,
+                    keyboardDeliveryToken: inputSourceSyncGate.keyboardDeliveryToken
+                )
+            }
+        }
+    }
+
+    private func setInputSourceSyncStatus(_ status: String, retryAvailable: Bool) {
+        inputSourceSyncStatus = status
+        contentView?.setInputSourceSyncStatus(status, retryAvailable: retryAvailable)
+        refreshSettings()
+    }
+
+    private func observedInputSourceChange() {
+        guard remoteSurfaceFocused,
+              inputSourceFollowViewer,
+              inputSourceSyncCapabilityAvailable,
+              let scope = activeInputSendScope else { return }
+        guard let source = inputSourceProvider.currentInputSource() else {
+            inputSourceSyncGate.useManualSelection(in: scope)
+            setInputSourceSyncStatus(
+                "Unsupported Viewer input source — match sources manually",
+                retryAvailable: false
+            )
+            return
+        }
+        if inputSourceSyncGate.state == .manualSelection ||
+            inputSourceSyncGate.needsSynchronization(to: source, in: scope) {
+            beginInputSourceSynchronization(to: source, in: scope)
+        }
+    }
+
+    private func remoteSurfaceFocusChanged(_ focused: Bool) {
+        let wasFocused = remoteSurfaceFocused
+        remoteSurfaceFocused = focused
+        guard focused else {
+            inputSourceSyncTimeoutTask?.cancel()
+            inputSourceSyncGate.setInactive()
+            setInputSourceSyncStatus("Remote view is inactive — return to sync", retryAvailable: false)
+            return
+        }
+        guard let scope = activeInputSendScope else { return }
+        if inputSourceRetryGate.consumeOnRemoteFocus() {
+            retryInputSourceNow(in: scope)
+        } else if !wasFocused {
+            synchronizeViewerInputSource(in: scope, force: true)
+        }
+    }
+
+    private func synchronizeViewerInputSource(in scope: ViewerInputSendScope, force: Bool) {
+        guard remoteSurfaceFocused else { return }
+        guard inputSourceFollowViewer else {
+            inputSourceSyncGate.useManualSelection(in: scope)
+            setInputSourceSyncStatus("Follow Viewer input source is off — match sources manually", retryAvailable: false)
+            return
+        }
+        guard inputSourceSyncCapabilityAvailable else {
+            inputSourceSyncGate.useManualSelection(in: scope)
+            setInputSourceSyncStatus("Host does not support input-source sync — match sources manually", retryAvailable: false)
+            return
+        }
+        guard let source = inputSourceProvider.currentInputSource() else {
+            inputSourceSyncGate.useManualSelection(in: scope)
+            setInputSourceSyncStatus("Unsupported Viewer input source — match sources manually", retryAvailable: false)
+            return
+        }
+        if force || inputSourceSyncGate.needsSynchronization(to: source, in: scope) {
+            beginInputSourceSynchronization(to: source, in: scope)
+        }
+    }
+
+    private func retryInputSourceSynchronization() {
+        guard let scope = activeInputSendScope,
+              inputSourceFollowViewer,
+              inputSourceSyncCapabilityAvailable else {
+            setInputSourceSyncStatus("Return to the remote view with input-source following enabled to retry", retryAvailable: true)
+            return
+        }
+        guard inputSourceRetryGate.request(remoteSurfaceFocused: remoteSurfaceFocused) else {
+            showViewerWindow()
+            if window?.firstResponder === contentView?.surface {
+                remoteSurfaceFocusChanged(true)
+            }
+            return
+        }
+        retryInputSourceNow(in: scope)
+    }
+
+    private func retryInputSourceNow(in scope: ViewerInputSendScope) {
+        guard inputSourceProvider.currentInputSource() != nil else {
+            setInputSourceSyncStatus("Unsupported Viewer input source — match sources manually", retryAvailable: false)
+            return
+        }
+        synchronizeViewerInputSource(in: scope, force: true)
+    }
+
+    private func toggleInputSourceFollowing() {
+        inputSourceFollowViewer.toggle()
+        guard let scope = activeInputSendScope else {
+            setInputSourceSyncStatus(
+                inputSourceFollowViewer ? "Waiting for remote keyboard" : "Follow Viewer input source is off — match sources manually",
+                retryAvailable: false
+            )
+            return
+        }
+        if inputSourceFollowViewer {
+            synchronizeViewerInputSource(in: scope, force: true)
+        } else {
+            inputSourceSyncTimeoutTask?.cancel()
+            inputSourceRetryGate.cancel()
+            inputSourceSyncGate.useManualSelection(in: scope)
+            setInputSourceSyncStatus("Follow Viewer input source is off — match sources manually", retryAvailable: false)
+        }
+    }
+
+    private func handleJISEisuKey() -> Bool {
+        guard inputSourceFollowViewer,
+              inputSourceSyncCapabilityAvailable,
+              remoteSurfaceFocused,
+              let scope = activeInputSendScope else { return false }
+        let current = inputSourceProvider.currentInputSource()
+        let enabledEnglish = inputSourceProvider.enabledInputSources()
+            .filter { $0.kind == .english }
+            .sorted { $0.identifier < $1.identifier }
+        let target: InputSourceDescriptor?
+        if current?.kind == .english {
+            target = current
+        } else if enabledEnglish.count == 1 {
+            target = enabledEnglish[0]
+        } else {
+            target = nil
+        }
+        guard let target else {
+            inputSourceSyncGate.useManualSelection(in: scope, source: current)
+            setInputSourceSyncStatus("JIS Eisu needs one enabled English source — match sources manually", retryAvailable: false)
+            return true
+        }
+        let outcome = inputSourceProvider.selectInputSource(target)
+        guard outcome == .applied || inputSourceProvider.currentInputSource() == target else {
+            inputSourceSyncGate.useManualSelection(in: scope, source: current)
+            setInputSourceSyncStatus("JIS Eisu source change is unsupported — match sources manually", retryAvailable: false)
+            return true
+        }
+        observedInputSourceChange()
+        return true
+    }
+
+    private func handleJISKanaKey() -> Bool {
+        guard inputSourceFollowViewer,
+              inputSourceSyncCapabilityAvailable,
+              remoteSurfaceFocused,
+              let scope = activeInputSendScope else { return false }
+        inputSourceSyncGate.useManualSelection(
+            in: scope,
+            source: inputSourceProvider.currentInputSource()
+        )
+        setInputSourceSyncStatus(
+            "JIS Kana's Japanese/internal mode is unsupported — choose the same input source manually",
+            retryAvailable: false
+        )
+        return true
+    }
+
+    private func updateInputSourceSyncAvailability(
+        for snapshot: SessionSnapshot,
+        readiness: InputReadiness,
+        keyboardInputEnabled: Bool
+    ) {
+        inputSourceSyncCapabilityAvailable = keyboardInputEnabled &&
+            snapshot.authorizedCapabilities.contains(.inputSourceSync)
+        guard readiness.isReady,
+              keyboardInputEnabled,
+              let scope = activeInputSendScope else {
+            inputSourceSyncGate.setInactive()
+            setInputSourceSyncStatus("Remote keyboard is unavailable", retryAvailable: false)
+            return
+        }
+        guard remoteSurfaceFocused else {
+            inputSourceSyncGate.setInactive()
+            setInputSourceSyncStatus("Remote view is inactive — return to sync", retryAvailable: false)
+            return
+        }
+        guard inputSourceFollowViewer else {
+            inputSourceSyncGate.useManualSelection(in: scope)
+            setInputSourceSyncStatus("Follow Viewer input source is off — match sources manually", retryAvailable: false)
+            return
+        }
+        guard inputSourceSyncCapabilityAvailable else {
+            inputSourceSyncGate.useManualSelection(in: scope)
+            setInputSourceSyncStatus("Host does not support input-source sync — match sources manually", retryAvailable: false)
+            return
+        }
+        guard let source = inputSourceProvider.currentInputSource() else {
+            inputSourceSyncGate.useManualSelection(in: scope)
+            setInputSourceSyncStatus("Unsupported Viewer input source — match sources manually", retryAvailable: false)
+            return
+        }
+        if inputSourceSyncGate.needsSynchronization(to: source, in: scope) {
+            beginInputSourceSynchronization(to: source, in: scope)
+        } else if inputSourceSyncGate.state == .synchronized {
+            setInputSourceSyncStatus("Synchronized", retryAvailable: false)
         }
     }
 
     private func refreshInputSurface(for observedSession: SessionCoordinator? = nil) async {
         guard let session = observedSession ?? self.session else {
             updateInputSendScope(nil)
+            inputSourceSyncCapabilityAvailable = false
+            setInputSourceSyncStatus("Not connected", retryAvailable: false)
             let readiness = InputReadiness.awaitingAuthentication
             contentView?.updateStream(size: streamDimensions, readiness: readiness)
             contentView?.updateClipboard(status: nil, available: false)
@@ -1320,6 +1775,11 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             readiness: readiness,
             capabilities: inputCapabilities
         )
+        updateInputSourceSyncAvailability(
+            for: snapshot,
+            readiness: readiness,
+            keyboardInputEnabled: inputCapabilities.keyboardInputEnabled
+        )
         switch readiness {
         case .ready:
             setStatus("Connected — input ready")
@@ -1370,8 +1830,15 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func updateInputSendScope(_ scope: ViewerInputSendScope?) {
+        guard activeInputSendScope != scope else { return }
+        inputSourceSyncTimeoutTask?.cancel()
+        inputSourceRetryGate.cancel()
+        inputSourceSyncGate.invalidateScope()
         activeInputSendScope = scope
         inputSendQueue.updateScope(scope)
+        if scope == nil {
+            inputSourceSyncCapabilityAvailable = false
+        }
     }
 
     private func advancePresentationLifetime(resetDecoder: Bool) {
@@ -1624,6 +2091,16 @@ private final class ViewerContentView: NSView {
     var onPairingRetry: (@MainActor () -> Void)?
     var onForgetPairings: (@MainActor () -> Void)?
     var onClipboardToggle: (@MainActor () -> Void)?
+    var onRetryInputSource: (@MainActor () -> Void)?
+    var onRemoteFocusChange: (@MainActor (Bool) -> Void)? {
+        didSet { surface.onRemoteFocusChange = onRemoteFocusChange }
+    }
+    var onJISEisuKey: (@MainActor () -> Bool)? {
+        didSet { surface.onJISEisuKey = onJISEisuKey }
+    }
+    var onJISKanaKey: (@MainActor () -> Bool)? {
+        didSet { surface.onJISKanaKey = onJISKanaKey }
+    }
     var onSettingsChange: (@MainActor () -> Void)?
     var status: String = "Starting…" {
         didSet {
@@ -1637,7 +2114,7 @@ private final class ViewerContentView: NSView {
     var settingsValues: [String: String] {
         ["connection": connectionState.statusTitle, "host": peerName,
          "latency": connectionLatency, "input": compactInputStatus(readiness),
-         "message": status, "clipboard": clipboardSummary]
+         "inputSource": inputSourceSyncStatus, "message": status, "clipboard": clipboardSummary]
     }
 
     private let statusLabel = NSTextField(labelWithString: "Starting…")
@@ -1658,6 +2135,7 @@ private final class ViewerContentView: NSView {
     private let selectWindowButton = NSButton(title: "Select", target: nil, action: nil)
     private let clipboardButton = NSButton(title: "Text clipboard unavailable", target: nil, action: nil)
     private let retryPairingButton = NSButton(title: "Retry pairing", target: nil, action: nil)
+    private let retryInputSourceButton = NSButton(title: "Retry source sync", target: nil, action: nil)
     private var windowOptions: [WindowDescriptor] = []
     private var windowSelectionGeneration: UInt64?
     private(set) var windowSelectionCatalogGeneration: UInt64?
@@ -1669,6 +2147,8 @@ private final class ViewerContentView: NSView {
     private var streamSize: CGSize = .zero
     private var readiness: InputReadiness = .awaitingAuthentication
     private var inputCapabilities: ViewerInputCapabilities = .none
+    private var inputSourceSyncStatus = "Waiting for remote keyboard"
+    private(set) var inputSourceRetryAvailable = false
 
     override var isFlipped: Bool { true }
 
@@ -1747,6 +2227,10 @@ private final class ViewerContentView: NSView {
         retryPairingButton.action = #selector(retryPairing(_:))
         retryPairingButton.controlSize = .small
         retryPairingButton.isHidden = true
+        retryInputSourceButton.target = self
+        retryInputSourceButton.action = #selector(retryInputSource(_:))
+        retryInputSourceButton.controlSize = .small
+        retryInputSourceButton.isHidden = true
         addSubview(videoView)
         addSubview(surface)
         addSubview(connectionPanel)
@@ -1767,6 +2251,7 @@ private final class ViewerContentView: NSView {
         addSubview(selectWindowButton)
         addSubview(clipboardButton)
         addSubview(retryPairingButton)
+        addSubview(retryInputSourceButton)
         surface.onInputEvent = onInputEvent
         surface.onInputRejected = onInputRejected
         updateConnectionDetails()
@@ -1811,6 +2296,15 @@ private final class ViewerContentView: NSView {
     func setPairingRetryVisible(_ visible: Bool) {
         retryPairingButton.isHidden = !visible
         retryPairingButton.isEnabled = visible
+        needsLayout = true
+    }
+
+    func setInputSourceSyncStatus(_ status: String, retryAvailable: Bool) {
+        inputSourceSyncStatus = status
+        inputSourceRetryAvailable = retryAvailable
+        retryInputSourceButton.isHidden = !retryAvailable
+        retryInputSourceButton.isEnabled = retryAvailable
+        updateConnectionDetails()
         needsLayout = true
     }
 
@@ -1879,8 +2373,22 @@ private final class ViewerContentView: NSView {
             ? "Route: LAN / TLS"
             : "Transport: LAN / TLS"
         latencyLabel.stringValue = "RTT: \(connectionLatency)"
-        inputStatusLabel.stringValue = "Input: \(compactInputStatus(readiness))"
-        inputStatusLabel.textColor = readiness.isReady ? .systemGreen : .secondaryLabelColor
+        let compactSourceStatus: String
+        switch inputSourceSyncStatus {
+        case "Synchronized": compactSourceStatus = "synced"
+        case "Waiting for Host input-source change…": compactSourceStatus = "waiting"
+        case "Follow Viewer input source is off — match sources manually": compactSourceStatus = "manual"
+        case "Host does not support input-source sync — match sources manually": compactSourceStatus = "manual"
+        case "Unsupported Viewer input source — match sources manually": compactSourceStatus = "manual"
+        case "Remote view is inactive — return to sync": compactSourceStatus = "paused"
+        case "Input source sync timed out — enable the same Chinese input method on Host, then retry": compactSourceStatus = "retry"
+        default: compactSourceStatus = inputSourceSyncStatus
+        }
+        inputStatusLabel.stringValue = "Input: \(compactInputStatus(readiness)) · Source: \(compactSourceStatus)"
+        inputStatusLabel.toolTip = "Input: \(compactInputStatus(readiness)). Input-source sync: \(inputSourceSyncStatus)."
+        inputStatusLabel.textColor = readiness.isReady && inputSourceSyncStatus == "Synchronized"
+            ? .systemGreen
+            : readiness.isReady ? .secondaryLabelColor : .systemOrange
         versionLabel.stringValue = "Version: \(viewerApplicationMetadata.displayVersionDetails)"
         protocolLabel.stringValue = "Protocol: \(viewerProtocolVersion)"
 
@@ -2029,7 +2537,10 @@ private final class ViewerContentView: NSView {
         let contentRight = panelFrame.maxX - 14
         let fpsWidth: CGFloat = 80
         let retryWidth: CGFloat = 104
-        let retryInset = retryPairingButton.isHidden ? 0 : retryWidth + 8
+        let sourceRetryWidth: CGFloat = 112
+        let pairingInset = retryPairingButton.isHidden ? 0 : retryWidth + 8
+        let sourceInset = retryInputSourceButton.isHidden ? 0 : sourceRetryWidth + 8
+        let retryInset = pairingInset + sourceInset
         let fpsX = contentRight - retryInset - fpsWidth
         let stateLabelWidth: CGFloat = 124
         connectionStateLabel.frame = NSRect(
@@ -2060,6 +2571,13 @@ private final class ViewerContentView: NSView {
             x: contentRight - retryWidth,
             y: panelFrame.minY + 7,
             width: retryWidth,
+            height: 24
+        )
+        let sourceRetryX = contentRight - retryWidth - 8 - sourceRetryWidth
+        retryInputSourceButton.frame = NSRect(
+            x: retryPairingButton.isHidden ? contentRight - sourceRetryWidth : sourceRetryX,
+            y: panelFrame.minY + 7,
+            width: sourceRetryWidth,
             height: 24
         )
         let firstRowY = panelFrame.minY + 36
@@ -2215,6 +2733,11 @@ private final class ViewerContentView: NSView {
     @objc private func retryPairing(_ sender: NSButton) {
         _ = sender
         onPairingRetry?()
+    }
+
+    @objc private func retryInputSource(_ sender: NSButton) {
+        _ = sender
+        onRetryInputSource?()
     }
 
     @objc private func toggleClipboard(_ sender: NSButton) {

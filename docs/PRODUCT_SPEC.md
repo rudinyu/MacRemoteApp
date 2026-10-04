@@ -113,6 +113,26 @@ available on every macOS version.
 5. If permissions, focus, authorization, or session health are lost, input is
    disabled and the Viewer shows a clear state.
 
+### Follow the Viewer input source (approved M10 extension)
+
+1. When both peers authorize `inputSourceSync`, the focused Viewer remote
+   surface requests the actual selected Chinese/English source state before
+   delivering keyboard input. The Host sets that state rather than replaying
+   a toggle: EN to an already-English Host is a no-op.
+2. Chinese requires the same enabled input-source/mode identifier on the Host.
+   A missing or disabled source pauses keyboard delivery with an actionable
+   status; it must not silently substitute another Chinese input method.
+3. The Host still performs composition and candidate selection. This does not
+   add Viewer-side composed-text insertion or background control. Leaving the
+   remote surface stops source synchronization; no Host source restoration is
+   attempted in the background.
+4. Window replacement, reauthorization, reconnect, and returning to the remote
+   surface require fresh synchronization. A late acknowledgement cannot
+   release keyboard input belonging to a different source request or session.
+5. Older peers retain manual Host input-source selection. See
+   [ADR-0007](decisions/0007-m10-input-source-following.md) for the bounded
+   optional protocol and unsupported third-party internal IME modes.
+
 ### Exchange text clipboard content
 
 1. Clipboard synchronization is opt-in per session and visibly indicated.
@@ -202,6 +222,10 @@ available on every macOS version.
   independently of input readiness. Show LAN/TLS, Host, RTT, FPS, release, and
   protocol information without stale connected data after disconnect; input
   must read Not connected while disconnected.
+- **VIEWER-11**: Follow the focused Viewer's actual Chinese/English input
+  source when negotiated, keep switching shortcuts local, and show pending,
+  synchronized, or unavailable states without sending keyboard input before
+  the matching Host acknowledgement.
 
 ### Shared requirements
 

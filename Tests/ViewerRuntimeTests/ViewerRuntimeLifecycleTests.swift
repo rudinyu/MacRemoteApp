@@ -289,6 +289,310 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         XCTAssertTrue(gate.admit(sessionID: replacementSessionID, authorizationGeneration: 2))
     }
 
+    func testInputSourceAcknowledgementReleasesFirstTypedKeyInOrder() {
+        let scope = makeScope()
+        var gate = ViewerInputSourceSyncGate(maximumBufferedEvents: 4)
+        let request = gate.beginSynchronization(
+            in: scope,
+            source: InputSourceDescriptor(identifier: "test.chinese", kind: .chinese)
+        )
+        let down = keyRecord(1, window: scope.windowGeneration, keyCode: 42, pressed: true)
+        let up = keyRecord(2, window: scope.windowGeneration, keyCode: 42, pressed: false)
+
+        XCTAssertNotNil(request)
+        XCTAssertEqual(gate.state, .pending)
+        XCTAssertEqual(gate.routeKeyboard(down, in: scope), .buffered)
+        XCTAssertEqual(gate.routeKeyboard(up, in: scope), .buffered)
+        XCTAssertEqual(
+            gate.acknowledge(scope: scope, requestID: request!.requestID, applied: true),
+            .applied([down, up])
+        )
+        XCTAssertEqual(gate.state, .synchronized)
+    }
+
+    func testInitialAndSameWindowReauthorizedScopeBothRequireSynchronization() {
+        let firstScope = makeScope(windowGeneration: 11, authorizationGeneration: 4)
+        let source = InputSourceDescriptor(identifier: "test.chinese", kind: .chinese)
+        var gate = ViewerInputSourceSyncGate(maximumBufferedEvents: 4)
+
+        XCTAssertTrue(gate.needsSynchronization(to: source, in: firstScope))
+        let first = gate.beginSynchronization(in: firstScope, source: source)!
+        XCTAssertEqual(
+            gate.acknowledge(scope: firstScope, requestID: first.requestID, applied: true),
+            .applied([])
+        )
+
+        gate.invalidateScope()
+        let reauthorizedScope = makeScope(
+            sessionID: firstScope.sessionID,
+            windowGeneration: firstScope.windowGeneration,
+            authorizationGeneration: firstScope.authorizationGeneration + 1
+        )
+        XCTAssertTrue(gate.needsSynchronization(to: source, in: reauthorizedScope))
+        let reauthorized = gate.beginSynchronization(in: reauthorizedScope, source: source)!
+        XCTAssertEqual(reauthorized.scope, reauthorizedScope)
+    }
+
+    func testFailedSourceRemainsStickyUntilRetryOrSourceChange() {
+        let scope = makeScope()
+        let source = InputSourceDescriptor(identifier: "test.chinese", kind: .chinese)
+        let changedSource = InputSourceDescriptor(identifier: "test.english", kind: .english)
+        var gate = ViewerInputSourceSyncGate(maximumBufferedEvents: 4)
+        let request = gate.beginSynchronization(in: scope, source: source)!
+
+        XCTAssertEqual(
+            gate.acknowledge(scope: scope, requestID: request.requestID, applied: false),
+            .failed
+        )
+        XCTAssertFalse(gate.needsSynchronization(to: source, in: scope))
+        XCTAssertTrue(gate.needsSynchronization(to: changedSource, in: scope))
+
+        let explicitRetry = gate.beginSynchronization(in: scope, source: source)!
+        XCTAssertGreaterThan(explicitRetry.requestID, request.requestID)
+    }
+
+    func testUnsentQueuedKeyboardPressIsInvalidatedBySourceSupersession() {
+        let scope = makeScope()
+        var gate = ViewerInputSourceSyncGate(maximumBufferedEvents: 4)
+        gate.useManualSelection(in: scope)
+        let down = keyRecord(1, window: scope.windowGeneration, keyCode: 0, pressed: true)
+        XCTAssertEqual(gate.routeKeyboard(down, in: scope), .send)
+        let oldDeliveryToken = gate.keyboardDeliveryToken
+
+        _ = gate.beginSynchronization(
+            in: scope,
+            source: InputSourceDescriptor(identifier: "test.chinese", kind: .chinese)
+        )
+        XCTAssertFalse(gate.allowsQueuedKeyboardSend(
+            down,
+            in: scope,
+            deliveryToken: oldDeliveryToken
+        ))
+        XCTAssertEqual(gate.takeRemoteKeysForOrderedRelease(in: scope), [])
+    }
+
+    func testOrderedKeyReleaseSurvivesFocusLossAfterInFlightPressCompletes() async {
+        let scope = makeScope()
+        let started = AsyncSignal()
+        let release = AsyncSignal()
+        let recorder = SendRecorder()
+        var gate = ViewerInputSourceSyncGate(maximumBufferedEvents: 4)
+        gate.useManualSelection(in: scope)
+        let down = keyRecord(1, window: scope.windowGeneration, keyCode: 56, pressed: true)
+        let up = keyRecord(2, window: scope.windowGeneration, keyCode: 56, pressed: false)
+        let deliveryToken = gate.keyboardDeliveryToken
+        XCTAssertEqual(gate.routeKeyboard(down, in: scope), .send)
+
+        let queue = ViewerInputSendQueue(capacity: 4)
+        queue.updateScope(scope)
+        XCTAssertEqual(queue.enqueue(down, in: scope) { event, epoch in
+            guard gate.allowsQueuedKeyboardSend(event, in: scope, deliveryToken: deliveryToken) else { return }
+            await recorder.send(event, epoch, route: "remote", started: started, release: release)
+            gate.noteDelivered(event, in: scope)
+        }, .enqueued)
+        await started.wait()
+
+        XCTAssertEqual(gate.routeKeyboard(up, in: scope), .send)
+        XCTAssertEqual(queue.enqueue(up, in: scope) { event, epoch in
+            guard gate.allowsQueuedKeyboardSend(event, in: scope, deliveryToken: deliveryToken) else { return }
+            await recorder.send(event, epoch, route: "remote")
+            gate.noteDelivered(event, in: scope)
+        }, .enqueued)
+
+        gate.setInactive()
+        XCTAssertFalse(gate.allowsQueuedKeyboardSend(up, in: scope, deliveryToken: deliveryToken))
+        await release.signal()
+        await queue.waitUntilIdle()
+
+        XCTAssertFalse(gate.allowsQueuedKeyboardSend(up, in: scope, deliveryToken: deliveryToken))
+        let sent = await recorder.snapshot()
+        XCTAssertEqual(sent.map(\.kind), [.keyDown, .keyUp])
+    }
+
+    func testSyntheticModifierReleaseKeepsPhysicalReleaseFenceUntilKeyUp() {
+        let scope = makeScope()
+        let source = InputSourceDescriptor(identifier: "test.chinese", kind: .chinese)
+        var gate = ViewerInputSourceSyncGate(maximumBufferedEvents: 4)
+        gate.useManualSelection(in: scope)
+
+        let modifierDown = keyRecord(1, window: scope.windowGeneration, keyCode: 56, pressed: true)
+        XCTAssertEqual(gate.routeKeyboard(modifierDown, in: scope), .send)
+        gate.noteDelivered(modifierDown, in: scope)
+
+        let request = gate.beginSynchronization(in: scope, source: source)!
+        XCTAssertEqual(gate.takeRemoteKeysForOrderedRelease(in: scope), [56])
+        // Synthetic release confirms only remote bookkeeping; physical release
+        // is still required to clear the gate's discard-until-up fence.
+        gate.noteDelivered(
+            keyRecord(2, window: scope.windowGeneration, keyCode: 56, pressed: false),
+            in: scope
+        )
+        XCTAssertEqual(
+            gate.acknowledge(scope: scope, requestID: request.requestID, applied: true),
+            .applied([])
+        )
+
+        XCTAssertEqual(
+            gate.routeKeyboard(
+                keyRecord(3, window: scope.windowGeneration, keyCode: 56, pressed: false),
+                in: scope
+            ),
+            .discarded
+        )
+        XCTAssertEqual(
+            gate.routeKeyboard(
+                keyRecord(4, window: scope.windowGeneration, keyCode: 56, pressed: true),
+                in: scope
+            ),
+            .send
+        )
+    }
+
+    func testRetryRequestedFromSettingsWaitsForRemoteSurfaceFocus() {
+        var retryGate = ViewerInputSourceRetryGate()
+        XCTAssertFalse(retryGate.request(remoteSurfaceFocused: false))
+        XCTAssertTrue(retryGate.isWaitingForRemoteFocus)
+        XCTAssertTrue(retryGate.consumeOnRemoteFocus())
+        XCTAssertFalse(retryGate.isWaitingForRemoteFocus)
+        XCTAssertFalse(retryGate.consumeOnRemoteFocus())
+        XCTAssertTrue(retryGate.request(remoteSurfaceFocused: true))
+    }
+
+    func testSupersedingSourceDropsOldQueuedKeysAndIgnoresLateAcknowledgement() {
+        let scope = makeScope()
+        var gate = ViewerInputSourceSyncGate(maximumBufferedEvents: 8)
+        let first = gate.beginSynchronization(
+            in: scope,
+            source: InputSourceDescriptor(identifier: "test.zhuyin", kind: .chinese)
+        )!
+        let staleDown = keyRecord(1, window: scope.windowGeneration, keyCode: 12, pressed: true)
+        XCTAssertEqual(gate.routeKeyboard(staleDown, in: scope), .buffered)
+
+        let second = gate.beginSynchronization(
+            in: scope,
+            source: InputSourceDescriptor(identifier: "test.english", kind: .english)
+        )!
+        XCTAssertGreaterThan(second.requestID, first.requestID)
+        XCTAssertEqual(
+            gate.acknowledge(scope: scope, requestID: first.requestID, applied: true),
+            .stale
+        )
+        XCTAssertEqual(
+            gate.routeKeyboard(
+                keyRecord(2, window: scope.windowGeneration, keyCode: 12, pressed: false),
+                in: scope
+            ),
+            .discarded
+        )
+
+        let freshDown = keyRecord(3, window: scope.windowGeneration, keyCode: 0, pressed: true)
+        XCTAssertEqual(gate.routeKeyboard(freshDown, in: scope), .buffered)
+        XCTAssertEqual(
+            gate.acknowledge(scope: scope, requestID: second.requestID, applied: true),
+            .applied([freshDown])
+        )
+    }
+
+    func testSameWindowReauthorizationInvalidatesBufferedAndLateAcknowledgedKeys() {
+        let oldScope = makeScope(windowGeneration: 11, authorizationGeneration: 4)
+        let newScope = makeScope(
+            sessionID: oldScope.sessionID,
+            windowGeneration: 11,
+            authorizationGeneration: 5
+        )
+        var gate = ViewerInputSourceSyncGate(maximumBufferedEvents: 8)
+        let oldRequest = gate.beginSynchronization(
+            in: oldScope,
+            source: InputSourceDescriptor(identifier: "test.chinese", kind: .chinese)
+        )!
+        let oldDown = keyRecord(1, window: 11, keyCode: 56, pressed: true)
+        XCTAssertEqual(gate.routeKeyboard(oldDown, in: oldScope), .buffered)
+
+        let newRequest = gate.beginSynchronization(
+            in: newScope,
+            source: InputSourceDescriptor(identifier: "test.chinese", kind: .chinese)
+        )!
+        XCTAssertEqual(
+            gate.acknowledge(scope: oldScope, requestID: oldRequest.requestID, applied: true),
+            .stale
+        )
+        XCTAssertEqual(
+            gate.routeKeyboard(
+                keyRecord(2, window: 11, keyCode: 56, pressed: false),
+                in: newScope
+            ),
+            .discarded
+        )
+        let currentDown = keyRecord(3, window: 11, keyCode: 56, pressed: true)
+        XCTAssertEqual(gate.routeKeyboard(currentDown, in: newScope), .buffered)
+        XCTAssertEqual(
+            gate.acknowledge(scope: newScope, requestID: newRequest.requestID, applied: true),
+            .applied([currentDown])
+        )
+    }
+
+    func testTimeoutDropsUnsentsButAllowsOrderedReleaseOfRemoteHeldKey() {
+        let scope = makeScope()
+        var gate = ViewerInputSourceSyncGate(maximumBufferedEvents: 4)
+        gate.useManualSelection(in: scope)
+        let heldDown = keyRecord(1, window: scope.windowGeneration, keyCode: 59, pressed: true)
+        XCTAssertEqual(gate.routeKeyboard(heldDown, in: scope), .send)
+        gate.noteDelivered(heldDown, in: scope)
+
+        let request = gate.beginSynchronization(
+            in: scope,
+            source: InputSourceDescriptor(identifier: "test.chinese", kind: .chinese)
+        )!
+        let pendingDown = keyRecord(2, window: scope.windowGeneration, keyCode: 0, pressed: true)
+        XCTAssertEqual(gate.routeKeyboard(pendingDown, in: scope), .buffered)
+        XCTAssertEqual(gate.takeRemoteKeysForOrderedRelease(in: scope), [59])
+        XCTAssertTrue(gate.timeout(scope: scope, requestID: request.requestID))
+        XCTAssertEqual(gate.state, .failed)
+        XCTAssertEqual(
+            gate.acknowledge(scope: scope, requestID: request.requestID, applied: true),
+            .stale
+        )
+
+        let heldUp = keyRecord(3, window: scope.windowGeneration, keyCode: 59, pressed: false)
+        gate.noteDelivered(heldUp, in: scope)
+        XCTAssertEqual(gate.takeRemoteKeysForOrderedRelease(in: scope), [])
+        XCTAssertEqual(
+            gate.routeKeyboard(
+                keyRecord(4, window: scope.windowGeneration, keyCode: 0, pressed: false),
+                in: scope
+            ),
+            .discarded
+        )
+    }
+
+    func testKeyboardGateOverflowFailsClosedWithoutReplayingPendingPresses() {
+        let scope = makeScope()
+        var gate = ViewerInputSourceSyncGate(maximumBufferedEvents: 1)
+        let request = gate.beginSynchronization(
+            in: scope,
+            source: InputSourceDescriptor(identifier: "test.chinese", kind: .chinese)
+        )!
+        XCTAssertEqual(
+            gate.routeKeyboard(
+                keyRecord(1, window: scope.windowGeneration, keyCode: 0, pressed: true),
+                in: scope
+            ),
+            .buffered
+        )
+        XCTAssertEqual(
+            gate.routeKeyboard(
+                keyRecord(2, window: scope.windowGeneration, keyCode: 1, pressed: true),
+                in: scope
+            ),
+            .overflow
+        )
+        XCTAssertEqual(gate.state, .failed)
+        XCTAssertEqual(
+            gate.acknowledge(scope: scope, requestID: request.requestID, applied: true),
+            .stale
+        )
+    }
+
     private func makeScope(
         sessionID: UUID = UUID(),
         windowGeneration: UInt64 = 7,
@@ -313,6 +617,22 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
             kind: kind,
             keyCode: kind == .keyDown || kind == .keyUp ? 0 : nil,
             modifiers: kind == .keyDown || kind == .keyUp ? 0 : nil
+        )
+    }
+
+    private func keyRecord(
+        _ sequence: UInt64,
+        window: UInt64,
+        keyCode: UInt16,
+        pressed: Bool
+    ) -> InputEventRecord {
+        InputEventRecord(
+            sequence: sequence,
+            timestampNanoseconds: sequence,
+            windowGeneration: window,
+            kind: pressed ? .keyDown : .keyUp,
+            keyCode: keyCode,
+            modifiers: 0
         )
     }
 }

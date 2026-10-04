@@ -498,6 +498,12 @@ macOS Dock/permission behavior on the physical target Macs.
 No feature additions beyond the accepted V1 specification. Any new request
 becomes a post-V1 milestone proposal.
 
+User-approved M10 exception (2026-10-04): Viewer-led Chinese/English input-source
+following is authorized as a narrow integration fix. Its contract and tests
+are defined in [ADR-0007](decisions/0007-m10-input-source-following.md). This
+does not add Viewer-side composition, text injection, background control, or
+other post-V1 capabilities.
+
 ### Exit criteria
 
 - Product acceptance checklist in `docs/PRODUCT_SPEC.md` is complete or every

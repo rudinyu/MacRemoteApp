@@ -33,6 +33,33 @@ final class HostInputMessageHandler: @unchecked Sendable {
         return try controller.inject(record)
     }
 
+    /// The receive-time admission closure calls this synchronously. Never take
+    /// `lock` on the background caller before hopping: the AppKit status path
+    /// can be waiting on the main thread at the same time.
+    func synchronizeInputSource(
+        descriptor: InputSourceDescriptor,
+        windowGeneration: UInt64
+    ) -> InputSourceSelectionOutcome {
+        if Thread.isMainThread {
+            return MainActor.assumeIsolated {
+                controller.synchronizeInputSource(
+                    descriptor: descriptor,
+                    windowGeneration: windowGeneration,
+                    provider: SystemInputSourceProvider()
+                )
+            }
+        }
+        return DispatchQueue.main.sync {
+            MainActor.assumeIsolated {
+                controller.synchronizeInputSource(
+                    descriptor: descriptor,
+                    windowGeneration: windowGeneration,
+                    provider: SystemInputSourceProvider()
+                )
+            }
+        }
+    }
+
     func reset() {
         lock.lock()
         defer { lock.unlock() }

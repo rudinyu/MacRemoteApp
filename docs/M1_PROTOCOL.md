@@ -140,6 +140,8 @@ are rejected.
 | `0x0012` | Close |
 | `0x0017` | KeyframeRequest (M8, optional capability) |
 | `0x0018` | ReceiverReport (M8, optional capability) |
+| `0x0019` | InputSourceSelection (M10, optional capability) |
+| `0x001A` | InputSourceAcknowledgement (M10, optional capability) |
 
 ### Capabilities
 
@@ -153,6 +155,7 @@ are rejected.
 | `0x0006` | Ping/pong |
 | `0x0007` | Keyframe request (M8, optional) |
 | `0x0008` | Receiver report (M8, optional) |
+| `0x0009` | Input-source synchronization (M10, optional) |
 
 `0x8000` is a wire-only mandatory marker and is not part of the identifier
 value. `CodecIdentifier.h264` is `0x0001`.
@@ -189,6 +192,15 @@ capability list above.
 | `Close` | 1 `reason` (u16), 2 `detailCode` (utf8, optional) |
 | `KeyframeRequest` | 1 `generation` (u64), 2 `reason` (u8: 1 media gap, 2 decode failure) |
 | `ReceiverReport` | 1 `generation` (u64), 2 `queuingDelayMicroseconds` (u32), 3 `receivedFrames` (u32), 4 `discardedFrames` (u32) |
+| `InputSourceSelection` | 1 `windowGeneration` (nonzero u64), 2 `requestID` (nonzero u64), 3 `kind` (u8: 1 English, 2 Chinese), 4 `sourceIdentifier` (utf8, 1–256 bytes, no control characters) |
+| `InputSourceAcknowledgement` | 1 `windowGeneration` (nonzero u64), 2 `requestID` (nonzero u64), 3 `status` (u8: 1 applied, 2 unavailable, 3 denied, 4 failed) |
+
+The M10 source messages have a separate 512-byte payload cap. Both require
+`keyboardInput` and `inputSourceSync` authorization for the selected window.
+They do not change protocol `2.0`: older peers never receive these optional
+messages without negotiating the capability. Request/acknowledgement lifetime
+and OS selection rules are in
+[ADR-0007](decisions/0007-m10-input-source-following.md).
 
 `WindowList` nested window records use the same TLV format with fields:
 1 `identifier` (u64), 2 `applicationIdentifier` (utf8), 3 `title` (utf8,
@@ -229,6 +241,8 @@ Error               0101010000000200050201000000010103000000001073637265656E2D72
 Close               010101000000020001020000000004646F6E65
 KeyframeRequest     01010100000008000000000000000902010000000101
 ReceiverReport      0101010000000800000000000000090201000000040000A4100301000000040000001E04010000000400000002
+InputSourceSelection 010101000000080000000000000009020100000008010203040506070803010000000101040100000003414243
+InputSourceAcknowledgement 010101000000080000000000000009020100000008010203040506070803010000000101
 ```
 
 The test suite asserts the exact bytes above, then decodes and re-encodes every
