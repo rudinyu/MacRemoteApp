@@ -165,6 +165,17 @@ post-V1 feature was performed.
 
 ### M10 — V1 integration pilot
 
+2026-10-08 handoff: `0.2.1010` implementation and canonical local validation
+are complete, and source commit `1038419` was pushed to `origin/main`.
+The operator explicitly owns manual physical acceptance. The updated
+[M10 checklist](M10_ACCEPTANCE.md) identifies the current P6 behavior,
+notarization configuration, support/evidence matrix, and manual run record.
+This handoff does not close the physical acceptance or release decision.
+Documentation-only link/anchor, Bash-example syntax, milestone, and
+`git diff --check` validation passed. Codex self-review found no remaining
+actionable issue in the handoff diff; no new product build or physical run
+is claimed for these documentation changes.
+
 Implemented:
 
 - Standalone [`Uninstall-MacRemoteApp.command`](../scripts/Uninstall-MacRemoteApp.command)

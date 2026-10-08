@@ -52,20 +52,41 @@ not a protocol revision. The rows below remain unchecked until exercised on
 the target Macs; [dated local UI evidence](TESTING_CLEANUP.md#local-evidence-2026-09-26-021003)
 is not physical acceptance.
 
+## Current candidate and manual acceptance
+
+The current source candidate is `0.2.1010`; the retained notarized RC is
+`0.2.1009`. The latter does not contain the
+[P6 process-control extension](P6_BACKGROUND_CONTROL.md). On 2026-10-08 the
+operator elected to perform physical acceptance manually. Every physical row
+below remains unchecked until the operator records evidence for the exact
+installed build. The canonical local CI for `0.2.1010` passed; its temporary
+ad-hoc packages are not a new notarized candidate.
+
+The runtime description above describes the V1 foreground-only baseline.
+When both `0.2.1010` peers negotiate P6, selecting a window does not activate
+its app. Pairing is followed by separate Host-local control approval; without
+that grant the session is view-only. An active grant permits only a safe
+selected process, with pause/revoke preserving video. Background control needs
+known inactive global and target secure-input inspection, so unavailable AX
+inspection blocks it. Global input-source following stays foreground-only;
+match input sources manually for background input. Legacy peers retain the
+foreground-only behavior. Record P6 evidence separately from V1 M10 evidence.
+
 ## Prerequisites
 
 1. Build the release candidates on the current checkout:
 
    ```bash
    export MACREMOTEAPP_SIGNING_IDENTITY='Developer ID Application: YOUR NAME (TEAMID)'
-   bash scripts/release-notarized.sh
+   bash scripts/release-notarized.sh rc
    ```
 
    This first runs the canonical `scripts/validate.sh` repository validation.
    Only after deterministic CI passes does it
-   build, submit, staple, and validate notarized `MacRemoteApp-Host.dmg` and
-   `MacRemoteApp-Viewer.dmg`, together with the stapled app bundles. The
-   default output is the repository-local `build/release/` directory, outside
+   build, submit, staple, and validate versioned RC DMGs such as
+   `MacRemoteApp-Host-0.2.1010.dmg` and `MacRemoteApp-Viewer-0.2.1010.dmg`,
+   together with the stapled app bundles. The command above targets
+   `build/rc/`; without a channel argument the default is `build/release/`, outside
    `.build`. Local artifacts are organized under `build/testing/`,
    `build/beta/`, `build/rc/`, and `build/release/`; the whole `build/` tree
    is excluded through `.git/info/exclude` and must never be staged or pushed.
@@ -79,9 +100,15 @@ is not physical acceptance.
    promotion leaves the old channel intact, while a failure during promotion
    restores it.
    The successful CI and notarization flow removes the repository `.build`
-   cache. The script uses the local `notarytool-profile` Keychain profile by
-   default. Do not place the profile, its credentials, or the signing identity
-   configuration in the repository.
+   cache. The script reads the owner-only shared
+   `~/.config/codex/notarization.env`; an explicit
+   `MACREMOTEAPP_NOTARY_PROFILE` overrides it. With no shared default, the
+   fallback is `notarytool-profile`. Shared settings can select a Keychain
+   profile or the existing external API-key reference; see the
+   [configuration contract](../README.md#physical-m2-test).
+   Do not place credential material or signing configuration in the repository.
+   A new Apple submission requires release authorization; none was performed
+   for the source-only `0.2.1010` completion.
    If a separate read-only profile diagnostic is useful, run it in the same
    logged-in macOS session that will run the release command:
 
@@ -103,7 +130,7 @@ is not physical acceptance.
 
    ```bash
    bash scripts/validate-notarized-release.sh \
-     "$PWD/build/release"
+     "$PWD/build/rc"
    ```
 
    `scripts/notarize-device-apps.sh` is the lower-level operation. Without
@@ -174,11 +201,13 @@ from the production bundle's first-pairing flow.
 | User documentation | Each DMG contains the User Guide, debugging guide, and debug-log collection guide | ☐ |
 | Pairing | Host and Viewer complete commit/reveal, display the same independently derived six-digit code, operators compare it, Host allows and Viewer explicitly accepts, and trust records are stored | ☐ |
 | Pairing recovery | Host and Viewer can explicitly forget their own role's saved peer pairings; the next connection requires a new code and local identity records remain intact | ☐ |
-| Full uninstall reset | The DMG helper clears both roles' per-user app-state paths and invokes each installed role's signed binary to clear its own trust and generated identity; it does not touch unrelated Keychain records or macOS TCC grants | ☐ |
+| Full uninstall reset | The standalone `Uninstall-MacRemoteApp.command` verifies installed signed cleanup helpers, clears both roles' current-user data and role-owned Keychain state, resets only the two product bundle IDs' TCC decisions, and moves removable apps to Trash. Check explicit partial-result reporting; Local Network revocation is manual and legacy shared records remain preserved | ☐ |
 | Host display name | Host `Rename Host…` changes the Bonjour discovery name and the listener restarts without changing the TLS identity | ☐ |
 | Default/display device names | Host defaults to its macOS short hostname; Viewer pairing UI and trust metadata use the Viewer hostname; names never affect authentication | ☐ |
-| Window selection | Exactly one eligible foreground window is selected | ☐ |
-| Same-session app/window switching | Start streaming one window, select another eligible window in the same or a different app without reconnecting, then verify the exact selected window is foreground on Host and receives mouse/keyboard only while focus and PostEvent checks pass; repeat without Accessibility trust and confirm input stays blocked until local focus is correct | ☐ |
+| Window selection | Exactly one eligible window is selected; legacy control requires foreground eligibility, while negotiated P6 requires separate local approval and a safe process target | ☐ |
+| Same-session app/window switching | Start streaming one window and replace it without reconnecting. For legacy peers verify exact-window foreground checks; for P6 verify no app activation, current generation/target checks, and the disclosed multi-window process-target limit. Missing required permission or inspection keeps input blocked | ☐ |
+| P6 local control | Deny initial control and confirm view-only operation; allow locally, reconnect using the saved identity, pause/resume with held input, and revoke. Video remains available, stale input is rejected, and a revoked grant needs fresh approval | ☐ |
+| P6 background safety | On a disposable app verify background mouse/keyboard without activation, manual IME/source matching, target closure, secure input, screen lock, and PostEvent/AX loss. Record app-specific event routing and multi-window limitations separately from V1 acceptance | ☐ |
 | Viewer connection state | Connect changes to disabled `Connected`; disconnect shows `Reconnecting…` during retry and re-enables Connect only when disconnected | ☐ |
 | Native app menus | Both roles expose About with version/build, Settings, Minimize, Hide, and Quit; Host status menu also opens About/Settings | ☐ |
 | Release identity | About, Settings, Viewer title/status, and Host status menu match both installed plists; `major.minor.build` means separate short version and build, not wire protocol version | ☐ |
@@ -194,7 +223,7 @@ from the production bundle's first-pairing flow.
 | Input-source lifetime | Change source while typing, return from Settings, switch windows/apps, reauthorize, and reconnect; no old acknowledgement or queued key releases a different source/session; focus loss or secure input prevents Host source mutation | ☐ |
 | Input-source compatibility | A peer without `inputSourceSync` continues manual Host IME input without receiving new messages; unsupported third-party internal modes are not presented as synchronized | ☐ |
 | Clipboard | Text-only opt-in works; opt-out and echo prevention work | ☐ |
-| Permission recovery | Local Network, Screen Recording, or PostEvent denial/revocation disables the affected path and gives a recoverable instruction; optional Accessibility loss disables AXRaise/secure-input inspection but never bypasses exact-window focus checks | ☐ |
+| Permission recovery | Local Network, Screen Recording, or PostEvent denial/revocation disables the affected path and gives a recoverable instruction; legacy optional AX loss does not bypass foreground checks, and unavailable background secure-input inspection blocks P6 control | ☐ |
 | Window recovery | Close/change/focus loss disables input and reports a recoverable state | ☐ |
 | LAN recovery | Disconnect shows reconnecting; reauthorization is required before input resumes | ☐ |
 | Queued-input isolation | Held input is released on Settings navigation within the same authorization; window switch, reauthorization, and reconnect never replay queued old input, and a saturated input queue closes the affected session instead of losing a release | ☐ |
@@ -261,6 +290,39 @@ complete `scripts/release-notarized.sh` flow removes that temporary tree after
 CI and notarization succeed.
 
 ## Evidence and residual limitations
+
+### Support and evidence matrix
+
+| Combination | Current evidence | Acceptance state |
+| --- | --- | --- |
+| Intel Host (`x86_64`) → Apple Silicon Viewer (`arm64`), same LAN | Both architectures build; protocol, input, transport, and package gates pass locally | Physical runtime unverified; operator manual run required |
+| Local Apple Silicon build host, macOS `27.0.1` (`26A434`) | Canonical `0.2.1010` CI and ad-hoc universal Host / arm64 Viewer packaging passed | Local build evidence only |
+| macOS `13.0` deployment minimum from both app plists | Deployment target declared; current-toolchain compilation passed | Minimum-OS launch, capture, codec, permissions, and UI unverified |
+| Apple Silicon as a production Host | Host `arm64` builds for development | Not a verified V1 Host hardware target |
+| Internet relay, locked-screen control, audio, files, and concurrent multi-window control | No implementation or acceptance scope | Unsupported |
+
+### Manual run record
+
+For each run, record the following without copying private data:
+
+- Source commit, installed build on both endpoints, artifact hashes, and
+  Developer ID / notarization verification results.
+- Intel Host and Apple Silicon Viewer models, architecture, exact macOS
+  versions/builds, LAN conditions, and granted permission state.
+- Disposable target app and whether the pair negotiated P6. Record baseline
+  foreground behavior and P6 process-control behavior separately.
+- Pass/fail/skipped for each acceptance row, with sanitized log/report paths
+  and a concrete reason for each failure or skip.
+- Physical M8 report: at least 20 clock probes, a 30-second measurement with
+  at least 1,000 valid frame samples, p50/p95 latency, achieved fps/resolution,
+  uncertainty/drift, and resource data. Synthetic benchmark output does not
+  satisfy this row.
+- Cleanup result and every retained exception. A partial cleanup result is
+  recorded as partial; preserve source and release artifacts.
+
+M10's implementation and manual handoff are ready. Product acceptance and the
+release decision remain open until the operator attaches these physical
+results; unchecked rows are not converted into passes by this handoff.
 
 Archive only sanitized logs and the JSON performance report. Do not archive
 screen captures, clipboard content, raw input values, private keys, or full
