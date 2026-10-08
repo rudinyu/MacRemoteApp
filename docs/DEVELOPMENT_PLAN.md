@@ -1,5 +1,19 @@
 # MacRemoteApp Development Plan
 
+## Authorized post-V1 P6 work
+
+The 2026-10-08 request authorizes completing the existing
+[P6 Host-controlled input extension](P6_BACKGROUND_CONTROL.md), as an explicit
+M6 input-policy extension whose evidence is separate from the V1 M10 gate.
+Its exit criteria are independent local control consent,
+Keychain-backed peer grants, truthful foreground/process-target signals,
+safe process posting without activation, pause/revoke preserving video,
+stale-work invalidation, deterministic regression coverage, and the canonical
+local CI gate. Physical P6 and M10 acceptance remain explicit evidence gaps.
+The same request includes the M9 release-tooling fix to load the shared
+Codex notarization configuration while preserving explicit project overrides;
+it does not authorize a new Apple submission or release.
+
 ## Plan status
 
 This plan breaks the product into M0-M10 milestones. Each milestone has one
@@ -492,6 +506,14 @@ macOS Dock/permission behavior on the physical target Macs.
   release checklist.
 - Validate standard menus, version/build display, same-window Viewer Settings,
   and Host Settings/About activation and close/minimize behavior.
+- Provide a confirmed current-user clean-uninstall helper and deterministic
+  safety fixtures. Keep bundle-scoped TCC reset distinct from unsupported
+  Local Network record removal, and report incomplete cleanup explicitly.
+  Include the full-cleanup helper in both role DMGs and verify its source
+  equivalence, executable mode, and payload-manifest entry during release audit.
+- Include the existing product version in testing/beta/RC distribution names,
+  with fixed names only for formal releases; preserve app installation identity
+  and validate the channel policy across staging and release audit.
 
 ### Explicit non-scope
 

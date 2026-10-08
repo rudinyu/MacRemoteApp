@@ -1,5 +1,45 @@
 # MacRemoteApp Security and Privacy Design
 
+## Authorized P6 extension
+
+The V1 foreground-only model below remains the legacy-peer baseline.
+[P6](P6_BACKGROUND_CONTROL.md) adds process-targeted input only after
+authentication, pairing, selection authorization, negotiated capability,
+and an independent local Host grant for the authenticated Viewer identity.
+Display names never select a grant. Grants live in the Host-owned Keychain
+service `com.rudinyu.MacRemoteApp.Host.control-grants` and are removed by
+explicit grant revocation, trust reset, and Host-owned data cleanup.
+
+For P6, normal input requires current local admission, a live matching target
+and generation, valid geometry, PostEvent permission, a safe console/lock
+state, and the existing secure-input checks. The foreground signal remains
+truthful but does not by itself veto an explicitly granted safe process target.
+The target app is not activated. Process posting cannot guarantee which
+window within the app receives an event; that limit is disclosed before grant.
+Pausing/revoking closes input admission and invalidates queued work without
+revoking video. A separate control generation is echoed on every negotiated
+P6 input/source request; missing or stale generations are rejected even if
+the bytes arrive only after a quick resume. Known inactive global and
+target-process AX inspection are required for background eligibility;
+unavailable or mismatched target inspection is not consent.
+Only safe target-bound releases of already admitted pressed
+state may follow the stop. Delayed consent or storage completion must never
+restore a revoked or replaced session. Storage errors block control; failed
+revocation is not durable until the Keychain operation succeeds.
+
+## M9 shared notarization adapter
+
+The 2026-10-08 release-tooling correction reads the user's existing
+`~/.config/codex/notarization.env` through a non-executing allowlisted parser.
+Explicit project Keychain profile settings override shared defaults; the
+shared file may provide a profile or an existing external API-key reference.
+This specific global-adapter request permits reference-based API credentials
+without moving them into the repository or changing Keychain settings.
+Config and key ownership/mode are validated, diagnostics omit values, and
+credential variables are not exported to validation/build tools. Isolated
+tests use synthetic data and a fake submit command. Reading configuration
+does not authorize an Apple submission; no history preflight is required.
+
 ## Security scope
 
 MacRemoteApp controls an application on another Mac. A security failure can

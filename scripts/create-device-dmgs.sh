@@ -2,7 +2,8 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "${script_dir}/.." && pwd)"
+repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
+source "${script_dir}/artifact-naming.sh"
 
 if (( $# > 1 )); then
     echo "Usage: bash scripts/create-device-dmgs.sh [release-directory]" >&2
@@ -50,14 +51,21 @@ fi
     echo "Release directory not found: ${release_root}" >&2
     exit 1
 }
+artifact_channel="$(macremoteapp_resolve_artifact_channel "${repo_root}" "${release_root}")" || exit 2
+release_identity="$(macremoteapp_release_identity \
+    "${release_root}/MacRemoteApp-Host.app/Contents/Info.plist" \
+    "${release_root}/MacRemoteApp-Viewer.app/Contents/Info.plist")" || exit 2
+echo "Product version: ${release_identity}; artifact channel: ${artifact_channel}"
 
 install_script="${script_dir}/dmg-install.sh"
 uninstall_script="${script_dir}/dmg-uninstall.sh"
+standalone_uninstall_script="${script_dir}/Uninstall-MacRemoteApp.command"
 user_guide="${repo_root}/docs/USER_GUIDE.md"
 debug_guide="${repo_root}/docs/DEBUGGING.md"
 log_guide="${repo_root}/docs/DEBUG_LOG_COLLECTION.md"
 test -x "${install_script}"
 test -x "${uninstall_script}"
+test -x "${standalone_uninstall_script}"
 test -s "${user_guide}"
 test -s "${debug_guide}"
 test -s "${log_guide}"
@@ -161,7 +169,24 @@ create_dmg() {
     local volume_name="MacRemoteApp ${role_name}"
     local app_path="${release_root}/${app_name}.app"
     local staging_dir="${staging_root}/${role_name}"
-    local dmg_path="${release_root}/${app_name}.dmg"
+    local dmg_name
+    local alternate_dmg_name
+    local dmg_path
+
+    dmg_name="$(macremoteapp_expected_distribution_name \
+        "${artifact_channel}" "${release_identity}" "${app_name}" dmg)"
+    if [[ "${artifact_channel}" == "release" ]]; then
+        alternate_dmg_name="$(macremoteapp_expected_distribution_name \
+            testing "${release_identity}" "${app_name}" dmg)"
+    else
+        alternate_dmg_name="${app_name}.dmg"
+    fi
+    dmg_path="${release_root}/${dmg_name}"
+
+    if [[ -e "${release_root}/${alternate_dmg_name}" || -L "${release_root}/${alternate_dmg_name}" ]]; then
+        echo "Refusing ambiguous distribution output; unexpected alternate name exists: ${alternate_dmg_name}" >&2
+        return 1
+    fi
 
     test -d "${app_path}"
     codesign --verify --deep --strict "${app_path}"
@@ -183,16 +208,19 @@ create_dmg() {
     create_applications_drop_target "${staging_dir}/Applications.app"
     cp -- "${install_script}" "${staging_dir}/Install-MacRemoteApp-${role_name}.command"
     cp -- "${uninstall_script}" "${staging_dir}/Uninstall-MacRemoteApp-${role_name}.command"
+    cp -- "${standalone_uninstall_script}" "${staging_dir}/Uninstall-MacRemoteApp.command"
     cp -- "${user_guide}" "${staging_dir}/MacRemoteApp-User-Guide.txt"
     cp -- "${debug_guide}" "${staging_dir}/MacRemoteApp-How-to-Debug.txt"
     cp -- "${log_guide}" "${staging_dir}/MacRemoteApp-How-to-Collect-Debug-Logs.txt"
     chmod 755 \
         "${staging_dir}/Install-MacRemoteApp-${role_name}.command" \
-        "${staging_dir}/Uninstall-MacRemoteApp-${role_name}.command"
+        "${staging_dir}/Uninstall-MacRemoteApp-${role_name}.command" \
+        "${staging_dir}/Uninstall-MacRemoteApp.command"
     write_payload_manifest \
         "${staging_dir}/MacRemoteApp-${role_name}-payload.sha256" \
         "${staging_dir}/Install-MacRemoteApp-${role_name}.command" \
         "${staging_dir}/Uninstall-MacRemoteApp-${role_name}.command" \
+        "${staging_dir}/Uninstall-MacRemoteApp.command" \
         "${staging_dir}/MacRemoteApp-User-Guide.txt" \
         "${staging_dir}/MacRemoteApp-How-to-Debug.txt" \
         "${staging_dir}/MacRemoteApp-How-to-Collect-Debug-Logs.txt"
@@ -204,7 +232,7 @@ create_dmg() {
         -format UDZO \
         "${dmg_path}" >/dev/null
     sign_dmg "${dmg_path}"
-    echo "DMG: ${dmg_path}"
+    echo "DMG: ${dmg_name}"
 }
 
 for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do

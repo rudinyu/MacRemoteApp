@@ -32,6 +32,8 @@ swift package describe >/dev/null
 echo "Validating physical smoke and app bundle inputs"
 bash -n \
     scripts/create-m2-identities.sh \
+    scripts/artifact-naming.sh \
+    scripts/notarization-config.sh \
     scripts/create-device-dmgs.sh \
     scripts/dmg-install.sh \
     scripts/dmg-uninstall.sh \
@@ -39,7 +41,15 @@ bash -n \
     scripts/package-device-apps.sh \
     scripts/notarize-device-apps.sh \
     scripts/release-notarized.sh \
-    scripts/uninstall-device-apps.sh
+    scripts/uninstall-device-apps.sh \
+    scripts/Uninstall-MacRemoteApp.command \
+    scripts/test-artifact-naming.sh \
+    scripts/test-notarization-config.sh \
+    scripts/test-uninstall-macremoteapp.sh
+echo "Running isolated artifact-naming fixtures"
+bash scripts/test-artifact-naming.sh
+echo "Running isolated notarization-configuration fixtures"
+bash scripts/test-notarization-config.sh
 if ! grep -q -- '--remove-all-data' Apps/Host/main.swift ||
    ! grep -q -- '--remove-all-data' Apps/Viewer/main.swift ||
    ! grep -q -- 'clear_user_data' scripts/dmg-uninstall.sh ||
@@ -87,6 +97,21 @@ if ! test -x scripts/dmg-install.sh || ! test -x scripts/dmg-uninstall.sh; then
     echo "Validation failed: DMG user scripts must be executable" >&2
     exit 1
 fi
+if ! test -x scripts/Uninstall-MacRemoteApp.command ||
+   ! test -x scripts/test-uninstall-macremoteapp.sh; then
+    echo "Validation failed: standalone uninstaller and its focused fixtures must be executable" >&2
+    exit 1
+fi
+if ! grep -Fq -- 'readonly CLEANUP_MINIMUM_BUILD=1003' scripts/Uninstall-MacRemoteApp.command ||
+   ! grep -Fq -- '"${TCCUTIL_TOOL}" reset All "${bundle_id}"' scripts/Uninstall-MacRemoteApp.command ||
+   ! grep -Fq -- '"${GREP_TOOL}" -Fxq "TeamIdentifier=${TEAM_IDENTIFIER}"' scripts/Uninstall-MacRemoteApp.command ||
+   grep -Eq -- '(^|[[:space:]])sudo([[:space:]]|$)|TCC\.db|tccutil[[:space:]]+reset[[:space:]]+LocalNetwork' \
+       scripts/Uninstall-MacRemoteApp.command; then
+    echo "Validation failed: standalone uninstaller lost its version, scoped-TCC, exact-team, or no-sudo safety gates" >&2
+    exit 1
+fi
+echo "Running isolated standalone-uninstaller safety fixtures"
+/bin/bash scripts/test-uninstall-macremoteapp.sh
 dmg_script_probe_dir="$(mktemp -d "${TMPDIR}/dmg-script-options.XXXXXX")"
 dmg_install_probe="${dmg_script_probe_dir}/Install-MacRemoteApp-Viewer.command"
 cp scripts/dmg-install.sh "${dmg_install_probe}"
@@ -184,6 +209,16 @@ bash -n scripts/check-notary-profile.sh
 test -s scripts/clear-testing-keychain.swift
 swiftc -parse scripts/clear-testing-keychain.swift
 plutil -lint Resources/Host-Info.plist Resources/Viewer-Info.plist >/dev/null
+source_release_short_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Host-Info.plist 2>/dev/null)"
+source_release_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Resources/Host-Info.plist 2>/dev/null)"
+viewer_release_short_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Viewer-Info.plist 2>/dev/null)"
+viewer_release_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Resources/Viewer-Info.plist 2>/dev/null)"
+if [[ -z "${source_release_short_version}" || -z "${source_release_build}" ||
+      "${viewer_release_short_version}" != "${source_release_short_version}" ||
+      "${viewer_release_build}" != "${source_release_build}" ]]; then
+    echo "Validation failed: Host and Viewer source bundle release metadata must both exist and match" >&2
+    exit 1
+fi
 test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' Resources/Host-Info.plist 2>/dev/null)" = "true"
 test "$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' Resources/Host-Info.plist 2>/dev/null)" != ""
 test "$(/usr/libexec/PlistBuddy -c 'Print :NSScreenCaptureUsageDescription' Resources/Host-Info.plist 2>/dev/null)" != ""
@@ -367,6 +402,7 @@ done
 
 bash -n \
     scripts/run-m8-benchmark.sh \
+    scripts/artifact-naming.sh \
     scripts/audit-release.sh \
     scripts/create-device-dmgs.sh \
     scripts/check-notary-profile.sh \
@@ -374,6 +410,7 @@ bash -n \
     scripts/run-m10-acceptance.sh \
     scripts/notarize-device-apps.sh \
     scripts/release-notarized.sh \
+    scripts/test-artifact-naming.sh \
     scripts/validate-notarized-release.sh \
     scripts/uninstall-device-apps.sh
 
@@ -462,10 +499,20 @@ fi
 echo "Packaging and auditing M9 release candidates"
 validation_release_build_root="${build_root}/release-build"
 validation_release_root="${build_root}/release"
+MACREMOTEAPP_ARTIFACT_CHANNEL=testing \
 MACREMOTEAPP_RELEASE_BUILD_ROOT="${validation_release_build_root}" \
 MACREMOTEAPP_RELEASE_ROOT="${validation_release_root}" \
 MACREMOTEAPP_SIGNING_IDENTITY=- bash scripts/package-device-apps.sh
-bash scripts/audit-release.sh "${validation_release_root}"
+MACREMOTEAPP_ARTIFACT_CHANNEL=testing \
+    bash scripts/audit-release.sh "${validation_release_root}"
+for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
+    info_plist="${validation_release_root}/${app_name}.app/Contents/Info.plist"
+    if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${info_plist}" 2>/dev/null)" != "${source_release_short_version}" ||
+          "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${info_plist}" 2>/dev/null)" != "${source_release_build}" ]]; then
+        echo "Validation failed: packaged ${app_name} metadata differs from the source release identity" >&2
+        exit 1
+    fi
+done
 test "$(/usr/libexec/PlistBuddy -c 'Print :NSBonjourServices:0' "${validation_release_root}/MacRemoteApp-Host.app/Contents/Info.plist" 2>/dev/null)" = "_macremote._tcp"
 test "$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "${validation_release_root}/MacRemoteApp-Host.app/Contents/Info.plist" 2>/dev/null)" != ""
 test "$(/usr/libexec/PlistBuddy -c 'Print :NSScreenCaptureUsageDescription' "${validation_release_root}/MacRemoteApp-Host.app/Contents/Info.plist" 2>/dev/null)" != ""

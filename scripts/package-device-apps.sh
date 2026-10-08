@@ -2,7 +2,8 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "${script_dir}/.." && pwd)"
+repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
+source "${script_dir}/artifact-naming.sh"
 cd "${repo_root}"
 
 # Keep repository-local artifacts out of Git without publishing a .gitignore.
@@ -147,6 +148,15 @@ case "${repo_root}" in
         ;;
 esac
 
+artifact_channel="$(macremoteapp_resolve_artifact_channel "${repo_root}" "${release_root}")" || exit 2
+source_release_identity="$(macremoteapp_release_identity \
+    "${repo_root}/Resources/Host-Info.plist" \
+    "${repo_root}/Resources/Viewer-Info.plist")" || exit 2
+host_archive_name="$(macremoteapp_expected_distribution_name \
+    "${artifact_channel}" "${source_release_identity}" MacRemoteApp-Host app-zip)" || exit 2
+viewer_archive_name="$(macremoteapp_expected_distribution_name \
+    "${artifact_channel}" "${source_release_identity}" MacRemoteApp-Viewer app-zip)" || exit 2
+
 signing_identity="${MACREMOTEAPP_SIGNING_IDENTITY:-}"
 if [[ -z "${signing_identity}" ]]; then
     signing_identity="-"
@@ -251,6 +261,15 @@ package_app \
     "${viewer_binary}" \
     "${repo_root}/Resources/Viewer-Info.plist"
 
+release_identity="$(macremoteapp_release_identity \
+    "${release_root}/MacRemoteApp-Host.app/Contents/Info.plist" \
+    "${release_root}/MacRemoteApp-Viewer.app/Contents/Info.plist")" || exit 2
+if [[ "${release_identity}" != "${source_release_identity}" ]]; then
+    echo "Packaged Host/Viewer metadata differs from the validated source release identity" >&2
+    exit 2
+fi
+echo "Product version: ${release_identity}; artifact channel: ${artifact_channel}"
+
 if [[ "${signing_identity}" == "-" ]]; then
     echo "MACREMOTEAPP_SIGNING_IDENTITY=-; using ad-hoc signing for local validation." >&2
     echo "For stable macOS TCC identity, set it to a Developer ID Application certificate." >&2
@@ -284,11 +303,12 @@ done
 
 ditto -c -k --keepParent \
     "${release_root}/MacRemoteApp-Host.app" \
-    "${release_root}/MacRemoteApp-Host.app.zip"
+    "${release_root}/${host_archive_name}"
 ditto -c -k --keepParent \
     "${release_root}/MacRemoteApp-Viewer.app" \
-    "${release_root}/MacRemoteApp-Viewer.app.zip"
+    "${release_root}/${viewer_archive_name}"
 
+MACREMOTEAPP_ARTIFACT_CHANNEL="${artifact_channel}" \
 MACREMOTEAPP_SIGNING_IDENTITY="${signing_identity}" \
     bash "${script_dir}/create-device-dmgs.sh" "${release_root}"
 

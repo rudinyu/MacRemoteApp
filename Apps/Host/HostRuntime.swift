@@ -57,6 +57,7 @@ actor HostRuntime {
     struct Configuration: Sendable {
         static let defaultIdentityLabel = "MacRemoteApp.host"
         static let defaultTrustStoreService = "com.rudinyu.MacRemoteApp.Host.trust"
+        static let defaultControlGrantStoreService = KeychainControlGrantStore.defaultService
 
         var serviceName: String
         let peerCertificateURL: URL?
@@ -85,7 +86,8 @@ actor HostRuntime {
         .inputSourceSync,
         .textClipboard,
         .keyframeRequest,
-        .receiverReport
+        .receiverReport,
+        .backgroundControl
     ]
     /// Floor between Viewer-requested keyframes, independent of the Viewer's
     /// own throttle, so a misbehaving peer cannot force every frame to be
@@ -102,10 +104,25 @@ actor HostRuntime {
     private let stateStore = HostInputStateStore()
     let statusUpdates: AsyncStream<HostRuntimeStatus>
     private let statusContinuation: AsyncStream<HostRuntimeStatus>.Continuation
+    let controlStatusUpdates: AsyncStream<HostControlStatus>
+    private let controlStatusContinuation: AsyncStream<HostControlStatus>.Continuation
+    private let controlGrantStore: any ControlGrantStore
+    private let controlAuthorization: HostControlAuthorizationCoordinator
+    private var controlStatusValue: HostControlStatus = .unavailable
+    private var controlPeerIdentifier: String?
+    private var controlPeerName: String?
+    private var controlGranted = false
+    private var controlWireAuthorized = false
+    private var controlPaused = false
+    private var controlSessionID: UUID?
+    private var controlAuthorizationTask: Task<Void, Never>?
+    private var controlAppliedRevision: UInt64 = 0
+    private var pairingResetInProgress = false
 
     private var listener: NetworkBonjourListener?
     private var localIdentity: ProvisionedIdentity?
     private var activeSession: SessionCoordinator?
+    private var activeSessionStopInProgress = false
     private var inputRuntime: HostInputSessionRuntime?
     private var sessionMonitor: Task<Void, Never>?
     private var captureTask: Task<Void, Never>?
@@ -144,7 +161,10 @@ actor HostRuntime {
     init(
         configuration: Configuration,
         windowProvider: ScreenRecordingWindowProvider = ScreenRecordingWindowProvider(),
-        captureSession: WindowCaptureSession? = nil
+        captureSession: WindowCaptureSession? = nil,
+        controlGrantStore: any ControlGrantStore = KeychainControlGrantStore(
+            service: Configuration.defaultControlGrantStoreService
+        )
     ) {
         let statusStream = AsyncStream<HostRuntimeStatus>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
@@ -154,6 +174,21 @@ actor HostRuntime {
         self.captureSession = captureSession ?? WindowCaptureSession(windowProvider: windowProvider)
         self.statusUpdates = statusStream.stream
         self.statusContinuation = statusStream.continuation
+        let controlStatusStream = AsyncStream<HostControlStatus>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        self.controlStatusUpdates = controlStatusStream.stream
+        self.controlStatusContinuation = controlStatusStream.continuation
+        self.controlGrantStore = controlGrantStore
+        self.controlAuthorization = HostControlAuthorizationCoordinator(
+            store: controlGrantStore,
+            prompt: { peerName, peerIdentifier in
+                await HostControlPrompt.requestConsent(
+                    peerName: peerName,
+                    peerIdentifier: peerIdentifier
+                )
+            }
+        )
     }
 
     func run() async throws {
@@ -208,12 +243,58 @@ actor HostRuntime {
         publish(.starting)
     }
 
+    func controlStatus() -> HostControlStatus { controlStatusValue }
+
+    func toggleViewerControl() async {
+        guard let session = activeSession, let controlSessionID else { return }
+        let updated = await controlAuthorization.togglePause(for: controlSessionID)
+        guard activeSession === session, self.controlSessionID == controlSessionID else { return }
+        if updated.granted {
+            await applyControlAuthorization(updated, for: session)
+        } else {
+            await requestControlConsent(for: session)
+        }
+    }
+
+    func revokeViewerControl() async {
+        guard let session = activeSession, let controlSessionID else { return }
+        guard let ticket = await controlAuthorization.beginRevocation(for: controlSessionID) else { return }
+        let stillCurrent = activeSession === session && self.controlSessionID == controlSessionID
+        if stillCurrent, ticket.sessionID == controlSessionID {
+            // Close local process targeting and transport admission before
+            // persistence. A replacement session must not inherit this local
+            // mutation, but the durable revoke ticket must still complete if
+            // the session changes while the actor call above is suspended.
+            controlPaused = true
+            controlGranted = false
+            controlWireAuthorized = false
+            controlAppliedRevision = max(controlAppliedRevision, ticket.revision)
+            stateStore.setProcessTargetingAuthorized(false)
+            publishControlStatus(.revoked)
+            await setLocalControlAdmission(false, revision: ticket.revision, for: session)
+            await synchronizeInputAuthorization(session)
+        }
+        let result = await controlAuthorization.completeRevocation(ticket)
+        guard stillCurrent,
+              ticket.sessionID == controlSessionID,
+              activeSession === session,
+              self.controlSessionID == controlSessionID else { return }
+        await applyControlAuthorization(result, for: session)
+    }
+
     /// Revokes every saved peer trust record without deleting this Mac's own
     /// TLS identity. An active session is stopped before the records are
     /// removed so no already-authorized input or media path survives the
     /// operator's explicit reset.
     func forgetAllPairings() async throws -> Int {
+        guard !pairingResetInProgress else { return 0 }
+        pairingResetInProgress = true
+        defer { pairingResetInProgress = false }
         await stopActiveSession()
+        // Remove process-control grants first. If Keychain refuses this
+        // operation, existing paired trust stays intact and the failure guard
+        // blocks reuse of any stale grant.
+        _ = try await controlAuthorization.removeAllGrants()
         let trustStore = KeychainTrustStore(service: Configuration.defaultTrustStoreService)
         let count = try await trustStore.removeAllPairings()
         if listener != nil {
@@ -224,6 +305,166 @@ actor HostRuntime {
 
     private func publish(_ status: HostRuntimeStatus) {
         statusContinuation.yield(status)
+    }
+
+    private func publishControlStatus(_ status: HostControlStatus) {
+        controlStatusValue = status
+        controlStatusContinuation.yield(status)
+    }
+
+    private func setControlStatus(
+        _ status: HostControlStatus,
+        for session: SessionCoordinator,
+        controlRevision: UInt64? = nil
+    ) async {
+        guard activeSession === session,
+              controlRevision.map({ $0 == controlAppliedRevision }) ?? true else { return }
+        publishControlStatus(status)
+        let snapshot = await session.snapshot()
+        guard activeSession === session,
+              controlRevision.map({ $0 == controlAppliedRevision }) ?? true else { return }
+        let inputStatus = await inputRuntime?.status() ?? .selectionUnavailable
+        guard activeSession === session,
+              controlRevision.map({ $0 == controlAppliedRevision }) ?? true else { return }
+        let localPermission = await MainActor.run {
+            CoreGraphicsAccessibilityContextProvider.currentPermissionState()
+        }
+        guard activeSession === session,
+              controlRevision.map({ $0 == controlAppliedRevision }) ?? true else { return }
+        let permission: PermissionState
+        switch localPermission {
+        case .authorized: permission = .granted
+        case .missing: permission = .missing
+        case .unknown: permission = .unknown
+        }
+        let processTargetEligible: Bool? = snapshot.negotiatedCapabilities.contains(.backgroundControl)
+            ? (inputStatus == .ready || inputStatus == .backgroundTargetReady)
+            : nil
+        let wireState: ControlAuthorizationState
+        switch status {
+        case .unavailable, .unsupported: wireState = .unsupported
+        case .negotiating: wireState = .negotiating
+        case .requiresConsent: wireState = .requiresConsent
+        case .active: wireState = .active
+        case .paused: wireState = .paused
+        case .revoked: wireState = .revoked
+        case .persistenceFailure: wireState = .persistenceFailure
+        }
+        let controlGeneration: UInt64?
+        if snapshot.negotiatedCapabilities.contains(.backgroundControl) {
+            let revision = controlRevision ?? controlAppliedRevision
+            controlGeneration = revision > 0 ? revision : nil
+        } else {
+            controlGeneration = nil
+        }
+        _ = try? await session.send(
+            .sessionState(
+                SessionStateMessage(
+                    state: snapshot.state,
+                    permission: permission,
+                    focusEligible: inputStatus == .ready,
+                    windowGeneration: snapshot.authorizedWindowGeneration,
+                    controlState: wireState,
+                    processTargetEligible: processTargetEligible,
+                    controlGeneration: controlGeneration
+                )
+            ),
+            expectedAuthorizationGeneration: snapshot.authorizationGeneration
+        )
+    }
+
+    private func prepareViewerControl(for session: SessionCoordinator) async {
+        let snapshot = await session.snapshot()
+        guard activeSession === session, let controlSessionID else { return }
+        controlPeerIdentifier = snapshot.peerIdentity?.identifier
+        controlPeerName = snapshot.peerDeviceName
+        let initial = await controlAuthorization.beginSession(
+            sessionID: controlSessionID,
+            peerIdentifier: snapshot.peerIdentity?.identifier,
+            peerName: snapshot.peerDeviceName,
+            supportsControl: snapshot.negotiatedCapabilities.contains(.backgroundControl)
+        )
+        guard activeSession === session, self.controlSessionID == controlSessionID else {
+            await controlAuthorization.endSession(controlSessionID)
+            return
+        }
+        await applyControlAuthorization(initial, for: session)
+        guard activeSession === session,
+              self.controlSessionID == controlSessionID,
+              snapshot.negotiatedCapabilities.contains(.backgroundControl) else { return }
+
+        // Durable lookup and any local consent prompt run independently from
+        // session startup so window discovery, selection, and view-only video
+        // continue while control is pending or denied.
+        controlAuthorizationTask?.cancel()
+        let authorization = controlAuthorization
+        controlAuthorizationTask = Task { [weak self] in
+            let resolved = await authorization.resolveInitialConsent(for: controlSessionID)
+            await self?.applyControlAuthorization(resolved, for: session)
+        }
+    }
+
+    private func requestControlConsent(for session: SessionCoordinator) async {
+        guard activeSession === session,
+              let controlSessionID,
+              (await session.snapshot()).negotiatedCapabilities.contains(.backgroundControl) else { return }
+        guard activeSession === session, self.controlSessionID == controlSessionID else { return }
+        await setControlStatus(.negotiating, for: session)
+        guard activeSession === session, self.controlSessionID == controlSessionID else { return }
+        let result = await controlAuthorization.requestConsent(for: controlSessionID)
+        await applyControlAuthorization(result, for: session)
+    }
+
+    private func applyControlAuthorization(
+        _ snapshot: HostControlAuthorizationSnapshot,
+        for session: SessionCoordinator
+    ) async {
+        guard activeSession === session,
+              let controlSessionID,
+              snapshot.sessionID == controlSessionID,
+              snapshot.revision >= controlAppliedRevision else { return }
+
+        controlAppliedRevision = snapshot.revision
+        controlPeerIdentifier = snapshot.peerIdentifier
+        controlGranted = snapshot.granted
+        controlWireAuthorized = snapshot.granted
+        controlPaused = snapshot.paused
+        let admitted = snapshot.granted && !snapshot.paused && snapshot.status == .active
+        stateStore.setProcessTargetingAuthorized(admitted)
+        publishControlStatus(snapshot.status)
+
+        await setLocalControlAdmission(admitted, revision: snapshot.revision, for: session)
+        guard activeSession === session,
+              self.controlSessionID == controlSessionID,
+              controlAppliedRevision == snapshot.revision else { return }
+
+        if selectedWindow != nil {
+            await synchronizeInputAuthorization(session)
+            guard activeSession === session,
+                  self.controlSessionID == controlSessionID,
+                  controlAppliedRevision == snapshot.revision else { return }
+        }
+        await setControlStatus(snapshot.status, for: session, controlRevision: snapshot.revision)
+    }
+
+    private func setLocalControlAdmission(
+        _ enabled: Bool,
+        revision: UInt64? = nil,
+        for session: SessionCoordinator
+    ) async {
+        guard activeSession === session,
+              revision.map({ $0 >= controlAppliedRevision }) ?? true else { return }
+        stateStore.setProcessTargetingAuthorized(enabled)
+        let gateRevision = revision ?? controlAppliedRevision
+        if let inputRuntime {
+            await inputRuntime.setLocalInputAdmission(
+                enabled,
+                revision: gateRevision,
+                session: session
+            )
+        } else {
+            await session.setLocalInputAdmission(enabled, revision: gateRevision)
+        }
     }
 
     private func waitUntilCancelled() async throws {
@@ -397,6 +638,30 @@ actor HostRuntime {
     }
 
     private func stopActiveSession() async {
+        guard !activeSessionStopInProgress else { return }
+        activeSessionStopInProgress = true
+        defer { activeSessionStopInProgress = false }
+        let stoppingSession = activeSession
+        let stoppingControlSessionID = controlSessionID
+        // Fence status and consent tasks before yielding to another actor.
+        activeSession = nil
+        controlSessionID = nil
+        controlAppliedRevision = 0
+        controlAuthorizationTask?.cancel()
+        controlAuthorizationTask = nil
+        controlGranted = false
+        controlWireAuthorized = false
+        controlPaused = false
+        controlPeerIdentifier = nil
+        controlPeerName = nil
+        stateStore.setProcessTargetingAuthorized(false)
+        if let stoppingSession {
+            await stoppingSession.setLocalInputAdmission(false, revision: .max)
+        }
+        if let stoppingControlSessionID {
+            await controlAuthorization.endSession(stoppingControlSessionID)
+        }
+
         sessionMonitor?.cancel()
         sessionMonitor = nil
         await stopVideoPipeline()
@@ -404,10 +669,9 @@ actor HostRuntime {
         clipboardConsentTask = nil
         await inputRuntime?.stop()
         inputRuntime = nil
-        if let activeSession {
-            await activeSession.stop(reason: .normal)
+        if let stoppingSession {
+            await stoppingSession.stop(reason: .normal)
         }
-        activeSession = nil
         selectedWindow = nil
         selectedWindowGeneration = nil
         advertisedWindowCatalogGeneration = 0
@@ -415,6 +679,7 @@ actor HostRuntime {
         clipboardOptedInForSession = false
         clipboardConsentPromptedForSession = false
         stateStore.clearSelection()
+        publishControlStatus(.unavailable)
     }
 
     private func loadLocalIdentity() async throws -> ProvisionedIdentity {
@@ -432,7 +697,10 @@ actor HostRuntime {
     }
 
     private func accept(_ transport: NetworkFramedTransport) async {
-        guard activeSession == nil, let localIdentity else {
+        guard activeSession == nil,
+              !activeSessionStopInProgress,
+              !pairingResetInProgress,
+              let localIdentity else {
             await transport.close()
             return
         }
@@ -460,7 +728,18 @@ actor HostRuntime {
             pairingCoordinator: pairingCoordinator
         )
         activeSession = session
+        controlSessionID = UUID()
+        controlAppliedRevision = 0
+        controlAuthorizationTask?.cancel()
+        controlAuthorizationTask = nil
         publish(.connected)
+        controlGranted = false
+        controlWireAuthorized = false
+        controlPaused = false
+        controlPeerIdentifier = nil
+        controlPeerName = nil
+        stateStore.setProcessTargetingAuthorized(false)
+        await setControlStatus(.negotiating, for: session)
         clipboardOptedInForSession = false
         clipboardConsentPromptedForSession = false
         stateStore.update(session: await session.snapshot())
@@ -489,25 +768,34 @@ actor HostRuntime {
 
                 let permission: PermissionState
                 let focusEligible: Bool
+                let processTargetEligible: Bool?
                 switch status {
                 case .ready:
                     permission = .granted
                     focusEligible = true
+                    processTargetEligible = snapshot.negotiatedCapabilities.contains(.backgroundControl) ? true : nil
+                case .backgroundTargetReady:
+                    permission = .granted
+                    focusEligible = false
+                    processTargetEligible = true
                 case .permissionUnavailable:
                     // A previously authorized input path lost its local TCC
                     // access. The Viewer must remain disabled until a fresh
                     // Host status proves that permission is usable again.
                     permission = .revoked
                     focusEligible = false
+                    processTargetEligible = snapshot.negotiatedCapabilities.contains(.backgroundControl) ? false : nil
                 case .focusUnavailable:
                     permission = .granted
                     focusEligible = false
+                    processTargetEligible = snapshot.negotiatedCapabilities.contains(.backgroundControl) ? false : nil
                 case .sessionUnauthorized,
                      .selectionUnavailable,
                      .capabilityUnavailable,
                      .inputStateCleanupPending:
                     permission = .unknown
                     focusEligible = false
+                    processTargetEligible = snapshot.negotiatedCapabilities.contains(.backgroundControl) ? false : nil
                 }
                 _ = try? await session.send(
                     .sessionState(
@@ -515,7 +803,8 @@ actor HostRuntime {
                             state: snapshot.state,
                             permission: permission,
                             focusEligible: focusEligible,
-                            windowGeneration: snapshot.authorizedWindowGeneration
+                            windowGeneration: snapshot.authorizedWindowGeneration,
+                            processTargetEligible: processTargetEligible
                         )
                     ),
                     expectedAuthorizationGeneration: snapshot.authorizationGeneration
@@ -528,6 +817,7 @@ actor HostRuntime {
             try await session.start()
             try await waitForPairing(session, pairingCoordinator: pairingCoordinator)
             try await waitForCapabilities(session)
+            await prepareViewerControl(for: session)
             let windows = try await captureSession.discoverWindows()
             advertisedWindowGeneration = max(1, (await captureSession.snapshot().generation) &+ 1)
             stateStore.update(session: await session.snapshot())
@@ -541,6 +831,8 @@ actor HostRuntime {
                 await self?.monitor(session)
             }
         } catch {
+            await setLocalControlAdmission(false, for: session)
+            await setControlStatus(.unavailable, for: session)
             await teardown(session: session)
         }
     }
@@ -783,9 +1075,17 @@ actor HostRuntime {
     }
 
     private func synchronizeInputAuthorization(_ session: SessionCoordinator) async {
-        guard selectedWindow != nil, let selectedWindowGeneration else { return }
+        guard activeSession === session,
+              let controlSessionID,
+              selectedWindow != nil,
+              let selectedWindowGeneration else { return }
+        let expectedControlRevision = controlAppliedRevision
+        let processControlGranted = controlWireAuthorized
         let snapshot = await session.snapshot()
-        guard snapshot.authorized,
+        guard activeSession === session,
+              self.controlSessionID == controlSessionID,
+              controlAppliedRevision == expectedControlRevision,
+              snapshot.authorized,
               snapshot.authorizedWindowGeneration == selectedWindowGeneration else {
             return
         }
@@ -793,9 +1093,15 @@ actor HostRuntime {
         let permission = await MainActor.run {
             CoreGraphicsAccessibilityContextProvider.currentPermissionState()
         }
+        guard activeSession === session,
+              self.controlSessionID == controlSessionID,
+              controlAppliedRevision == expectedControlRevision else { return }
         let negotiatedInput = snapshot.negotiatedCapabilities.intersection(Self.inputCapabilities)
+        let processControlNegotiated = snapshot.negotiatedCapabilities.contains(.backgroundControl)
         var desired = snapshot.authorizedCapabilities
-        if permission == .authorized {
+        let wasAuthorizedForProcessControl = snapshot.authorizedCapabilities.contains(.backgroundControl)
+        if permission == .authorized &&
+            (!processControlNegotiated || processControlGranted || wasAuthorizedForProcessControl) {
             desired.formUnion(negotiatedInput)
         } else {
             desired.subtract(Self.inputCapabilities)
@@ -806,6 +1112,12 @@ actor HostRuntime {
             desired.insert(.inputSourceSync)
         } else {
             desired.remove(.inputSourceSync)
+        }
+        if processControlNegotiated && permission == .authorized &&
+            (processControlGranted || wasAuthorizedForProcessControl) {
+            desired.insert(.backgroundControl)
+        } else {
+            desired.remove(.backgroundControl)
         }
         if clipboardOptedInForSession,
            snapshot.negotiatedCapabilities.contains(.textClipboard) {
@@ -822,16 +1134,26 @@ actor HostRuntime {
                 windowGeneration: selectedWindowGeneration,
                 capabilities: desired
             )
+            guard activeSession === session,
+                  self.controlSessionID == controlSessionID,
+                  controlAppliedRevision == expectedControlRevision else { return }
             // SessionCoordinator invalidates queued protected media whenever
             // the authorization epoch changes. Force the next keyframe to
             // carry VideoConfig again instead of allowing the Viewer to keep
             // a stale decoder configuration.
             videoConfigSentGeneration = nil
             videoConfigSentAuthorizationGeneration = nil
-            stateStore.update(session: await session.snapshot())
+            let updated = await session.snapshot()
+            guard activeSession === session,
+                  self.controlSessionID == controlSessionID,
+                  controlAppliedRevision == expectedControlRevision else { return }
+            stateStore.update(session: updated)
             if shouldRestoreClipboard, let inputRuntime {
                 do {
                     try await inputRuntime.setClipboardEnabled(true)
+                    guard activeSession === session,
+                          self.controlSessionID == controlSessionID,
+                          controlAppliedRevision == expectedControlRevision else { return }
                 } catch {
                     // A lifecycle reset can race this reauthorization. If
                     // the local clipboard bridge cannot be re-enabled, do
@@ -843,15 +1165,29 @@ actor HostRuntime {
                         windowGeneration: selectedWindowGeneration,
                         capabilities: fallback
                     )
-                    stateStore.update(session: await session.snapshot())
+                    guard activeSession === session,
+                          self.controlSessionID == controlSessionID,
+                          controlAppliedRevision == expectedControlRevision else { return }
+                    let fallbackSnapshot = await session.snapshot()
+                    guard activeSession === session,
+                          self.controlSessionID == controlSessionID,
+                          controlAppliedRevision == expectedControlRevision else { return }
+                    stateStore.update(session: fallbackSnapshot)
                 }
             }
         } catch {
+            guard activeSession === session,
+                  self.controlSessionID == controlSessionID,
+                  controlAppliedRevision == expectedControlRevision else { return }
             videoConfigSentGeneration = nil
             videoConfigSentAuthorizationGeneration = nil
             // The session loop will handle a failed peer. Keep the local
             // admission state synchronized with the latest session snapshot.
-            stateStore.update(session: await session.snapshot())
+            let failedSnapshot = await session.snapshot()
+            guard activeSession === session,
+                  self.controlSessionID == controlSessionID,
+                  controlAppliedRevision == expectedControlRevision else { return }
+            stateStore.update(session: failedSnapshot)
         }
     }
 
@@ -1005,6 +1341,7 @@ actor HostRuntime {
 
         let negotiatedCapabilities = (await session.snapshot()).negotiatedCapabilities
         let negotiatedInput = negotiatedCapabilities.intersection(Self.inputCapabilities)
+        let processControlNegotiated = negotiatedCapabilities.contains(.backgroundControl)
         let permission = await MainActor.run {
             let current = CoreGraphicsAccessibilityContextProvider.currentPermissionState()
             guard !negotiatedInput.isEmpty, current != .authorized else {
@@ -1020,9 +1357,10 @@ actor HostRuntime {
         // must degrade to view-only/partial control instead of rejecting the
         // entire selected window.
         var authorizedCapabilities = Self.capabilities.intersection(negotiatedCapabilities)
-        if permission != .authorized {
+        if permission != .authorized || (processControlNegotiated && !controlWireAuthorized) {
             authorizedCapabilities.subtract(Self.inputCapabilities)
             authorizedCapabilities.remove(.inputSourceSync)
+            authorizedCapabilities.remove(.backgroundControl)
         } else if !authorizedCapabilities.contains(.keyboardInput) {
             authorizedCapabilities.remove(.inputSourceSync)
         }
@@ -1030,13 +1368,13 @@ actor HostRuntime {
             authorizedCapabilities.remove(.textClipboard)
         }
 
-        // Selecting a listed window is explicit Viewer intent to use it
-        // interactively. Activate its app and, when the Host already has
-        // Accessibility access, raise that exact window before the focus
-        // checks; InputCore still rejects every event until WindowServer
-        // confirms that exact selection is foreground.
-        let didForegroundSelectedApplication = await bringSelectedApplicationToForeground(selected)
-        if !didForegroundSelectedApplication {
+        // Legacy peers retain the foreground activation behavior. P6 peers
+        // use the separately granted process-targeted path and never cause
+        // the selected app to be brought to the front.
+        let didForegroundSelectedApplication = processControlNegotiated
+            ? false
+            : await bringSelectedApplicationToForeground(selected)
+        if !processControlNegotiated && !didForegroundSelectedApplication {
             startupLogger.error(
                 "Host could not confirm the selected application became foreground; input remains fail-closed"
             )
@@ -1553,6 +1891,7 @@ enum HostRuntimeError: Error, CustomStringConvertible, Sendable {
 
 private final class HostInputStateStore: @unchecked Sendable {
     private let lock = NSLock()
+    private var processTargetingAuthorized = false
     private var sessionStateValue = HostInputSessionState(
         authorized: false,
         authorizedWindowGeneration: nil,
@@ -1567,7 +1906,21 @@ private final class HostInputStateStore: @unchecked Sendable {
                 authorized: snapshot.authorized,
                 authorizedWindowGeneration: snapshot.authorizedWindowGeneration,
                 mouseInputEnabled: snapshot.authorizedCapabilities.contains(.mouseInput),
-                keyboardInputEnabled: snapshot.authorizedCapabilities.contains(.keyboardInput)
+                keyboardInputEnabled: snapshot.authorizedCapabilities.contains(.keyboardInput),
+                processTargetingAuthorized: processTargetingAuthorized
+            )
+        }
+    }
+
+    func setProcessTargetingAuthorized(_ enabled: Bool) {
+        lock.withLock {
+            processTargetingAuthorized = enabled
+            sessionStateValue = HostInputSessionState(
+                authorized: sessionStateValue.authorized,
+                authorizedWindowGeneration: sessionStateValue.authorizedWindowGeneration,
+                mouseInputEnabled: sessionStateValue.mouseInputEnabled,
+                keyboardInputEnabled: sessionStateValue.keyboardInputEnabled,
+                processTargetingAuthorized: enabled
             )
         }
     }

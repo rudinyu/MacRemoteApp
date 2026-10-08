@@ -208,7 +208,8 @@ public actor SessionCoordinator {
         .receiverReport,
         .inputSourceSync,
         .mouseInput,
-        .keyboardInput
+        .keyboardInput,
+        .backgroundControl
     ]
 
     private static let hostOutboundMessageTypes: Set<MessageType> = [
@@ -303,11 +304,18 @@ public actor SessionCoordinator {
         let authorizationGeneration: UInt64
         let discardGeneration: UInt64
         let windowGeneration: UInt64
+        let localAdmissionGeneration: UInt64?
+        let controlGeneration: UInt64?
     }
 
     private struct PendingInputSourceSelectionAdmission {
         let selection: InputSourceSelectionMessage
         let scope: InputSourceSelectionAdmissionScope
+    }
+
+    private struct PendingInputAdmission {
+        let input: InputEventMessage
+        let generation: UInt64
     }
 
     private struct InputSourceSelectionRequestFence {
@@ -331,6 +339,12 @@ public actor SessionCoordinator {
     private var authorized = false
     private var authorizedWindowGeneration: UInt64?
     private var authorizedCapabilities: Set<Capability> = []
+    /// Extra Host-local gate for P6. It deliberately does not alter the wire
+    /// authorization epoch, so pausing control cannot interrupt protected video.
+    private var localInputAdmissionEnabled = false
+    private var localInputAdmissionRevision: UInt64 = 0
+    private var localInputAdmissionGeneration: UInt64 = 0
+    private var pendingInputAdmissions: [PendingInputAdmission] = []
     private var pendingInputSourceSelectionAdmissions: [PendingInputSourceSelectionAdmission] = []
     private var lastInputSourceSelectionRequest: InputSourceSelectionRequestFence?
     private var inputSourceSelectionDiscardGeneration: UInt64 = 0
@@ -451,8 +465,27 @@ public actor SessionCoordinator {
     /// session's wire sequence state.
     public func discardPendingInputMessages() {
         incomingMessageStorage.removePendingInputMessages()
+        pendingInputAdmissions.removeAll(keepingCapacity: true)
         pendingInputSourceSelectionAdmissions.removeAll(keepingCapacity: true)
         inputSourceSelectionDiscardGeneration &+= 1
+        localInputAdmissionGeneration &+= 1
+    }
+
+    /// Host-only immediate input fence for locally granted process control.
+    /// Legacy sessions that did not negotiate P6 retain their existing policy.
+    public func setLocalInputAdmission(_ enabled: Bool, revision: UInt64? = nil) {
+        guard configuration.role == .host else { return }
+        if let revision {
+            guard revision >= localInputAdmissionRevision else { return }
+            localInputAdmissionRevision = revision
+        } else {
+            localInputAdmissionRevision &+= 1
+        }
+        let didChange = localInputAdmissionEnabled != enabled
+        localInputAdmissionEnabled = enabled
+        if negotiatedCapabilities.contains(.backgroundControl), didChange || revision != nil {
+            discardPendingInputMessages()
+        }
     }
 
     public func start() async throws {
@@ -941,6 +974,19 @@ public actor SessionCoordinator {
     ) throws -> T {
         let payload = MessagePayload.inputEvent(input)
         try validateMessageDirection(for: payload.messageType, incoming: true)
+        if negotiatedCapabilities.contains(.backgroundControl) {
+            guard localInputAdmissionEnabled,
+                  let admissionIndex = pendingInputAdmissions.firstIndex(where: { $0.input == input }) else {
+                throw SessionError.authorizationChanged
+            }
+            guard input.controlGeneration == localInputAdmissionRevision else {
+                throw SessionError.authorizationChanged
+            }
+            let admission = pendingInputAdmissions.remove(at: admissionIndex)
+            guard admission.generation == localInputAdmissionGeneration else {
+                throw SessionError.authorizationChanged
+            }
+        }
         try validateAuthorization(for: payload)
         return try operation()
     }
@@ -964,6 +1010,9 @@ public actor SessionCoordinator {
     ) throws -> InputSourceSelectionAdmissionResult<T> {
         let payload = MessagePayload.inputSourceSelection(selection)
         try validateMessageDirection(for: payload.messageType, incoming: true)
+        if negotiatedCapabilities.contains(.backgroundControl), !localInputAdmissionEnabled {
+            throw SessionError.authorizationChanged
+        }
 
         guard let leaseIndex = pendingInputSourceSelectionAdmissions.firstIndex(where: {
             $0.selection == selection
@@ -976,10 +1025,22 @@ public actor SessionCoordinator {
             reconnectGeneration: reconnectGeneration,
             authorizationGeneration: authorizationGeneration,
             discardGeneration: inputSourceSelectionDiscardGeneration,
-            windowGeneration: selection.windowGeneration
+            windowGeneration: selection.windowGeneration,
+            localAdmissionGeneration: negotiatedCapabilities.contains(.backgroundControl)
+                ? localInputAdmissionGeneration
+                : nil,
+            controlGeneration: negotiatedCapabilities.contains(.backgroundControl)
+                ? selection.controlGeneration
+                : nil
         )
         guard lease.scope == scope else {
             throw SessionError.authorizationChanged
+        }
+        if negotiatedCapabilities.contains(.backgroundControl) {
+            guard localInputAdmissionEnabled,
+                  selection.controlGeneration == localInputAdmissionRevision else {
+                throw SessionError.authorizationChanged
+            }
         }
         try validateAuthorization(for: payload)
         _ = try selection.encoded(using: effectiveProtocolLimits())
@@ -1435,6 +1496,9 @@ public actor SessionCoordinator {
         guard state != .stopping, state != .failed else { return }
         let operationAuthorizationGeneration = authorizationGeneration
         let inputSourceSelectionDiscardGenerationAtReceipt = inputSourceSelectionDiscardGeneration
+        let localInputAdmissionGenerationAtReceipt = localInputAdmissionGeneration
+        let localInputAdmissionRevisionAtReceipt = localInputAdmissionRevision
+        let localInputAdmissionEnabledAtReceipt = localInputAdmissionEnabled
         do {
             try validateIncomingSequence(envelope)
             if case .unknown = envelope.messageType,
@@ -1456,6 +1520,9 @@ public actor SessionCoordinator {
                 reconnectGeneration: sessionGeneration,
                 authorizationGenerationAtReceipt: operationAuthorizationGeneration,
                 inputSourceSelectionDiscardGenerationAtReceipt: inputSourceSelectionDiscardGenerationAtReceipt,
+                localInputAdmissionGenerationAtReceipt: localInputAdmissionGenerationAtReceipt,
+                localInputAdmissionRevisionAtReceipt: localInputAdmissionRevisionAtReceipt,
+                localInputAdmissionEnabledAtReceipt: localInputAdmissionEnabledAtReceipt,
                 senderTimestampNanoseconds: envelope.timestamp,
                 receivedTimestampNanoseconds: receivedTimestampNanoseconds
             )
@@ -1492,6 +1559,9 @@ public actor SessionCoordinator {
         reconnectGeneration sessionGeneration: UInt64,
         authorizationGenerationAtReceipt: UInt64,
         inputSourceSelectionDiscardGenerationAtReceipt: UInt64,
+        localInputAdmissionGenerationAtReceipt: UInt64,
+        localInputAdmissionRevisionAtReceipt: UInt64,
+        localInputAdmissionEnabledAtReceipt: Bool,
         senderTimestampNanoseconds: UInt64,
         receivedTimestampNanoseconds: UInt64
     ) async throws {
@@ -1501,6 +1571,35 @@ public actor SessionCoordinator {
         ) else { return }
         let operationAuthorizationGeneration = authorizationGeneration
         try validateMessageDirection(for: message.messageType, incoming: true)
+        if configuration.role == .host,
+           negotiatedCapabilities.contains(.backgroundControl) {
+            switch message {
+            case let .inputEvent(input):
+                // Pause/revoke drops P6 input in the same authenticated
+                // session. The wire token also rejects messages already in
+                // TCP or a callback queue when a later resume opens the gate.
+                guard localInputAdmissionEnabledAtReceipt,
+                      localInputAdmissionEnabled,
+                      localInputAdmissionGenerationAtReceipt == localInputAdmissionGeneration,
+                      localInputAdmissionRevisionAtReceipt == localInputAdmissionRevision,
+                      input.controlGeneration == localInputAdmissionRevision else {
+                    return
+                }
+            case let .inputSourceSelection(selection):
+                // Source selection mutates the Host's global TIS state. Fence
+                // it before authorization validation as well, so a stale
+                // request cannot fail an otherwise healthy view-only session.
+                guard localInputAdmissionEnabledAtReceipt,
+                      localInputAdmissionEnabled,
+                      localInputAdmissionGenerationAtReceipt == localInputAdmissionGeneration,
+                      localInputAdmissionRevisionAtReceipt == localInputAdmissionRevision,
+                      selection.controlGeneration == localInputAdmissionRevision else {
+                    return
+                }
+            default:
+                break
+            }
+        }
         try validateAuthorization(for: message)
         switch message {
         case let .hello(hello):
@@ -1723,17 +1822,42 @@ public actor SessionCoordinator {
             guard inputSourceSelectionDiscardGenerationAtReceipt == inputSourceSelectionDiscardGeneration else {
                 return
             }
+            let requiresLocalAdmission = configuration.role == .host &&
+                negotiatedCapabilities.contains(.backgroundControl)
+            if requiresLocalAdmission {
+                guard localInputAdmissionEnabledAtReceipt,
+                      localInputAdmissionEnabled,
+                      localInputAdmissionGenerationAtReceipt == localInputAdmissionGeneration,
+                      localInputAdmissionRevisionAtReceipt == localInputAdmissionRevision,
+                      selection.controlGeneration == localInputAdmissionRevision else {
+                    return
+                }
+            }
             let scope = InputSourceSelectionAdmissionScope(
                 receiveGeneration: generation,
                 reconnectGeneration: sessionGeneration,
                 authorizationGeneration: authorizationGenerationAtReceipt,
                 discardGeneration: inputSourceSelectionDiscardGenerationAtReceipt,
-                windowGeneration: selection.windowGeneration
+                windowGeneration: selection.windowGeneration,
+                localAdmissionGeneration: requiresLocalAdmission
+                    ? localInputAdmissionGenerationAtReceipt
+                    : nil,
+                controlGeneration: requiresLocalAdmission ? selection.controlGeneration : nil
             )
             try publish(
                 message,
                 inputSourceSelectionScope: scope
             )
+        case .inputEvent:
+            if configuration.role == .host,
+               negotiatedCapabilities.contains(.backgroundControl) {
+                try publish(
+                    message,
+                    inputAdmissionGeneration: localInputAdmissionGenerationAtReceipt
+                )
+            } else {
+                try publish(message)
+            }
         case .error:
             try publish(message)
             await fail(
@@ -2105,7 +2229,10 @@ public actor SessionCoordinator {
         authorized = false
         authorizedWindowGeneration = nil
         authorizedCapabilities.removeAll()
+        pendingInputAdmissions.removeAll(keepingCapacity: true)
         pendingInputSourceSelectionAdmissions.removeAll(keepingCapacity: true)
+        localInputAdmissionGeneration &+= 1
+        inputSourceSelectionDiscardGeneration &+= 1
         incomingMessageStorage.removeProtectedMessages()
         if state == .windowSelectionAuthorized {
             state = .capabilitiesNegotiated
@@ -2123,14 +2250,20 @@ public actor SessionCoordinator {
         case .receiverReport:
             return [.h264Video, .receiverReport]
         case let .inputEvent(input):
+            let controlRequirement: Set<Capability> = negotiatedCapabilities.contains(.backgroundControl)
+                ? [.backgroundControl]
+                : []
             switch input.kind {
             case .keyDown, .keyUp:
-                return [.keyboardInput]
+                return Set<Capability>([.keyboardInput]).union(controlRequirement)
             case .pointerMove, .pointerButton, .scroll, .focusIntent:
-                return [.mouseInput]
+                return Set<Capability>([.mouseInput]).union(controlRequirement)
             }
         case .inputSourceSelection, .inputSourceAcknowledgement:
-            return [.keyboardInput, .inputSourceSync]
+            let controlRequirement: Set<Capability> = negotiatedCapabilities.contains(.backgroundControl)
+                ? [.backgroundControl]
+                : []
+            return Set<Capability>([.keyboardInput, .inputSourceSync]).union(controlRequirement)
         case .clipboardOffer, .clipboardText, .clipboardAcknowledgement:
             return [.textClipboard]
         default:
@@ -2249,11 +2382,18 @@ public actor SessionCoordinator {
 
     private func publish(
         _ message: MessagePayload,
-        inputSourceSelectionScope: InputSourceSelectionAdmissionScope? = nil
+        inputSourceSelectionScope: InputSourceSelectionAdmissionScope? = nil,
+        inputAdmissionGeneration: UInt64? = nil
     ) throws {
         if inputSourceSelectionScope != nil {
             guard configuration.role == .host,
                   pendingInputSourceSelectionAdmissions.count < Self.inputSourceSelectionAdmissionCapacity else {
+                throw SessionError.incomingMessageBackpressure(.control)
+            }
+        }
+        if inputAdmissionGeneration != nil {
+            guard configuration.role == .host,
+                  pendingInputAdmissions.count < Self.incomingControlMessageCapacity else {
                 throw SessionError.incomingMessageBackpressure(.control)
             }
         }
@@ -2265,6 +2405,15 @@ public actor SessionCoordinator {
                     PendingInputSourceSelectionAdmission(
                         selection: selection,
                         scope: inputSourceSelectionScope
+                    )
+                )
+            }
+            if let inputAdmissionGeneration,
+               case let .inputEvent(input) = message {
+                pendingInputAdmissions.append(
+                    PendingInputAdmission(
+                        input: input,
+                        generation: inputAdmissionGeneration
                     )
                 )
             }

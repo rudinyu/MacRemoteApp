@@ -2,19 +2,70 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "${script_dir}/.." && pwd)"
+repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
+source "${script_dir}/artifact-naming.sh"
 release_root="${1:-${repo_root}/build/testing}"
 
 cd "${repo_root}"
-test -d "${release_root}"
+if [[ "${release_root}" != /* ]]; then
+    release_root="${repo_root}/${release_root}"
+fi
+if [[ -L "${release_root}" || ! -d "${release_root}" ]]; then
+    echo "Release audit requires a non-symlink release directory" >&2
+    exit 2
+fi
+release_root="$(cd -P -- "${release_root}" && pwd -P)"
+artifact_channel="$(macremoteapp_resolve_artifact_channel "${repo_root}" "${release_root}")" || exit 2
+release_identity="$(macremoteapp_release_identity \
+    "${release_root}/MacRemoteApp-Host.app/Contents/Info.plist" \
+    "${release_root}/MacRemoteApp-Viewer.app/Contents/Info.plist")" || exit 2
 audit_tmp_dir="$(mktemp -d "${TMPDIR:-/private/tmp}/macremoteapp-release-audit.XXXXXX")"
 trap 'rm -rf -- "${audit_tmp_dir}"' EXIT
+
+assert_distribution_names() {
+    local app_name="$1"
+    local artifact_kind="$2"
+    local expected_name
+    local alternate_name
+
+    expected_name="$(macremoteapp_expected_distribution_name \
+        "${artifact_channel}" "${release_identity}" "${app_name}" "${artifact_kind}")" || return 1
+    if [[ "${artifact_kind}" == "app-zip" ]]; then
+        if [[ ! -s "${release_root}/${expected_name}" ]]; then
+            echo "Release audit failed: expected app archive is missing: ${expected_name}" >&2
+            return 1
+        fi
+        if [[ "${artifact_channel}" == "release" ]]; then
+            alternate_name="$(macremoteapp_expected_distribution_name \
+                testing "${release_identity}" "${app_name}" app-zip)"
+        else
+            alternate_name="${app_name}.app.zip"
+        fi
+    else
+        if [[ ! -s "${release_root}/${expected_name}" ]]; then
+            echo "Release audit failed: expected DMG is missing: ${expected_name}" >&2
+            return 1
+        fi
+        if [[ "${artifact_channel}" == "release" ]]; then
+            alternate_name="$(macremoteapp_expected_distribution_name \
+                testing "${release_identity}" "${app_name}" dmg)"
+        else
+            alternate_name="${app_name}.dmg"
+        fi
+    fi
+
+    if [[ -e "${release_root}/${alternate_name}" || -L "${release_root}/${alternate_name}" ]]; then
+        echo "Release audit failed: unexpected alternate distribution name exists: ${alternate_name}" >&2
+        return 1
+    fi
+}
 
 verify_dmg_payload() {
     local dmg_path="$1"
     local app_name="$2"
     local mount_point="${audit_tmp_dir}/${app_name}-dmg"
     local role_name="${app_name#MacRemoteApp-}"
+    local standalone_uninstall_source="${script_dir}/Uninstall-MacRemoteApp.command"
     local payload_name
     local manifest_name="MacRemoteApp-${role_name}-payload.sha256"
     local manifest_path="${mount_point}/${manifest_name}"
@@ -43,6 +94,7 @@ verify_dmg_payload() {
         ! -name "${app_name}.app" \
         ! -name "Install-MacRemoteApp-${role_name}.command" \
         ! -name "Uninstall-MacRemoteApp-${role_name}.command" \
+        ! -name "Uninstall-MacRemoteApp.command" \
         ! -name "MacRemoteApp-User-Guide.txt" \
         ! -name "MacRemoteApp-How-to-Debug.txt" \
         ! -name "MacRemoteApp-How-to-Collect-Debug-Logs.txt" \
@@ -104,6 +156,7 @@ verify_dmg_payload() {
     for payload_name in \
         "Install-MacRemoteApp-${role_name}.command" \
         "Uninstall-MacRemoteApp-${role_name}.command" \
+        "Uninstall-MacRemoteApp.command" \
         "MacRemoteApp-User-Guide.txt" \
         "MacRemoteApp-How-to-Debug.txt" \
         "MacRemoteApp-How-to-Collect-Debug-Logs.txt"
@@ -114,10 +167,18 @@ verify_dmg_payload() {
         fi
     done
 
+    if [[ -s "${mount_point}/Uninstall-MacRemoteApp.command" ]]; then
+        if ! cmp -s "${standalone_uninstall_source}" "${mount_point}/Uninstall-MacRemoteApp.command"; then
+            echo "Release audit failed: standalone uninstaller differs from its source in ${dmg_path}" >&2
+            payload_status=1
+        fi
+    fi
+
     : > "${expected_manifest}"
     for payload_name in \
         "Install-MacRemoteApp-${role_name}.command" \
         "Uninstall-MacRemoteApp-${role_name}.command" \
+        "Uninstall-MacRemoteApp.command" \
         "MacRemoteApp-User-Guide.txt" \
         "MacRemoteApp-How-to-Debug.txt" \
         "MacRemoteApp-How-to-Collect-Debug-Logs.txt"
@@ -138,7 +199,8 @@ verify_dmg_payload() {
 
     for payload_name in \
         "Install-MacRemoteApp-${role_name}.command" \
-        "Uninstall-MacRemoteApp-${role_name}.command"
+        "Uninstall-MacRemoteApp-${role_name}.command" \
+        "Uninstall-MacRemoteApp.command"
     do
         if [[ ! -x "${mount_point}/${payload_name}" ]]; then
             echo "Release audit failed: ${payload_name} is not executable in ${dmg_path}" >&2
@@ -223,6 +285,8 @@ assert_role_metadata() {
 for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
     app_path="${release_root}/${app_name}.app"
     binary_path="${app_path}/Contents/MacOS/${app_name}"
+    assert_distribution_names "${app_name}" app-zip
+    assert_distribution_names "${app_name}" dmg
     test -d "${app_path}"
     test -x "${binary_path}"
     assert_architectures "${app_name}" "${binary_path}"
@@ -252,7 +316,9 @@ for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
 done
 
 for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
-    dmg_path="${release_root}/${app_name}.dmg"
+    dmg_name="$(macremoteapp_expected_distribution_name \
+        "${artifact_channel}" "${release_identity}" "${app_name}" dmg)"
+    dmg_path="${release_root}/${dmg_name}"
     test -s "${dmg_path}"
     codesign --verify --verbose=2 "${dmg_path}"
     verify_dmg_payload "${dmg_path}" "${app_name}"
@@ -281,4 +347,4 @@ if [[ -n "${credential_matches_repo}" || -n "${credential_matches_release}" ]]; 
     exit 1
 fi
 
-echo "M9 release audit passed: hardened apps, signed DMGs, no development entitlements, no debug commands, no identity material"
+echo "M9 release audit passed for ${release_identity} (${artifact_channel}): hardened apps, signed DMGs, no development entitlements, no debug commands, no identity material"

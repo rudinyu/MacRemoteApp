@@ -5,6 +5,19 @@ struct ViewerInputSendScope: Equatable, Sendable {
     let sessionID: UUID
     let authorizationGeneration: UInt64
     let windowGeneration: UInt64
+    let controlGeneration: UInt64?
+
+    init(
+        sessionID: UUID,
+        authorizationGeneration: UInt64,
+        windowGeneration: UInt64,
+        controlGeneration: UInt64? = nil
+    ) {
+        self.sessionID = sessionID
+        self.authorizationGeneration = authorizationGeneration
+        self.windowGeneration = windowGeneration
+        self.controlGeneration = controlGeneration
+    }
 }
 
 enum ViewerInputSourceSyncState: Equatable, Sendable {

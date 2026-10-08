@@ -2,8 +2,9 @@
 
 ## Status and boundary
 
-This is a planning document only. None of the capabilities listed here is
-implemented or implied by the M10 V1 release candidate. V1 remains a LAN-only
+Except for the explicitly authorized [P6 extension](P6_BACKGROUND_CONTROL.md),
+this remains a planning document. P6 is current-source work, not a capability
+of the retained M10 `0.2.1009` RC. V1 remains a LAN-only
 session between one Host and one Viewer for one foreground-eligible window,
 with H.264 video, mouse/keyboard input, and opt-in text clipboard.
 
@@ -22,7 +23,7 @@ fallback in the V1 runtime.
 | P3 | WebRTC transport evaluation | Introduces a transport option only after the measured TCP baseline and media/control separation are understood. | Codec/security/ICE policy, certificate identity binding, permission model, fallback behavior, and a documented reason TCP is insufficient. |
 | P4 | Internet relay and NAT traversal | Depends on a reviewed transport abstraction and a service threat model; this is a new trust and availability boundary. | Relay authentication, end-to-end identity continuity, abuse/rate controls, metadata minimization, billing/operations ownership, and opt-in network policy. |
 | P5 | Secure file transfer | Adds durable user data movement and therefore a larger privacy and malware surface. | Explicit per-transfer approval, path sandboxing, size/type/rate limits, cancellation, integrity, audit redaction, and no implicit clipboard/file sharing. |
-| P6 | Background control | Changes the V1 foreground/focus safety invariant and must not be treated as an input mapping tweak. | Product re-approval, OS authorization study, target-selection UX, visible active-target indicator, per-session consent, and fail-closed focus loss tests. |
+| P6 | Background control | Explicitly authorized on 2026-10-08; changes the V1 foreground/focus safety invariant. | Separate local durable per-peer control consent, visible active-target/control state, pause/revoke, fail-closed target tests, and physical OS input acceptance. See [P6](P6_BACKGROUND_CONTROL.md). |
 | P7 | Locked-screen control research | This is not a committed feature. It may be infeasible or unsafe under macOS login-window and secure-input rules. | Separate security review and user decision; no implementation milestone is authorized unless an explicit threat model, OS support matrix, recovery path, and consent design are approved. |
 
 ## Cross-stage dependencies
@@ -75,7 +76,7 @@ V1 defect.
 ### Sketch of option (b) if chosen
 
 - Capability: allocate a free identifier at the P0.5 decision gate
-  (`0x000A` is currently next after the approved M10 input-source capability), always
+  (`0x000A` is allocated to P6; cursor capability must use another free ID), always
   optional and never mandatory. A peer that did not negotiate it never receives
   `CursorState`. Receiving it without negotiation is a protocol violation that
   fails closed like any other ungated protected message.
@@ -152,5 +153,6 @@ Before implementation, update the product, architecture, protocol, security,
 and development-plan documents with one named milestone. That milestone must
 define the wire changes, ownership package, migration/versioning story,
 permission UX, deterministic tests, physical test matrix, performance target,
-rollback behavior, and release evidence. Until then, these capabilities remain
+rollback behavior, and release evidence. Except for the separately authorized
+P6 source extension, these capabilities remain
 roadmap items and are intentionally absent from the M10 code path.

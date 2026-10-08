@@ -1,5 +1,16 @@
 # MacRemoteApp Architecture
 
+The V1 baseline below is supplemented by the separately authorized
+[P6 Host-controlled input contract](P6_BACKGROUND_CONTROL.md). For a
+negotiated P6 session, `Apps/Host` owns local consent and control lifecycle,
+`SecurityCore` owns durable per-peer Keychain grants, `RemoteProtocol` owns
+the capability and separate control/target status fields, `TransportCore`
+owns the local input admission fence, and `InputCore` owns the final safe
+process-target check and posting. Legacy sessions retain foreground-only
+input. P6 permits no app activation, locked-screen input, or exact-window
+promise for an app with multiple windows. The foreground-only invariants in
+the V1 sections must be read with this explicit P6 exception.
+
 ## Architecture intent
 
 MacRemoteApp is a two-application system with shared, platform-aware packages.
@@ -274,6 +285,13 @@ title/status, and Host status menu use this shared formatting. Unbundled
 executables report development metadata rather than inventing a release.
 The application release identity is separate from the negotiated wire protocol
 version; this UI change does not alter the protocol.
+
+Packaging also derives the distribution filename version from these existing
+plist fields. Testing, beta, and RC DMGs and app ZIPs carry `major.minor.build`;
+only the formal release channel keeps fixed distribution filenames. The
+selected channel must survive staging, signing, submission, and auditing so a
+temporary directory cannot change the naming policy. App bundles, executables,
+bundle IDs, and in-DMG helper filenames stay stable for installation and TCC.
 
 ## Host architecture
 
@@ -619,9 +637,20 @@ without relaunching the app and recreating its identity/preferences.
 This full test reset is distinct from Forget saved pairings, which preserves
 the local identity and permissions. Copies with the same role identifiers
 share state, so a test reset cannot silently preserve a production copy's
-settings. The production DMG uninstaller does not reset TCC; the repository's
+settings. The older role-specific DMG uninstaller does not reset TCC; the repository's
 legacy `--clean-testing` path is a broader reset and does not replace current
 per-role data cleanup. Neither UI code nor AppSupport edits the TCC database.
+
+The standalone `scripts/Uninstall-MacRemoteApp.command`, copied unchanged into
+both role DMGs starting with build `1009`, provides an explicit
+current-user clean-uninstall workflow, separate from both older helpers. It
+uses the signed apps' role-owned cleanup commands before moving verified
+installations to the Trash, removes exact app-state paths, and resets TCC only
+for the two product bundle IDs. It must reject unsafe targets and report any
+unverified or failed cleanup. Local Network privacy is not reset by TCC;
+manual revocation is documented, and no private database editing or system-wide
+privacy reset is permitted. Packaging includes the helper in the payload hash
+manifest; release auditing verifies its exact source bytes and executable mode.
 
 ## Failure and backpressure principles
 

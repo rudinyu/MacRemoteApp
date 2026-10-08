@@ -10,12 +10,20 @@ Host; this is deliberately not a full remote-desktop product.
 Milestone state and open evidence gaps are tracked in one place:
 [`docs/STATUS.md`](docs/STATUS.md).
 
-The current signed and notarized test release is `0.2.1008` (Version `0.2`,
-Build `1008`) in `build/rc/`, including Viewer-led input-source following and
-the earlier capture, input, reconnect, and presentation reliability fixes.
+The current signed and notarized test release is `0.2.1009` (Version `0.2`,
+Build `1009`) in `build/rc/`, including the full-cleanup uninstaller in both
+DMGs, Viewer-led input-source following, and the earlier capture, input,
+reconnect, and presentation reliability fixes.
 Apple submission IDs and verification evidence are recorded in
-[`docs/STATUS.md`](docs/STATUS.md#021008-notarized-rc).
+[`docs/STATUS.md`](docs/STATUS.md#021009-notarized-rc).
 Passing local tests does not replace the pending two-Mac acceptance run.
+
+The current source tree also contains the user-authorized P6 extension,
+[Host-controlled Viewer input](docs/P6_BACKGROUND_CONTROL.md). It adds a
+separate local, saved control grant and optional process-targeted background
+input. It is not included in the retained `0.2.1009` RC artifacts and does not
+complete the pending V1 physical acceptance. The V1 baseline described below
+continues to apply to peers without the P6 capability.
 
 This build adds Viewer-led Chinese/English input-source
 following. The Host sets the requested state instead of replaying a toggle:
@@ -28,6 +36,19 @@ sync failure. See the
 [design decision](docs/decisions/0007-m10-input-source-following.md).
 
 ## Native app shell
+
+For a user-facing clean uninstall, use `Uninstall-MacRemoteApp.command` from
+either newly generated Host or Viewer DMG, or download
+[`scripts/Uninstall-MacRemoteApp.command`](scripts/Uninstall-MacRemoteApp.command)
+and run it in Terminal. It asks for confirmation before clearing current-user
+Host/Viewer settings and role-owned Keychain data, moving verified installed
+apps to the Trash, and resetting only their bundle-specific TCC decisions.
+Local Network privacy is separate from TCC: turn off remaining MacRemoteApp
+entries in System Settings manually. Missing signed cleanup helpers and other
+incomplete steps are reported rather than called a complete cleanup. See
+[the uninstall guide](docs/USER_GUIDE.md#clean-uninstall-including-permissions).
+The full-cleanup helper is included starting with build `1009`; older `0.2.1008`
+DMGs contain only the role-specific helper.
 
 Both roles now have native macOS About, Settings, Hide, Minimize, and Quit
 commands. Viewer Settings replaces the remote view in its existing main
@@ -44,9 +65,11 @@ The user-facing documents are [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md),
 [`docs/DEBUG_LOG_COLLECTION.md`](docs/DEBUG_LOG_COLLECTION.md). The DMG
 packaging flow puts plain-text copies of all three documents beside the app,
 the per-user `Applications` drop target, and optional role-specific install
-and uninstall commands in every newly generated Host and Viewer DMG. The DMG
-commands are user-facing, double-click-only helpers: they have no CI, testing,
-ad-hoc, arbitrary-path, or repository-cleanup options.
+and uninstall commands, plus the full-cleanup `Uninstall-MacRemoteApp.command`,
+in every newly generated Host and Viewer DMG. The role-specific commands are
+double-click-only helpers. The full-cleanup helper also accepts `--help` and
+`--dry-run`; none exposes CI, testing, ad-hoc, arbitrary-path, or
+repository-cleanup options.
 
 The repository root is:
 
@@ -128,10 +151,10 @@ universal Host/arm64 Viewer bundles, generate non-secret public certificate
 files, and run the two-machine Bonjour/TLS smoke. `scripts/package-device-apps.sh`
 also creates local signed role-specific DMGs under
 `build/testing/`; this package-only output is not a
-notarized distribution. `scripts/release-notarized.sh` is the required final
+notarized distribution. `scripts/release-notarized.sh rc` is the required final
 test path: it runs the canonical `scripts/validate.sh` validation directly,
 then signs, submits, staples, and validates the
-notarized apps and DMGs. Its default output is the repository-local
+notarized apps and DMGs. Without a channel argument it selects the formal
 `build/release/` directory, outside `.build`. Local artifacts are organized as
 `build/testing/`, `build/beta/`, `build/rc/`, and `build/release/`; the
 `build/` tree is excluded through the checkout-local `.git/info/exclude`
@@ -149,13 +172,32 @@ The selected channel is protected by a repository-local `lockf` file lock, and
 `MACREMOTEAPP_RELEASE_ROOT` must match that channel; concurrent release
 runs and cross-channel promotion are rejected. Pass `beta` or `rc` to
 `scripts/release-notarized.sh` to target those channels.
+Testing, beta, and RC distribution filenames include the product version,
+derived from the existing short-version and build plist fields: for example,
+`MacRemoteApp-Host-0.2.1009.dmg` and `MacRemoteApp-Viewer-0.2.1009.dmg`.
+Distributable app ZIPs follow the same versioned naming rule. Only the formal
+`release` channel uses the fixed `MacRemoteApp-Host.dmg` / `MacRemoteApp-Viewer.dmg`
+names. App bundles, executable names, bundle IDs, and installed helper names
+remain stable; the version belongs to the distribution filename, not the
+identity used for installation or permissions.
 The lower-level `scripts/notarize-device-apps.sh` remains available for the
 notarization step itself and accepts only an absent or empty controlled staging
 directory; it refuses direct writes to `build/beta`, `build/rc`, and
 `build/release`, which require the lock-protected promotion flow.
-Both notarization entry points pass the named Keychain profile directly to
-each `notarytool submit`; the submit operation is the authoritative profile
-check for the actual release path. `scripts/check-notary-profile.sh` remains
+Both notarization entry points read the owner-only shared configuration at
+`~/.config/codex/notarization.env` as data. An explicitly set
+`MACREMOTEAPP_NOTARY_PROFILE` takes precedence. Otherwise the shared file may
+define `MACOS_NOTARY_PROFILE` or the complete existing
+`MACOS_NOTARY_KEY_PATH`, `MACOS_NOTARY_KEY_ID`, and `MACOS_NOTARY_ISSUER` set.
+With no shared default, the existing `notarytool-profile` fallback is retained.
+The config and any referenced private key must be user-owned mode `600`; the
+key stays outside this repository. Unsupported syntax and incomplete or unsafe
+configuration fail before release work, without printing credential values.
+The file is not sourced as executable shell, and API credential values are
+passed only to the submit command rather than exported to build/CI tools.
+Signing identity still uses `MACREMOTEAPP_SIGNING_IDENTITY`.
+The actual `notarytool submit` remains the authoritative credential check for
+an explicitly authorized release. `scripts/check-notary-profile.sh` remains
 an optional history-based diagnostic, but it is not a release gate because a
 Codex runner may reject the separate `history` operation even when the actual
 submit path can read the profile.
@@ -166,7 +208,7 @@ role-specific helpers only install a verified app into `~/Applications` or
 move that exact per-user app to the Trash; the DMG also includes the User
 Guide, How to Debug, and How to Collect Debug Logs text files. Users may drag
 the app onto the DMG's `Applications` drop target to install into their own
-`~/Applications`, or use the optional helper. The DMG uninstall helper verifies
+`~/Applications`, or use the optional helper. The role-specific DMG uninstall helper verifies
 the selected Developer ID/Gatekeeper-accepted app and any installed opposite
 role, quits installed MacRemoteApp roles, and asks each role's signed app to
 clear its own Keychain trust and generated identity before moving only the
@@ -189,7 +231,7 @@ opposite device's `.cer`, export `MACREMOTEAPP_P12_PASSWORD` for the cleanup
 run so the local certificate fingerprint can be checked without printing the
 password. If that verification cannot be completed, the identity directory is
 preserved for a safe retry. Without `--identities`, imported M2 Keychain
-identities are preserved. The DMG uninstall is intentionally a full
+identities are preserved. The role-specific DMG uninstall is intentionally a full
 MacRemoteApp reset: if the other role remains installed, it must enroll a new
 local identity and pair again. This preserves `build/beta/`,
 `build/rc/`, and `build/release/`. The packaging source icon is

@@ -13,6 +13,19 @@ private enum ViewerPairingPromptOutcome: Sendable {
     case sessionEnded
 }
 
+enum ViewerProcessControlReadiness {
+    static func blocker(
+        hostPermissionGranted: Bool,
+        processTargetEligible: Bool?,
+        controlGeneration: UInt64? = 1
+    ) -> InputReadiness? {
+        guard hostPermissionGranted else { return .hostPermissionUnavailable }
+        guard processTargetEligible == true else { return .hostProcessTargetUnavailable }
+        guard controlGeneration != nil else { return .hostStateUnavailable }
+        return nil
+    }
+}
+
 private let viewerApplicationMetadata = ApplicationMetadata(bundle: .main)
 private let viewerProtocolVersion = "\(ProtocolVersion.current.major).\(ProtocolVersion.current.minor)"
 
@@ -66,8 +79,13 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         .inputSourceSync,
         .textClipboard,
         .keyframeRequest,
-        .receiverReport
+        .receiverReport,
+        .backgroundControl
     ]
+
+    private var hostControlState: ControlAuthorizationState?
+    private var hostProcessTargetEligible: Bool?
+    private var hostControlGeneration: UInt64?
 
     private static var localDeviceName: String {
         let shortName = ProcessInfo.processInfo.hostName
@@ -1025,22 +1043,43 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let snapshot = await sourceSession.snapshot()
             guard session === sourceSession else { return }
             guard synchronizeAuthorization(for: sourceSession, snapshot: snapshot) else { return }
+            if let controlState = message.controlState {
+                hostControlState = controlState
+                if snapshot.negotiatedCapabilities.contains(.backgroundControl) {
+                    hostControlGeneration = message.controlGeneration
+                }
+            }
+            let processTargetStatusIsCurrent = message.windowGeneration == snapshot.authorizedWindowGeneration &&
+                (message.windowGeneration == nil || snapshot.authorized)
+            if processTargetStatusIsCurrent, let processTargetEligible = message.processTargetEligible {
+                hostProcessTargetEligible = processTargetEligible
+            }
             if message.state == .failed || message.state == .stopping {
                 hostInputPermission = .unknown
                 hostInputFocusEligible = false
                 hostInputStatusGeneration = nil
-            } else if let generation = message.windowGeneration,
-                      snapshot.authorized,
-                      snapshot.authorizedWindowGeneration == generation {
-                hostInputPermission = message.permission
-                hostInputFocusEligible = message.focusEligible
-                hostInputStatusGeneration = generation
-            } else {
-                // A status for an old selection or an unauthorizing session
-                // cannot make the current surface ready.
-                hostInputPermission = .unknown
-                hostInputFocusEligible = false
-                hostInputStatusGeneration = nil
+                hostControlState = nil
+                hostProcessTargetEligible = nil
+                hostControlGeneration = nil
+            } else if message.controlState == nil || message.processTargetEligible != nil {
+                if let generation = message.windowGeneration,
+                   snapshot.authorized,
+                   snapshot.authorizedWindowGeneration == generation {
+                    hostInputPermission = message.permission
+                    hostInputFocusEligible = message.focusEligible
+                    hostInputStatusGeneration = generation
+                } else {
+                    // A status for an old selection or an unauthorizing session
+                    // cannot make the current surface ready.
+                    hostInputPermission = .unknown
+                    hostInputFocusEligible = false
+                    hostInputStatusGeneration = nil
+                }
+            } else if message.controlState != nil,
+                      message.processTargetEligible == nil {
+                // Control-only updates must not erase the independent Host
+                // permission/focus snapshot for this window generation.
+                // Keep the prior status; `controlState` is still refreshed.
             }
             await refreshInputSurface(for: sourceSession)
             guard session === sourceSession else { return }
@@ -1048,7 +1087,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 setStatus("Connected — enable PostEvent permission for MacRemoteApp Host")
             } else if hostInputPermission == .unknown {
                 setStatus("Connected — waiting for Host input status")
-            } else if !hostInputFocusEligible {
+            } else if !snapshot.negotiatedCapabilities.contains(.backgroundControl),
+                      !hostInputFocusEligible {
                 setStatus("Connected — the selected app must be foreground on the Host")
             }
 
@@ -1339,7 +1379,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             try await transport.send(
                 event,
-                expectedAuthorizationGeneration: authorizationGeneration
+                expectedAuthorizationGeneration: authorizationGeneration,
+                controlGeneration: scope.controlGeneration
             )
             if keyboardDeliveryToken != nil {
                 self.inputSourceSyncGate.noteDelivered(event, in: scope)
@@ -1693,6 +1734,17 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             setInputSourceSyncStatus("Remote view is inactive — return to sync", retryAvailable: false)
             return
         }
+        if snapshot.negotiatedCapabilities.contains(.backgroundControl),
+           !hostInputFocusEligible,
+           hostProcessTargetEligible == true {
+            inputSourceSyncCapabilityAvailable = false
+            inputSourceSyncGate.useManualSelection(in: scope)
+            setInputSourceSyncStatus(
+                "Host app is in background — match input sources manually",
+                retryAvailable: false
+            )
+            return
+        }
         guard inputSourceFollowViewer else {
             inputSourceSyncGate.useManualSelection(in: scope)
             setInputSourceSyncStatus("Follow Viewer input source is off — match sources manually", retryAvailable: false)
@@ -1742,11 +1794,24 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 selectedWindowGeneration: snapshot.authorizedWindowGeneration,
                 selectedStreamGeneration: generation
             )
-            if hostInputStatusGeneration != snapshot.authorizedWindowGeneration {
+            let processControlNegotiated = snapshot.negotiatedCapabilities.contains(.backgroundControl)
+            if processControlNegotiated,
+               hostControlState == .negotiating {
+                readiness = .hostControlNegotiating
+            } else if processControlNegotiated && hostControlState != .active {
+                readiness = .hostControlUnavailable
+            } else if hostInputStatusGeneration != snapshot.authorizedWindowGeneration {
                 readiness = .hostStateUnavailable
+            } else if processControlNegotiated,
+                      let blocker = ViewerProcessControlReadiness.blocker(
+                          hostPermissionGranted: hostInputPermission == .granted,
+                          processTargetEligible: hostProcessTargetEligible,
+                          controlGeneration: hostControlGeneration
+                      ) {
+                readiness = blocker
             } else if hostInputPermission != .granted {
                 readiness = .hostPermissionUnavailable
-            } else if !hostInputFocusEligible {
+            } else if !processControlNegotiated && !hostInputFocusEligible {
                 readiness = .hostFocusUnavailable
             } else if !availability.anyInputEnabled {
                 readiness = .awaitingAuthorization
@@ -1764,7 +1829,10 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 ViewerInputSendScope(
                     sessionID: sessionLifetimeID,
                     authorizationGeneration: snapshot.authorizationGeneration,
-                    windowGeneration: windowGeneration
+                    windowGeneration: windowGeneration,
+                    controlGeneration: snapshot.negotiatedCapabilities.contains(.backgroundControl)
+                        ? hostControlGeneration
+                        : nil
                 )
             )
         } else {
@@ -1789,6 +1857,19 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             setStatus("Connected — the selected app must be foreground on the Host")
         case .hostStateUnavailable:
             setStatus("Connected — waiting for Host input status")
+        case .hostControlNegotiating:
+            setStatus("Connected — Host is setting up Viewer control")
+        case .hostControlUnavailable:
+            switch hostControlState {
+            case .requiresConsent: setStatus("Connected — approve Viewer control on the Host")
+            case .paused: setStatus("Connected — Viewer control is paused on the Host")
+            case .revoked: setStatus("Connected — Viewer control was revoked on the Host")
+            case .persistenceFailure: setStatus("Connected — Host control is blocked by a Keychain error")
+            case .unsupported: setStatus("Connected — Host does not support process-level control")
+            case .active, .negotiating, .none: setStatus("Connected — Host control is unavailable")
+            }
+        case .hostProcessTargetUnavailable:
+            setStatus("Connected — Host target is not currently safe for process control")
         case .awaitingAuthorization:
             if selectedWindowIdentifier == nil {
                 setStatus("Connected — select a Host window to start video")
@@ -2011,6 +2092,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hostInputPermission = .unknown
         hostInputFocusEligible = false
         hostInputStatusGeneration = nil
+        hostControlState = nil
+        hostProcessTargetEligible = nil
+        hostControlGeneration = nil
         streamGenerationGate.revoke()
         advancePresentationLifetime(resetDecoder: true)
         streamDimensions = .zero
@@ -2430,6 +2514,12 @@ private final class ViewerContentView: NSView {
             return "Host not foreground"
         case .hostStateUnavailable:
             return "Waiting for Host"
+        case .hostControlNegotiating:
+            return "Host setting up control"
+        case .hostControlUnavailable:
+            return "Host control unavailable"
+        case .hostProcessTargetUnavailable:
+            return "Host target unavailable"
         case .ready:
             return "Ready"
         }

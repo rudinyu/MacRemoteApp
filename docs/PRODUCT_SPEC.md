@@ -7,6 +7,16 @@ acceptance boundaries; implementation details belong in the architecture and
 protocol documents. Current milestone state and open evidence gaps are
 tracked in [the status page](STATUS.md).
 
+The separately authorized [P6 extension](P6_BACKGROUND_CONTROL.md) changes
+input eligibility only when both peers negotiate `backgroundControl` and the
+Host has granted that authenticated Viewer local control consent. V1
+foreground-only statements below describe the baseline for legacy peers.
+P6 retains one captured window but delivers input to its owning process;
+exact-window delivery in a multi-window application is not guaranteed.
+Pairing alone grants no P6 input control. The Host exposes current control
+state and local allow, pause/resume, and revoke actions while video sharing
+continues. No locked-screen control or other post-V1 feature is authorized.
+
 ## Product goal
 
 Allow a user at an Apple Silicon Mac (the Viewer) to view and interact with one
@@ -245,7 +255,16 @@ available on every macOS version.
   For example, `0.2.1003` means Version `0.2` and Build `1003`; store them in
   `CFBundleShortVersionString` and `CFBundleVersion`, respectively. The final
   component is the build number, not a patch version. Wire protocol versioning
-  remains independent.
+  remains independent. Testing, beta, and RC distribution filenames include
+  this version; only formal release filenames may omit it. Installed app
+  names and bundle identifiers remain stable.
+- **SHARED-08**: Provide a confirmed current-user clean-uninstall script for
+  verified installations, role-owned settings/Keychain data, and bundle-scoped
+  TCC decisions. Report failures and missing cleanup helpers. Explain that
+  Local Network requires separate manual revocation and historical entries
+  cannot be removed through a supported macOS reset command. Never reset
+  unrelated apps' permissions or delete release/source artifacts. Include the
+  full-cleanup script in both Host and Viewer DMGs with a verified payload hash.
 
 ## Quality targets
 

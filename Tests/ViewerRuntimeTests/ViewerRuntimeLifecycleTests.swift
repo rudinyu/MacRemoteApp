@@ -124,6 +124,52 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         XCTAssertEqual(renewedScope.windowGeneration, 11)
     }
 
+    func testControlGenerationChangeDropsQueuedInputWithoutChangingWindowEpoch() async {
+        let pausedScope = makeScope(windowGeneration: 11, authorizationGeneration: 4, controlGeneration: 8)
+        let resumedScope = makeScope(
+            sessionID: pausedScope.sessionID,
+            windowGeneration: 11,
+            authorizationGeneration: 4,
+            controlGeneration: 10
+        )
+        let started = AsyncSignal()
+        let release = AsyncSignal()
+        let recorder = SendRecorder()
+        let queue = ViewerInputSendQueue(capacity: 4)
+        queue.updateScope(pausedScope)
+
+        XCTAssertEqual(
+            queue.enqueue(record(1, window: 11), in: pausedScope) { event, epoch in
+                await recorder.send(event, epoch, route: "old-control", started: started, release: release)
+            },
+            .enqueued
+        )
+        await started.wait()
+        XCTAssertEqual(
+            queue.enqueue(record(2, window: 11), in: pausedScope) { event, epoch in
+                await recorder.send(event, epoch, route: "stale-queued")
+            },
+            .enqueued
+        )
+
+        queue.updateScope(resumedScope)
+        XCTAssertEqual(
+            queue.enqueue(record(3, window: 11), in: resumedScope) { event, epoch in
+                await recorder.send(event, epoch, route: "resumed-control")
+            },
+            .enqueued
+        )
+        await release.signal()
+        await queue.waitUntilIdle()
+
+        let sent = await recorder.snapshot()
+        XCTAssertEqual(sent.map(\.sequence), [1, 3])
+        XCTAssertEqual(sent.map(\.route), ["old-control", "resumed-control"])
+        XCTAssertEqual(sent.map(\.authorizationGeneration), [4, 4])
+        XCTAssertEqual(resumedScope.windowGeneration, pausedScope.windowGeneration)
+        XCTAssertEqual(resumedScope.controlGeneration, 10)
+    }
+
     func testSameScopePreservesOrderedKeyReleaseAcrossSettingsNavigation() async {
         let scope = makeScope()
         let recorder = SendRecorder()
@@ -147,6 +193,37 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         await queue.waitUntilIdle()
         let sent = await recorder.snapshot()
         XCTAssertEqual(sent.map(\.kind), [.keyDown, .keyUp])
+    }
+
+    func testP6HostPermissionLossPrecedesProcessTargetSafety() {
+        XCTAssertEqual(
+            ViewerProcessControlReadiness.blocker(
+                hostPermissionGranted: false,
+                processTargetEligible: false
+            ),
+            .hostPermissionUnavailable
+        )
+        XCTAssertEqual(
+            ViewerProcessControlReadiness.blocker(
+                hostPermissionGranted: true,
+                processTargetEligible: false
+            ),
+            .hostProcessTargetUnavailable
+        )
+        XCTAssertNil(
+            ViewerProcessControlReadiness.blocker(
+                hostPermissionGranted: true,
+                processTargetEligible: true
+            )
+        )
+        XCTAssertEqual(
+            ViewerProcessControlReadiness.blocker(
+                hostPermissionGranted: true,
+                processTargetEligible: true,
+                controlGeneration: nil
+            ),
+            .hostStateUnavailable
+        )
     }
 
     func testDrawableCallbackFromPreviousPresentationLifetimeIsRejected() {
@@ -596,12 +673,14 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
     private func makeScope(
         sessionID: UUID = UUID(),
         windowGeneration: UInt64 = 7,
-        authorizationGeneration: UInt64 = 4
+        authorizationGeneration: UInt64 = 4,
+        controlGeneration: UInt64? = nil
     ) -> ViewerInputSendScope {
         ViewerInputSendScope(
             sessionID: sessionID,
             authorizationGeneration: authorizationGeneration,
-            windowGeneration: windowGeneration
+            windowGeneration: windowGeneration,
+            controlGeneration: controlGeneration
         )
     }
 

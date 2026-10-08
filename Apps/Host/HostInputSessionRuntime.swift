@@ -90,6 +90,7 @@ final actor HostInputSessionRuntime {
     private var cleanupTask: Task<Void, Never>?
     private var cleanupGeneration: UInt64 = 0
     private var lifecycleGeneration: UInt64 = 0
+    private var localInputAdmissionRevision: UInt64 = 0
     private var isStarting = false
     private var sessionLifecycleActive = false
 
@@ -247,6 +248,34 @@ final actor HostInputSessionRuntime {
 
     func selectionDidChange() async {
         await loop.selectionDidChange()
+    }
+
+    /// Closes Host-local P6 admission, drains the in-flight callback, and
+    /// resets pressed state without changing the session's media authorization.
+    func setLocalInputAdmission(
+        _ enabled: Bool,
+        revision: UInt64,
+        session: SessionCoordinator
+    ) async {
+        guard revision >= localInputAdmissionRevision else { return }
+        let didChange = revision != localInputAdmissionRevision
+        localInputAdmissionRevision = revision
+        await loop.beginInputStop()
+        // A pause must release any pressed state even if a later resume
+        // superseded it while this drain was waiting. The session revision
+        // below still decides which gate value is current.
+        if !enabled || didChange {
+            loop.reset()
+        }
+        guard revision == localInputAdmissionRevision else {
+            await loop.endInputStop()
+            return
+        }
+        await session.setLocalInputAdmission(enabled, revision: revision)
+        if !enabled {
+            loop.reset()
+        }
+        await loop.endInputStop()
     }
 
     func withSelectionReplacement(

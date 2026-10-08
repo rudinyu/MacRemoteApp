@@ -854,6 +854,8 @@ public struct InputEventMessage: MessagePayloadValue {
     public let deltaY: Int32?
     public let keyCode: UInt16?
     public let modifiers: UInt32?
+    /// P6 local-control epoch. Legacy sessions omit this optional field.
+    public let controlGeneration: UInt64?
 
     public init(
         kind: InputEventKind,
@@ -865,7 +867,8 @@ public struct InputEventMessage: MessagePayloadValue {
         deltaX: Int32? = nil,
         deltaY: Int32? = nil,
         keyCode: UInt16? = nil,
-        modifiers: UInt32? = nil
+        modifiers: UInt32? = nil,
+        controlGeneration: UInt64? = nil
     ) {
         self.kind = kind
         self.windowGeneration = windowGeneration
@@ -877,6 +880,7 @@ public struct InputEventMessage: MessagePayloadValue {
         self.deltaY = deltaY
         self.keyCode = keyCode
         self.modifiers = modifiers
+        self.controlGeneration = controlGeneration
     }
 
     public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
@@ -892,12 +896,15 @@ public struct InputEventMessage: MessagePayloadValue {
         if let deltaY { try fields.append(fieldID: 8, mandatory: false, value: WireValue.int32(deltaY)) }
         if let keyCode { try fields.append(fieldID: 9, mandatory: false, value: WireValue.uint16(keyCode)) }
         if let modifiers { try fields.append(fieldID: 10, mandatory: false, value: WireValue.uint32(modifiers)) }
+        if let controlGeneration {
+            try fields.append(fieldID: 11, mandatory: false, value: WireValue.uint64(controlGeneration))
+        }
         return fields.data
     }
 
     public static func decode(_ data: Data, using limits: ProtocolLimits = .default) throws -> InputEventMessage {
         let fields = try MessageFieldReader(data: data, message: .inputEvent, limits: limits)
-        try fields.ensureKnown(Set(1 ... 10))
+        try fields.ensureKnown(Set(1 ... 11))
         guard let kind = InputEventKind(rawValue: try WireValue.decodeByte(try fields.required(1), message: .inputEvent, fieldID: 1)) else {
             throw ProtocolError.invalidFieldValue(message: .inputEvent, fieldID: 1)
         }
@@ -911,13 +918,19 @@ public struct InputEventMessage: MessagePayloadValue {
             deltaX: try fields.optional(7).map { try WireValue.decodeInt32($0, message: .inputEvent, fieldID: 7) },
             deltaY: try fields.optional(8).map { try WireValue.decodeInt32($0, message: .inputEvent, fieldID: 8) },
             keyCode: try fields.optional(9).map { try WireValue.decodeUInt16($0, message: .inputEvent, fieldID: 9) },
-            modifiers: try fields.optional(10).map { try WireValue.decodeUInt32($0, message: .inputEvent, fieldID: 10) }
+            modifiers: try fields.optional(10).map { try WireValue.decodeUInt32($0, message: .inputEvent, fieldID: 10) },
+            controlGeneration: try fields.optional(11).map {
+                try WireValue.decodeUInt64($0, message: .inputEvent, fieldID: 11)
+            }
         )
         try message.validateShape()
         return message
     }
 
     private func validateShape() throws {
+        if let controlGeneration, controlGeneration == 0 {
+            throw ProtocolError.invalidFieldValue(message: .inputEvent, fieldID: 11)
+        }
         switch kind {
         case .pointerMove:
             guard x != nil, y != nil,
@@ -990,17 +1003,21 @@ public struct InputSourceSelectionMessage: MessagePayloadValue {
     public let requestID: UInt64
     public let kind: KeyboardInputSourceKind
     public let sourceIdentifier: String
+    /// P6 local-control epoch. Legacy sessions omit this optional field.
+    public let controlGeneration: UInt64?
 
     public init(
         windowGeneration: UInt64,
         requestID: UInt64,
         kind: KeyboardInputSourceKind,
-        sourceIdentifier: String
+        sourceIdentifier: String,
+        controlGeneration: UInt64? = nil
     ) {
         self.windowGeneration = windowGeneration
         self.requestID = requestID
         self.kind = kind
         self.sourceIdentifier = sourceIdentifier
+        self.controlGeneration = controlGeneration
     }
 
     public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
@@ -1023,6 +1040,9 @@ public struct InputSourceSelectionMessage: MessagePayloadValue {
                 maximumBytes: min(Self.maximumSourceIdentifierLength, limits.maxIdentifierBytes)
             )
         )
+        if let controlGeneration {
+            try fields.append(fieldID: 5, mandatory: false, value: WireValue.uint64(controlGeneration))
+        }
         let data = fields.data
         try validateInputSourceMessagePayload(data, limits: limits)
         return data
@@ -1034,7 +1054,7 @@ public struct InputSourceSelectionMessage: MessagePayloadValue {
     ) throws -> InputSourceSelectionMessage {
         try validateInputSourceMessagePayload(data, limits: limits)
         let fields = try MessageFieldReader(data: data, message: .inputSourceSelection, limits: limits)
-        try fields.ensureKnown(Set(1 ... 4))
+        try fields.ensureKnown(Set(1 ... 5))
         guard let kind = KeyboardInputSourceKind(
             rawValue: try WireValue.decodeByte(
                 try fields.required(3),
@@ -1064,7 +1084,10 @@ public struct InputSourceSelectionMessage: MessagePayloadValue {
                     Self.maximumSourceIdentifierLength,
                     min(limits.maxIdentifierBytes, limits.maxFieldLength)
                 )
-            )
+            ),
+            controlGeneration: try fields.optional(5).map {
+                try WireValue.decodeUInt64($0, message: .inputSourceSelection, fieldID: 5)
+            }
         )
         try message.validate(using: limits)
         return message
@@ -1076,6 +1099,9 @@ public struct InputSourceSelectionMessage: MessagePayloadValue {
         }
         guard requestID > 0 else {
             throw ProtocolError.invalidFieldValue(message: .inputSourceSelection, fieldID: 2)
+        }
+        if let controlGeneration, controlGeneration == 0 {
+            throw ProtocolError.invalidFieldValue(message: .inputSourceSelection, fieldID: 5)
         }
         try validateInputSourceIdentifier(sourceIdentifier, message: .inputSourceSelection, limits: limits)
     }
@@ -1542,15 +1568,32 @@ public struct SessionStateMessage: MessagePayloadValue {
     public let permission: PermissionState
     public let focusEligible: Bool
     public let windowGeneration: UInt64?
+    public let controlState: ControlAuthorizationState?
+    /// Live Host-side target safety, independent of foreground eligibility.
+    public let processTargetEligible: Bool?
+    /// Host-local P6 pause/resume/revoke epoch. It does not change media authorization.
+    public let controlGeneration: UInt64?
 
-    public init(state: SessionState, permission: PermissionState, focusEligible: Bool, windowGeneration: UInt64? = nil) {
+    public init(
+        state: SessionState,
+        permission: PermissionState,
+        focusEligible: Bool,
+        windowGeneration: UInt64? = nil,
+        controlState: ControlAuthorizationState? = nil,
+        processTargetEligible: Bool? = nil,
+        controlGeneration: UInt64? = nil
+    ) {
         self.state = state
         self.permission = permission
         self.focusEligible = focusEligible
         self.windowGeneration = windowGeneration
+        self.controlState = controlState
+        self.processTargetEligible = processTargetEligible
+        self.controlGeneration = controlGeneration
     }
 
     public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
+        try validate()
         var fields = try MessageFieldWriter(message: .sessionState, limits: limits)
         try fields.append(fieldID: 1, mandatory: true, value: WireValue.byte(state.rawValue, message: .sessionState, fieldID: 1))
         try fields.append(fieldID: 2, mandatory: true, value: WireValue.byte(permission.rawValue, message: .sessionState, fieldID: 2))
@@ -1558,26 +1601,65 @@ public struct SessionStateMessage: MessagePayloadValue {
         if let windowGeneration {
             try fields.append(fieldID: 4, mandatory: false, value: WireValue.uint64(windowGeneration))
         }
+        if let controlState {
+            try fields.append(
+                fieldID: 5,
+                mandatory: false,
+                value: WireValue.byte(controlState.rawValue, message: .sessionState, fieldID: 5)
+            )
+        }
+        if let processTargetEligible {
+            try fields.append(
+                fieldID: 6,
+                mandatory: false,
+                value: WireValue.bool(processTargetEligible, message: .sessionState, fieldID: 6)
+            )
+        }
+        if let controlGeneration {
+            try fields.append(fieldID: 7, mandatory: false, value: WireValue.uint64(controlGeneration))
+        }
         return fields.data
     }
 
     public static func decode(_ data: Data, using limits: ProtocolLimits = .default) throws -> SessionStateMessage {
         let fields = try MessageFieldReader(data: data, message: .sessionState, limits: limits)
-        try fields.ensureKnown(Set(1 ... 4))
+        try fields.ensureKnown(Set(1 ... 7))
         guard let state = SessionState(rawValue: try WireValue.decodeByte(try fields.required(1), message: .sessionState, fieldID: 1)) else {
             throw ProtocolError.invalidFieldValue(message: .sessionState, fieldID: 1)
         }
         guard let permission = PermissionState(rawValue: try WireValue.decodeByte(try fields.required(2), message: .sessionState, fieldID: 2)) else {
             throw ProtocolError.invalidFieldValue(message: .sessionState, fieldID: 2)
         }
-        return SessionStateMessage(
+        let message = SessionStateMessage(
             state: state,
             permission: permission,
             focusEligible: try WireValue.decodeBool(try fields.required(3), message: .sessionState, fieldID: 3),
             windowGeneration: try fields.optional(4).map {
                 try WireValue.decodeUInt64($0, message: .sessionState, fieldID: 4)
+            },
+            controlState: try fields.optional(5).map {
+                guard let value = ControlAuthorizationState(
+                    rawValue: try WireValue.decodeByte($0, message: .sessionState, fieldID: 5)
+                ) else {
+                    throw ProtocolError.invalidFieldValue(message: .sessionState, fieldID: 5)
+                }
+                return value
+            },
+            processTargetEligible: try fields.optional(6).map {
+                try WireValue.decodeBool($0, message: .sessionState, fieldID: 6)
+            },
+            controlGeneration: try fields.optional(7).map {
+                try WireValue.decodeUInt64($0, message: .sessionState, fieldID: 7)
             }
         )
+        try message.validate()
+        return message
+    }
+
+    private func validate() throws {
+        if let controlGeneration, controlGeneration == 0 {
+            throw ProtocolError.invalidFieldValue(message: .sessionState, fieldID: 7)
+        }
     }
 }
 

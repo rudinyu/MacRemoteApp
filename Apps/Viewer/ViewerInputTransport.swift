@@ -33,7 +33,8 @@ final class ViewerInputTransport {
 
     func send(
         _ record: InputEventRecord,
-        expectedAuthorizationGeneration: UInt64? = nil
+        expectedAuthorizationGeneration: UInt64? = nil,
+        controlGeneration: UInt64? = nil
     ) async throws {
         try record.validate(limits: limits)
         guard record.estimatedEncodedPayloadBytes <= limits.maxEncodedPayloadBytes else {
@@ -43,7 +44,7 @@ final class ViewerInputTransport {
             )
         }
 
-        let message = try Self.message(for: record)
+        let message = try Self.message(for: record, controlGeneration: controlGeneration)
         // Keep this explicit so a future schema extension cannot silently turn
         // an input event into an oversized control payload.
         let encoded = try message.encoded(using: .default)
@@ -90,7 +91,8 @@ final class ViewerInputTransport {
             windowGeneration: request.scope.windowGeneration,
             requestID: request.requestID,
             kind: request.source.kind == .english ? .english : .chinese,
-            sourceIdentifier: request.source.identifier
+            sourceIdentifier: request.source.identifier,
+            controlGeneration: request.scope.controlGeneration
         )
         do {
             try await session.send(
@@ -103,7 +105,10 @@ final class ViewerInputTransport {
         }
     }
 
-    private static func message(for record: InputEventRecord) throws -> InputEventMessage {
+    private static func message(
+        for record: InputEventRecord,
+        controlGeneration: UInt64?
+    ) throws -> InputEventMessage {
         switch record.kind {
         case .pointerMove:
             guard let x = record.x, let y = record.y else { throw InputCoreError.invalidEvent }
@@ -111,7 +116,8 @@ final class ViewerInputTransport {
                 kind: .pointerMove,
                 windowGeneration: record.windowGeneration,
                 x: x,
-                y: y
+                y: y,
+                controlGeneration: controlGeneration
             )
         case .pointerButton:
             guard let x = record.x, let y = record.y,
@@ -124,7 +130,8 @@ final class ViewerInputTransport {
                 x: x,
                 y: y,
                 button: button,
-                pressed: pressed
+                pressed: pressed,
+                controlGeneration: controlGeneration
             )
         case .scroll:
             guard let x = record.x, let y = record.y,
@@ -137,7 +144,8 @@ final class ViewerInputTransport {
                 x: x,
                 y: y,
                 deltaX: deltaX,
-                deltaY: deltaY
+                deltaY: deltaY,
+                controlGeneration: controlGeneration
             )
         case .keyDown:
             guard let keyCode = record.keyCode, let modifiers = record.modifiers else {
@@ -147,7 +155,8 @@ final class ViewerInputTransport {
                 kind: .keyDown,
                 windowGeneration: record.windowGeneration,
                 keyCode: keyCode,
-                modifiers: modifiers
+                modifiers: modifiers,
+                controlGeneration: controlGeneration
             )
         case .keyUp:
             guard let keyCode = record.keyCode, let modifiers = record.modifiers else {
@@ -157,12 +166,14 @@ final class ViewerInputTransport {
                 kind: .keyUp,
                 windowGeneration: record.windowGeneration,
                 keyCode: keyCode,
-                modifiers: modifiers
+                modifiers: modifiers,
+                controlGeneration: controlGeneration
             )
         case .focusIntent:
             return InputEventMessage(
                 kind: .focusIntent,
-                windowGeneration: record.windowGeneration
+                windowGeneration: record.windowGeneration,
+                controlGeneration: controlGeneration
             )
         }
     }

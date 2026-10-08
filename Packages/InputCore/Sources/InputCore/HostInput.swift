@@ -11,10 +11,13 @@ public enum HostInputPermissionState: Equatable, Sendable {
     case unknown
 }
 
-/// Focus facts are supplied by the Host platform adapter. Every state other
-/// than `eligible` is a fail-closed state.
+/// Foreground and process-target eligibility are distinct Host facts. The
+/// latter is accepted only when the local durable P6 grant is active.
 public enum HostInputFocusState: Equatable, Sendable {
     case eligible
+    /// The selected process is a live safe target, but is not frontmost. This
+    /// is available only after a separate durable Host control grant.
+    case backgroundEligible
     case windowUnavailable
     case notForeground
     case lockedScreen
@@ -108,17 +111,20 @@ public struct HostInputSessionState: Equatable, Sendable {
     public let authorizedWindowGeneration: UInt64?
     public let mouseInputEnabled: Bool
     public let keyboardInputEnabled: Bool
+    public let processTargetingAuthorized: Bool
 
     public init(
         authorized: Bool,
         authorizedWindowGeneration: UInt64?,
         mouseInputEnabled: Bool,
-        keyboardInputEnabled: Bool
+        keyboardInputEnabled: Bool,
+        processTargetingAuthorized: Bool = false
     ) {
         self.authorized = authorized
         self.authorizedWindowGeneration = authorizedWindowGeneration
         self.mouseInputEnabled = mouseInputEnabled
         self.keyboardInputEnabled = keyboardInputEnabled
+        self.processTargetingAuthorized = processTargetingAuthorized
     }
 }
 
@@ -135,6 +141,7 @@ public struct HostInputContext: Equatable, Sendable {
     public let focus: HostInputFocusState
     public let mouseInputEnabled: Bool
     public let keyboardInputEnabled: Bool
+    public let processTargetingAuthorized: Bool
 
     public init(
         sessionAuthorized: Bool,
@@ -147,7 +154,8 @@ public struct HostInputContext: Equatable, Sendable {
         permission: HostInputPermissionState,
         focus: HostInputFocusState,
         mouseInputEnabled: Bool,
-        keyboardInputEnabled: Bool
+        keyboardInputEnabled: Bool,
+        processTargetingAuthorized: Bool = false
     ) {
         self.sessionAuthorized = sessionAuthorized
         self.authorizedWindowGeneration = authorizedWindowGeneration
@@ -160,6 +168,7 @@ public struct HostInputContext: Equatable, Sendable {
         self.focus = focus
         self.mouseInputEnabled = mouseInputEnabled
         self.keyboardInputEnabled = keyboardInputEnabled
+        self.processTargetingAuthorized = processTargetingAuthorized
     }
 }
 
@@ -194,6 +203,7 @@ public struct HostInputSelectionSnapshot: Equatable, Sendable {
 
 public enum HostInputStatus: Equatable, Sendable {
     case ready
+    case backgroundTargetReady
     case inputStateCleanupPending
     case sessionUnauthorized
     case selectionUnavailable
@@ -256,6 +266,7 @@ extension HostInputFocusState {
     public var label: String {
         switch self {
         case .eligible: return "eligible"
+        case .backgroundEligible: return "selected process is eligible for background control"
         case .windowUnavailable: return "window unavailable"
         case .notForeground: return "selected window is not foreground"
         case .lockedScreen: return "screen is locked"
@@ -427,7 +438,8 @@ public enum HostInputMapper {
         guard context.permission == .authorized else {
             throw HostInputError.permissionUnavailable
         }
-        guard context.focus == .eligible else {
+        guard context.focus == .eligible ||
+                (context.focus == .backgroundEligible && context.processTargetingAuthorized) else {
             throw HostInputError.focusUnavailable(context.focus)
         }
 
@@ -548,7 +560,8 @@ public final class HostInputController: @unchecked Sendable {
         guard context.permission == .authorized else {
             return .permissionUnavailable
         }
-        guard context.focus == .eligible else {
+        guard context.focus == .eligible ||
+                (context.focus == .backgroundEligible && context.processTargetingAuthorized) else {
             return .focusUnavailable(context.focus)
         }
         guard context.currentWindowIdentifier == selectedWindow.windowIdentifier,
@@ -560,7 +573,7 @@ public final class HostInputController: @unchecked Sendable {
               currentBounds.isValid else {
             return .selectionUnavailable
         }
-        return .ready
+        return context.focus == .backgroundEligible ? .backgroundTargetReady : .ready
     }
 
     /// Returns the selection identity used by the lifecycle owner to detect a
@@ -803,10 +816,11 @@ public final class HostInputController: @unchecked Sendable {
               context.selectedTargetMatches(target),
               let currentBounds = context.currentWindowBounds,
               currentBounds.isValid,
-              context.focus == .eligible || context.focus == .notForeground else {
+              context.focus == .eligible || context.focus == .notForeground ||
+                (context.focus == .backgroundEligible && context.processTargetingAuthorized) else {
             return false
         }
-        if context.focus == .eligible,
+        if context.focus == .eligible || context.focus == .backgroundEligible,
            (context.currentWindowIdentifier != target.windowIdentifier ||
             context.currentProcessIdentifier != target.processIdentifier ||
             context.currentApplicationIdentifier != target.applicationIdentifier) {

@@ -102,7 +102,15 @@ and physical checks in [M10 acceptance](M10_ACCEPTANCE.md).
 
 ## Existing uninstall workflows
 
-The production DMG uninstaller verifies Developer ID/Gatekeeper acceptance,
+For an end user's current-user cleanup including bundle-scoped TCC decisions,
+use the standalone [`Uninstall-MacRemoteApp.command`](../scripts/Uninstall-MacRemoteApp.command).
+See [the user guide](USER_GUIDE.md#clean-uninstall-including-permissions) for
+confirmation, recoverability, Keychain limitations, and the separate manual
+Local Network revocation. Creating or testing this helper does not authorize
+running it against a live installation; use isolated fixtures instead. It
+does not clean repository build outputs or replace the test-state audit above.
+
+The older role-specific DMG uninstaller verifies Developer ID/Gatekeeper acceptance,
 clears role-owned data through the signed apps, and moves the selected installed
 app to the Trash. It rejects ad-hoc review bundles and does not reset TCC.
 

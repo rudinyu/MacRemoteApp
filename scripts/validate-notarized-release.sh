@@ -2,7 +2,8 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "${script_dir}/.." && pwd)"
+repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
+source "${script_dir}/artifact-naming.sh"
 release_root="${1:-${repo_root}/build/release}"
 
 if (( $# > 1 )); then
@@ -11,9 +12,21 @@ if (( $# > 1 )); then
 fi
 
 cd "${repo_root}"
-test -d "${release_root}"
+if [[ "${release_root}" != /* ]]; then
+    release_root="${repo_root}/${release_root}"
+fi
+if [[ -L "${release_root}" || ! -d "${release_root}" ]]; then
+    echo "Notarized release validation requires a non-symlink release directory" >&2
+    exit 2
+fi
+release_root="$(cd -P -- "${release_root}" && pwd -P)"
+artifact_channel="$(macremoteapp_resolve_artifact_channel "${repo_root}" "${release_root}")" || exit 2
+release_identity="$(macremoteapp_release_identity \
+    "${release_root}/MacRemoteApp-Host.app/Contents/Info.plist" \
+    "${release_root}/MacRemoteApp-Viewer.app/Contents/Info.plist")" || exit 2
 
-bash "${script_dir}/audit-release.sh" "${release_root}"
+MACREMOTEAPP_ARTIFACT_CHANNEL="${artifact_channel}" \
+    bash "${script_dir}/audit-release.sh" "${release_root}"
 
 validation_tmp_dir="$(mktemp -d "${TMPDIR:-/private/tmp}/macremoteapp-notarized-validation.XXXXXX")"
 trap 'rm -rf -- "${validation_tmp_dir}"' EXIT
@@ -59,10 +72,15 @@ verify_role_metadata() {
 validate_app_archive() {
     local app_name="$1"
     local app_path="${release_root}/${app_name}.app"
-    local app_zip="${release_root}/${app_name}.app.zip"
+    local app_zip_name
+    local app_zip
     local extraction_dir="${validation_tmp_dir}/${app_name}"
     local extracted_app="${extraction_dir}/${app_name}.app"
     local extra_entry
+
+    app_zip_name="$(macremoteapp_expected_distribution_name \
+        "${artifact_channel}" "${release_identity}" "${app_name}" app-zip)"
+    app_zip="${release_root}/${app_zip_name}"
 
     if [[ ! -s "${app_zip}" ]]; then
         echo "Notarized release validation failed: missing app archive ${app_zip}" >&2
@@ -107,22 +125,24 @@ for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
         exit 1
     fi
 
-    echo "Validating notarization ticket for ${app_name}.app"
+    echo "Validating notarization ticket for ${app_name}.app (${release_identity})"
     xcrun stapler validate "${app_path}"
     spctl --assess --type exec --verbose=4 "${app_path}"
 done
 
 for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
-    dmg_path="${release_root}/${app_name}.dmg"
+    dmg_name="$(macremoteapp_expected_distribution_name \
+        "${artifact_channel}" "${release_identity}" "${app_name}" dmg)"
+    dmg_path="${release_root}/${dmg_name}"
     signature_info="$(codesign --display --verbose=4 "${dmg_path}" 2>&1)"
     if ! printf '%s\n' "${signature_info}" | grep -Eq 'Authority=Developer ID Application:'; then
-        echo "Notarized release validation failed: ${app_name}.dmg is not Developer ID signed" >&2
+        echo "Notarized release validation failed: ${dmg_name} is not Developer ID signed" >&2
         exit 1
     fi
 
-    echo "Validating notarization ticket for ${app_name}.dmg"
+    echo "Validating notarization ticket for ${dmg_name}"
     xcrun stapler validate "${dmg_path}"
     spctl --assess --type install --verbose=4 "${dmg_path}"
 done
 
-echo "Notarized release validation passed: ${release_root}"
+echo "Notarized release validation passed for ${release_identity} (${artifact_channel}): ${release_root}"

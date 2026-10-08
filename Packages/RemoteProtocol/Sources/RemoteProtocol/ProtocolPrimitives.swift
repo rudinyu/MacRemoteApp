@@ -173,6 +173,8 @@ public enum Capability: Equatable, Hashable, Sendable {
     /// Optional: the Viewer may request that the Host follow its Chinese or
     /// English input-source state for the selected window.
     case inputSourceSync
+    /// Optional: process-targeted input requires a separate durable Host grant.
+    case backgroundControl
     case unknown(UInt16)
 
     public init(rawValue: UInt16) {
@@ -186,6 +188,7 @@ public enum Capability: Equatable, Hashable, Sendable {
         case 0x0007: self = .keyframeRequest
         case 0x0008: self = .receiverReport
         case 0x0009: self = .inputSourceSync
+        case 0x000A: self = .backgroundControl
         default: self = .unknown(rawValue)
         }
     }
@@ -201,9 +204,22 @@ public enum Capability: Equatable, Hashable, Sendable {
         case .keyframeRequest: return 0x0007
         case .receiverReport: return 0x0008
         case .inputSourceSync: return 0x0009
+        case .backgroundControl: return 0x000A
         case let .unknown(rawValue): return rawValue
         }
     }
+}
+
+/// Host decision for the separately consented process-targeted input path.
+/// Missing status remains fail-closed for peers that do not understand P6.
+public enum ControlAuthorizationState: UInt8, Equatable, Hashable, Sendable {
+    case unsupported = 1
+    case requiresConsent = 2
+    case paused = 3
+    case active = 4
+    case revoked = 5
+    case persistenceFailure = 6
+    case negotiating = 7
 }
 
 /// Why a Viewer asks the Host for a new keyframe. Diagnostic only; the Host

@@ -400,7 +400,9 @@ final class RemoteProtocolTests: XCTestCase {
                     state: .streaming,
                     permission: .granted,
                     focusEligible: true,
-                    windowGeneration: 9
+                    windowGeneration: 9,
+                    controlState: .active,
+                    processTargetEligible: true
                 )
             ),
             .error(ErrorMessage(code: .permissionMissing, retryable: true, detailCode: "screen-recording")),
@@ -435,7 +437,7 @@ final class RemoteProtocolTests: XCTestCase {
             .clipboardAcknowledgement: "01010100000008000000000000000C020100000001020301000000010104010000000101",
             .ping: "010101000000080102030405060708",
             .pong: "010101000000080102030405060708",
-            .sessionState: "010101000000010802010000000102030100000001010400000000080000000000000009",
+            .sessionState: "0101010000000108020100000001020301000000010104000000000800000000000000090500000000010406000000000101",
             .error: "0101010000000200050201000000010103000000001073637265656E2D7265636F7264696E67",
             .close: "010101000000020001020000000004646F6E65",
             .keyframeRequest: "01010100000008000000000000000902010000000101",
@@ -566,6 +568,9 @@ final class RemoteProtocolTests: XCTestCase {
         XCTAssertEqual(MessageType(rawValue: 0x0019), .inputSourceSelection)
         XCTAssertEqual(MessageType(rawValue: 0x001A), .inputSourceAcknowledgement)
         XCTAssertEqual(Capability(rawValue: 0x0009), .inputSourceSync)
+        XCTAssertEqual(Capability(rawValue: 0x000A), .backgroundControl)
+        XCTAssertEqual(Capability.backgroundControl.rawValue, 0x000A)
+        XCTAssertEqual(ControlAuthorizationState(rawValue: 7), .negotiating)
         XCTAssertEqual(ProtocolVersion.current, ProtocolVersion(major: 2, minor: 0))
 
         let knownMandatory = CapabilitiesMessage(
@@ -596,6 +601,115 @@ final class RemoteProtocolTests: XCTestCase {
         assertProtocolError(.invalidLimits) {
             _ = try FrameParser(limits: ProtocolLimits(maxPayloadLength: 1, maxControlPayloadLength: 2))
         }
+    }
+
+    func testBackgroundControlTargetEligibilityIsIndependentOfForegroundFlag() throws {
+        let status = SessionStateMessage(
+            state: .streaming,
+            permission: .granted,
+            focusEligible: false,
+            windowGeneration: 9,
+            controlState: .active,
+            processTargetEligible: true,
+            controlGeneration: 12
+        )
+
+        let decoded = try SessionStateMessage.decode(status.encoded())
+
+        XCTAssertFalse(decoded.focusEligible)
+        XCTAssertEqual(decoded.controlState, .active)
+        XCTAssertEqual(decoded.processTargetEligible, true)
+        XCTAssertEqual(decoded.controlGeneration, 12)
+        var zeroControlGeneration = try status.encoded()
+        zeroControlGeneration.replaceSubrange(
+            (zeroControlGeneration.count - MemoryLayout<UInt64>.size)..<zeroControlGeneration.count,
+            with: Data(repeating: 0, count: MemoryLayout<UInt64>.size)
+        )
+        assertProtocolError(.invalidFieldValue(message: .sessionState, fieldID: 7)) {
+            _ = try SessionStateMessage.decode(zeroControlGeneration)
+        }
+    }
+
+    func testP6InputControlGenerationRoundTripsAndRejectsZero() throws {
+        let event = InputEventMessage(
+            kind: .keyDown,
+            windowGeneration: 9,
+            keyCode: 42,
+            modifiers: 0,
+            controlGeneration: 12
+        )
+        XCTAssertEqual(try InputEventMessage.decode(event.encoded()), event)
+        var zeroEventGeneration = try event.encoded()
+        zeroEventGeneration.replaceSubrange(
+            (zeroEventGeneration.count - MemoryLayout<UInt64>.size)..<zeroEventGeneration.count,
+            with: Data(repeating: 0, count: MemoryLayout<UInt64>.size)
+        )
+        assertProtocolError(.invalidFieldValue(message: .inputEvent, fieldID: 11)) {
+            _ = try InputEventMessage.decode(zeroEventGeneration)
+        }
+
+        let source = InputSourceSelectionMessage(
+            windowGeneration: 9,
+            requestID: 3,
+            kind: .english,
+            sourceIdentifier: "com.apple.keylayout.US",
+            controlGeneration: 12
+        )
+        XCTAssertEqual(try InputSourceSelectionMessage.decode(source.encoded()), source)
+        var zeroSourceGeneration = try source.encoded()
+        zeroSourceGeneration.replaceSubrange(
+            (zeroSourceGeneration.count - MemoryLayout<UInt64>.size)..<zeroSourceGeneration.count,
+            with: Data(repeating: 0, count: MemoryLayout<UInt64>.size)
+        )
+        assertProtocolError(.invalidFieldValue(message: .inputSourceSelection, fieldID: 5)) {
+            _ = try InputSourceSelectionMessage.decode(zeroSourceGeneration)
+        }
+
+        assertProtocolError(.invalidFieldValue(message: .inputEvent, fieldID: 11)) {
+            _ = try InputEventMessage(
+                kind: .keyDown,
+                windowGeneration: 9,
+                keyCode: 42,
+                modifiers: 0,
+                controlGeneration: 0
+            ).encoded()
+        }
+        assertProtocolError(.invalidFieldValue(message: .inputSourceSelection, fieldID: 5)) {
+            _ = try InputSourceSelectionMessage(
+                windowGeneration: 9,
+                requestID: 3,
+                kind: .english,
+                sourceIdentifier: "com.apple.keylayout.US",
+                controlGeneration: 0
+            ).encoded()
+        }
+        assertProtocolError(.invalidFieldValue(message: .sessionState, fieldID: 7)) {
+            _ = try SessionStateMessage(
+                state: .streaming,
+                permission: .granted,
+                focusEligible: false,
+                windowGeneration: 9,
+                controlState: .active,
+                processTargetEligible: true,
+                controlGeneration: 0
+            ).encoded()
+        }
+    }
+
+    func testLegacySessionStateWithoutControlFieldsDecodesNil() throws {
+        let legacyPayload = Data(
+            hex: "010101000000010802010000000102030100000001010400000000080000000000000009"
+        )
+
+        let decoded = try SessionStateMessage.decode(legacyPayload)
+
+        XCTAssertEqual(decoded.state, .streaming)
+        XCTAssertEqual(decoded.permission, .granted)
+        XCTAssertTrue(decoded.focusEligible)
+        XCTAssertEqual(decoded.windowGeneration, 9)
+        XCTAssertNil(decoded.controlState)
+        XCTAssertNil(decoded.processTargetEligible)
+        XCTAssertNil(decoded.controlGeneration)
     }
 
     func testInputSourceMessagesEnforceBoundsAndRejectControlCharacters() throws {

@@ -12,6 +12,11 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 
 ## Summary
 
+Current source metadata is `0.2.1010`; the retained notarized RC remains
+`0.2.1009`. The source contains the separately authorized
+[P6 Host-controlled input extension](P6_BACKGROUND_CONTROL.md), whose local
+completion and physical evidence are tracked separately from V1 below.
+
 | Milestone | Implementation / deterministic gate | Evidence still pending |
 | --- | --- | --- |
 | M0 | Complete | — |
@@ -23,8 +28,46 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 | M6 | Implementation/test gate complete | Real OS event posting (manual disposable-application test) |
 | M7 | Implementation/test gate complete | Physical two-machine clipboard walkthrough |
 | M8 | Deterministic measurement/resilience gate implemented | Physical clock-synchronized performance report |
-| M9 | Release-audit gate implemented; current `0.2.1008` notarized RC artifacts verified | Notarization profile remains host-specific |
+| M9 | Release-audit gate implemented; current `0.2.1009` notarized RC artifacts verified | Notarization profile remains host-specific |
 | M10 | Production composition, final gate, pairing UI, and checklist implemented | Physical Intel-to-Apple-Silicon acceptance, including connected UI rows |
+
+## Authorized source follow-ups (2026-10-08)
+
+- **P6 / M6 input extension:** complete the existing Host-controlled
+  process-input path under [the P6 contract](P6_BACKGROUND_CONTROL.md).
+  Implementation and the canonical local gate passed. The grant coordinator
+  has 12 passing regressions, including pending revocation across session
+  replacement; transport tests cover stale control generations while video
+  remains authorized. Legacy peers retain foreground control. This is separate
+  from V1 M10 physical acceptance and is not included in the retained
+  `0.2.1009` RC.
+- **M9 signing adapter:** both canonical release entry points now resolve the
+  shared owner-only Codex configuration, preserve explicit project profile
+  overrides, and support the existing external API-key reference. Focused
+  synthetic configuration fixtures and Bash syntax checks passed; no Developer
+  ID signing or Apple submission was performed.
+
+Final local validation on 2026-10-08:
+
+- `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./.codex/ci.sh`
+  passed in the host-permitted context, including Host `arm64`/`x86_64`, Viewer
+  `arm64`, root and package tests, deterministic benchmark checks, and ad-hoc
+  `0.2.1010` testing DMG packaging/audit. The successful validation cache was
+  removed by the canonical script. Log: `build/p6-final-validation.log`.
+- Focused `swift test --configuration debug --scratch-path
+  .build/public-validation/root --filter HostControlAuthorizationTests`
+  passed, 12 tests / 0 failures, with the same explicit Xcode and local cache
+  environment. Log: `build/p6-control-focused.log`.
+- The first sandbox attempt stopped before compilation with
+  `sandbox-exec: sandbox_apply: Operation not permitted`; this was an execution
+  boundary, followed by the successful host validation above.
+- Final Codex self-review covered tracked and untracked source, tests,
+  release tooling, documentation, and relevant call sites; no remaining
+  actionable findings. No separate reviewer or nested Codex process ran.
+
+Physical P6 input/IME and Intel-to-Apple-Silicon M10 acceptance remain pending.
+No commit, push, release promotion, global configuration change, or additional
+post-V1 feature was performed.
 
 ## Milestone detail
 
@@ -114,16 +157,28 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 - Release-only debug gating, hardened-runtime artifact audit, negative-test
   documentation, and a residual-risk record are implemented; the
   release-audit gate is implemented.
-- The current `0.2.1008` RC apps and DMGs are Developer ID signed, Apple
-  notarized, stapled, and verified; they include input-source following and
-  the reliability fixes below.
+- The current `0.2.1009` RC apps and DMGs are Developer ID signed, Apple
+  notarized, stapled, and verified; both DMGs include the full-cleanup helper,
+  alongside input-source following and the reliability fixes below.
   The notarization profile remains host-specific. See the
-  [release evidence](#021008-notarized-rc).
+  [release evidence](#021009-notarized-rc).
 
 ### M10 — V1 integration pilot
 
 Implemented:
 
+- Standalone [`Uninstall-MacRemoteApp.command`](../scripts/Uninstall-MacRemoteApp.command)
+  for confirmed current-user cleanup of verified standard installations,
+  role-owned data, and bundle-scoped TCC decisions. All 18 isolated safety
+  fixtures passed on 2026-10-04, the real-host read-only preview passed, and
+  the canonical `.codex/ci.sh` validation passed. An initial run encountered
+  an existing TransportCore input-source test failure; its focused recheck
+  and the subsequent complete validation passed. The last process-status
+  safety adjustment was covered by a fresh 18-case fixture run and syntax checks.
+  Live uninstallation and permission revocation were not performed. Local
+  Network requires manual revocation; legacy shared/imported Keychain records
+  are preserved. Both `0.2.1009` DMGs include the executable helper; release
+  auditing checks source equivalence and its payload-manifest entry.
 - The deterministic final gate, the production Host/Viewer composition with
   interactive pairing and Keychain trust reuse, and the two-machine acceptance
   checklist.
@@ -214,6 +269,79 @@ composition remain unchanged. See
 - Actual macOS input-source switching, Chinese composition, and the two-Mac
   keyboard/mouse walkthrough remain manual acceptance items. Third-party IME
   modes not exposed as macOS input sources are not claimed supported.
+
+#### 0.2.1009 notarized RC
+
+M10 user-facing packaging update created locally on 2026-10-04 with
+`scripts/release-notarized.sh rc`, Xcode at
+`/Applications/Xcode.app/Contents/Developer`, Developer ID signing, and the
+existing Keychain profile. Both DMGs now include the unchanged executable
+`Uninstall-MacRemoteApp.command`, its payload-manifest hash, the updated user
+guide, and the older role-specific helpers. No credentials were copied into
+the repository, and no live uninstall or permission reset was performed.
+
+| Artifact | Apple submission ID | Result |
+| --- | --- | --- |
+| Host app | `72b90fe8-eaf0-421d-a300-54ed1bb2c808` | Accepted; stapled and Gatekeeper accepted |
+| Viewer app | `49e64231-2a9b-4c54-bd0d-75294e396fea` | Accepted; stapled and Gatekeeper accepted |
+| Host DMG | `cfed7775-c0b2-4120-bfaf-4949b047d307` | Accepted; stapled and Gatekeeper accepted |
+| Viewer DMG | `3457b153-1c5e-429b-a1f2-4b40471cc9c1` | Accepted; stapled and Gatekeeper accepted |
+
+Both bundle plists identify Version `0.2`, Build `1009`. Host remains universal
+(`x86_64`/`arm64`) and Viewer remains `arm64`. The release workflow passed strict
+signatures, hardened runtime, archive equivalence, read-only DMG payload/source
+checks, notarization tickets, and Gatekeeper before promotion into `build/rc/`.
+
+| Distributable in `build/rc/` | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host-0.2.1009.dmg` | `e5983335fd61e4328880be1fc42746915b23071b9416908e93ea370b5abf3925` |
+| `MacRemoteApp-Viewer-0.2.1009.dmg` | `08393632f6582178e587f6c844a0a59febae79de0c072fcb86705dfb398c956b` |
+
+After the operator moved the original DMGs to Dropbox, identical-byte copies
+were placed back in `build/rc/` with the versioned names above. The Dropbox
+originals remain untouched. This filename-only change preserves the recorded
+hashes and submitted content; the revised naming guidance in the source user
+guide will be included on the next packaging run, not retroactively injected
+into the existing signed DMGs.
+
+The M10 artifact-naming follow-up derives `major.minor.build` from matching
+Host/Viewer bundle metadata. Testing, beta, and RC DMGs/app archives include
+that identity in their filenames; formal release filenames remain fixed.
+The channel is carried explicitly through staging, and inconsistent channel
+or malformed metadata is rejected. App bundles and installation identities
+remain unchanged. On 2026-10-04 the required `.codex/ci.sh` passed, including
+isolated naming fixtures, uninstaller fixtures, and actual versioned test-DMG
+packaging/audit. Read-only Codex self-review of the complete pending diff and
+the naming call sites found no actionable findings.
+
+The versioned existing RC artifacts passed
+`scripts/validate-notarized-release.sh build/rc`, including archive equivalence,
+strict signatures, mounted payload checks, tickets, and Gatekeeper. Logs are
+`build/versioned-artifact-validation.log` and
+`build/versioned-1009-notarized-audit.log`. Initial sandbox checks stopped at
+SwiftPM `sandbox_apply` and stapler's Launch Services file lookup; the same
+checks passed in permitted host context. No new Apple submission, commit,
+push, live uninstall, or physical two-Mac acceptance was performed for this
+filename-only follow-up.
+
+The required `.codex/ci.sh` passed on the final code tree, including all 18
+isolated uninstaller fixtures and mounted DMG checks; the release workflow's
+additional clean validation also passed. The initial host validation had three
+TransportCore failures (input-source admission, queued-input revocation, and
+one-sided pairing bootstrap). All three passed their focused recheck, followed
+by the complete passing run; this records intermittent failures, not a claim
+that their underlying timing was fixed. The Codex sandbox attempt stopped at
+SwiftPM `sandbox_apply`; the same validation was rerun in host context.
+
+Logs remain ignored under `build/`: `dmg-uninstaller-1009-validation.log`,
+`dmg-uninstaller-1009-transport-recheck.log`,
+`dmg-uninstaller-1009-final-validation.log`, `release-0.2.1009.log`, and
+`notarized-0.2.1009-final-audit.log`. The final read-only
+`scripts/validate-notarized-release.sh build/rc` recheck passed after promotion.
+The selected RC channel was replaced only after successful verification; the
+workflow cleared its project-local build cache. Installed apps, settings,
+Keychain records, and TCC permissions were not changed. Physical two-Mac
+acceptance and a real uninstall walkthrough remain unverified.
 
 #### 0.2.1008 notarized RC
 

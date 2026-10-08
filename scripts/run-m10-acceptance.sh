@@ -47,10 +47,12 @@ case "${role}" in
         fi
         deterministic_release_build_root="${build_root}/release-build"
         deterministic_release_root="${build_root}/release"
+        MACREMOTEAPP_ARTIFACT_CHANNEL=testing \
         MACREMOTEAPP_RELEASE_BUILD_ROOT="${deterministic_release_build_root}" \
         MACREMOTEAPP_RELEASE_ROOT="${deterministic_release_root}" \
         MACREMOTEAPP_SIGNING_IDENTITY=- bash scripts/package-device-apps.sh
-        bash scripts/audit-release.sh "${deterministic_release_root}"
+        MACREMOTEAPP_ARTIFACT_CHANNEL=testing \
+            bash scripts/audit-release.sh "${deterministic_release_root}"
         swift test \
             --configuration debug \
             --scratch-path "${build_root}/root-tests"

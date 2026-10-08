@@ -160,6 +160,10 @@ struct HostApp {
 }
 
 private func removeAllLocalData() async throws {
+    // Remove control grants before trust records. If Keychain refuses to clear
+    // grants, retain the authenticated peer records so the Host can surface a
+    // durable-control cleanup failure instead of silently forgetting it.
+    _ = try await KeychainControlGrantStore().removeAll()
     try await KeychainTrustStore(
         service: HostRuntime.Configuration.defaultTrustStoreService
     ).removeAll()
@@ -175,15 +179,20 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
     private let runtime: HostRuntime
     private var runtimeTask: Task<Void, Never>?
     private var statusTask: Task<Void, Never>?
+    private var controlStatusTask: Task<Void, Never>?
     private var statusItem: NSStatusItem?
     private var statusMenuItem: NSMenuItem?
     private var renameHostMenuItem: NSMenuItem?
     private var pairingCodeMenuItem: NSMenuItem?
     private var forgetPairingsMenuItem: NSMenuItem?
+    private var controlStatusMenuItem: NSMenuItem?
+    private var controlToggleMenuItem: NSMenuItem?
+    private var controlRevokeMenuItem: NSMenuItem?
     private var retryItem: NSMenuItem?
     private var applicationMenu: ApplicationMenu?
     private var settingsWindow: SettingsWindowController?
     private var latestStatus: HostRuntimeStatus = .starting
+    private var latestControlStatus: HostControlStatus = .unavailable
     private var currentHostName = HostPreferences.load()
     private var terminationRequested = false
 
@@ -252,6 +261,12 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
                 self?.apply(status: status)
             }
         }
+        controlStatusTask = Task { @MainActor [weak self, runtime] in
+            var iterator = runtime.controlStatusUpdates.makeAsyncIterator()
+            while !Task.isCancelled, let status = await iterator.next() {
+                self?.apply(controlStatus: status)
+            }
+        }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -260,6 +275,7 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         guard let runtimeTask else { return .terminateNow }
         terminationRequested = true
         statusTask?.cancel()
+        controlStatusTask?.cancel()
         runtimeTask.cancel()
         Task { @MainActor [weak self] in
             await runtimeTask.value
@@ -274,10 +290,11 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "MacRemoteApp Host"
         item.button?.toolTip = "MacRemoteApp Host — listening for a paired Viewer"
-        if let iconURL = Bundle.main.url(forResource: "MacRemoteAppIcon", withExtension: "icns"),
-           let image = NSImage(contentsOf: iconURL) {
+        if let image = NSImage(
+            systemSymbolName: "macwindow",
+            accessibilityDescription: "MacRemoteApp Host"
+        ) {
             image.isTemplate = true
-            image.size = NSSize(width: 18, height: 18)
             item.button?.image = image
             item.button?.imagePosition = .imageOnly
         }
@@ -328,6 +345,28 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         forgetPairings.target = self
         menu.addItem(forgetPairings)
         forgetPairingsMenuItem = forgetPairings
+        let controlStatus = NSMenuItem(title: "Control: Unavailable", action: nil, keyEquivalent: "")
+        controlStatus.isEnabled = false
+        menu.addItem(controlStatus)
+        controlStatusMenuItem = controlStatus
+        let controlToggle = NSMenuItem(
+            title: "Grant Viewer Control…",
+            action: #selector(toggleViewerControl),
+            keyEquivalent: ""
+        )
+        controlToggle.target = self
+        controlToggle.isEnabled = false
+        menu.addItem(controlToggle)
+        controlToggleMenuItem = controlToggle
+        let controlRevoke = NSMenuItem(
+            title: "Revoke Viewer Control",
+            action: #selector(revokeViewerControl),
+            keyEquivalent: ""
+        )
+        controlRevoke.target = self
+        controlRevoke.isEnabled = false
+        menu.addItem(controlRevoke)
+        controlRevokeMenuItem = controlRevoke
         let retry = NSMenuItem(
             title: "Retry setup",
             action: #selector(retrySetup),
@@ -378,6 +417,55 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         refreshSettings()
     }
 
+    private func apply(controlStatus: HostControlStatus) {
+        latestControlStatus = controlStatus
+        controlStatusMenuItem?.title = "Control: \(controlStatus.description)"
+        switch controlStatus {
+        case .active:
+            controlToggleMenuItem?.title = "Pause Viewer Control"
+            controlToggleMenuItem?.isEnabled = true
+            controlRevokeMenuItem?.isEnabled = true
+        case .paused:
+            controlToggleMenuItem?.title = "Resume Viewer Control"
+            controlToggleMenuItem?.isEnabled = true
+            controlRevokeMenuItem?.isEnabled = true
+        case .requiresConsent:
+            controlToggleMenuItem?.title = "Grant Viewer Control…"
+            controlToggleMenuItem?.isEnabled = true
+            controlRevokeMenuItem?.isEnabled = false
+        case .persistenceFailure:
+            controlToggleMenuItem?.title = "Retry Viewer Control Setup…"
+            controlToggleMenuItem?.isEnabled = true
+            controlRevokeMenuItem?.isEnabled = true
+        case .negotiating:
+            controlToggleMenuItem?.title = "Viewer Control Setup Pending…"
+            controlToggleMenuItem?.isEnabled = false
+            controlRevokeMenuItem?.isEnabled = false
+        case .unavailable, .unsupported, .revoked:
+            controlToggleMenuItem?.title = controlStatus == .revoked
+                ? "Grant Viewer Control Again…"
+                : "Grant Viewer Control…"
+            controlToggleMenuItem?.isEnabled = controlStatus == .revoked
+            controlRevokeMenuItem?.isEnabled = controlStatus == .revoked
+        }
+        refreshSettings()
+    }
+
+    @objc private func toggleViewerControl() {
+        Task { await runtime.toggleViewerControl() }
+    }
+
+    @objc private func revokeViewerControl() {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Revoke Viewer control?"
+        alert.informativeText = "Control stops immediately and the saved grant for this authenticated Viewer is removed. Video sharing remains available."
+        alert.addButton(withTitle: "Revoke Control")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        Task { await runtime.revokeViewerControl() }
+    }
+
     func applicationDidBecomeActive(_ notification: Notification) {
         refreshSettings()
     }
@@ -403,7 +491,8 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
                     .init("Host", fields: [
                         .init("name", "Host name"), .init("status", "Status"),
                         .init("transport", "Transport", "LAN / TLS"),
-                        .init("trust", "Trust", "Viewer pairings saved in Keychain")
+                        .init("trust", "Trust", "Viewer pairings saved in Keychain"),
+                        .init("control", "Viewer control")
                     ]),
                     .init("Permissions", fields: [
                         .init("screen", "Screen Recording"),
@@ -432,6 +521,7 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         guard let settingsWindow else { return }
         settingsWindow.setValue(currentHostName, for: "name")
         settingsWindow.setValue(latestStatus.description, for: "status")
+        settingsWindow.setValue(latestControlStatus.description, for: "control")
         settingsWindow.setValue(CGPreflightScreenCaptureAccess() ? "Granted" : "Not granted", for: "screen")
         settingsWindow.setValue(CGPreflightPostEventAccess() ? "Granted" : "Not granted", for: "input")
         settingsWindow.setValue(AXIsProcessTrusted() ? "Granted" : "Not granted (optional)", for: "accessibility")

@@ -13,8 +13,11 @@ the capability for the current paired session.
 
 ## Install from a notarized DMG
 
-1. Use `MacRemoteApp-Host.dmg` on the Intel Mac and
-   `MacRemoteApp-Viewer.dmg` on the Apple Silicon Mac.
+1. Use the Host DMG on the Intel Mac and the Viewer DMG on the Apple Silicon
+   Mac. Testing, beta, and RC files include their version, for example
+   `MacRemoteApp-Host-0.2.1009.dmg` and `MacRemoteApp-Viewer-0.2.1009.dmg`.
+   Only formal release files use the fixed `MacRemoteApp-Host.dmg` and
+   `MacRemoteApp-Viewer.dmg` names; installed app names do not change.
 2. Open the DMG. The `Applications` item in this DMG is a per-user drop target:
    drag the role app onto it and it copies the app to `~/Applications`, then
    launch that copy. Alternatively, double-click the role-specific
@@ -94,7 +97,8 @@ The listener briefly restarts under the new name.
 If a previous pairing is stale or only one endpoint still has its trust record,
 use `Forget saved pairings…` on the Host status menu and on the Viewer before
 trying again. The action stops the active session, clears the current Viewer
-Host selection, and removes only that app role's saved peer trust records. It
+Host selection, and removes that app role's saved peer trust records. On a P6
+Host it also removes saved Viewer control grants. It
 does not delete the local TLS identity, permissions, or Host name. The Host
 continues to be discoverable, but it must be explicitly selected again before
 the next connection can show and confirm a new pairing code.
@@ -106,7 +110,9 @@ paths.
 ## Select and control a window
 
 1. Use the Viewer window picker to select exactly one eligible Host window.
-2. Keep the selected application foreground and unlocked on the Host.
+2. Keep the Host unlocked. Legacy peers require the selected application to
+   remain foreground. With the P6 control grant below, a safe selected process
+   can receive input without being brought to the front.
 3. Use the Viewer surface for pointer movement, button events, scrolling,
    keyboard input, and supported modifiers.
    If the session authorizes only mouse or only keyboard input, the Viewer
@@ -122,10 +128,41 @@ window on screen on the Host and refresh the session.
    ends. The protocol path is text-only, bounded, and opt-in; clipboard text
    is not written to diagnostics.
 
-Screen Recording or PostEvent revocation, focus loss, window replacement,
+Screen Recording or PostEvent revocation, unsafe target state, window replacement,
 disconnect, or failed reauthorization stops the affected operation. Optional
 Accessibility loss only removes the AX/secure-input enhancement. Recheck the
 Host permission and select the window again before reconnecting.
+For P6 background control, unavailable secure-input inspection also blocks
+control; enable Host Accessibility and recheck the safe target state.
+
+### Host-controlled process input (P6)
+
+The current source adds P6; the retained `0.2.1009` RC does not include it.
+Both endpoints must support the new capability. After pairing, the Host asks
+locally before granting mouse and keyboard control to this Viewer. Denying
+the request keeps the session view-only. Approval is saved for the Viewer's
+authenticated identity and can be reused on reconnect; a display-name change
+does not grant a new device control.
+
+The Host menu shows control state and offers allow, pause/resume, and revoke.
+Pause stops control for the current session while video continues. Revoke
+removes the saved grant; the Viewer needs another local approval to control
+again. A Keychain error blocks control and is shown as a failure. If revocation
+cannot be saved, retry before relying on it across a Host restart.
+
+P6 sends events to the selected window's owning process without activating it.
+An app with several windows may route events to another window in that process;
+exact-window delivery is not guaranteed. Keep a disposable test app available
+until physical behavior has been verified. The Host must remain unlocked with
+the required input permission and a live safe selected target. Secure-input
+and unsafe-target checks still block input. Viewer Settings and unfocused
+Viewer windows do not send remote input.
+
+Background control does not automatically change the Host's global input
+source. Match the intended source manually on the Host. Chinese composition
+and candidate panels remain Host-side; verify their behavior with the actual
+target app. Input-source following can resume when the selected target is
+foreground, under the existing acknowledgement rules below.
 
 ### Chinese/English input-source following
 
@@ -234,7 +271,63 @@ Before collecting a support bundle,
 see the accompanying `MacRemoteApp-How-to-Collect-Debug-Logs.txt` in the DMG
 or `docs/DEBUG_LOG_COLLECTION.md` in the repository.
 
+## Clean uninstall including permissions
+
+Both Host and Viewer DMGs starting with build `1009` include
+`Uninstall-MacRemoteApp.command` beside the app. Use that full-cleanup helper,
+or download the standalone
+[`Uninstall-MacRemoteApp.command`](../scripts/Uninstall-MacRemoteApp.command)
+when removing both roles and resetting their privacy decisions, rather than
+the older role-specific DMG uninstaller described above. Save the file, then
+run it with Bash in Terminal; an executable copy can also be double-clicked.
+Run it as your normal logged-in user, not with `sudo`.
+Quit Host and Viewer first; the helper refuses cleanup while either role is
+running and does not force-quit applications. Use `--dry-run` to preview.
+To authorize the actual cleanup, type `UNINSTALL` at its confirmation prompt.
+
+The helper asks for confirmation before changing anything. Settings, saved
+pairings, and generated role identities are not recoverable through the Trash.
+App bundles moved to the Trash remain recoverable, but reinstalling afterward
+requires fresh pairing and privacy consent. Copies with the same bundle IDs
+share the current user's settings and permission decisions.
+
+The helper checks the original Host/Viewer app names in `~/Applications` and
+`/Applications`. Renamed copies or apps in other locations must be removed
+manually. A system-wide copy that your user cannot move is retained with a
+message to finish removal in Finder; the helper does not elevate privileges.
+
+Only verified MacRemoteApp bundles and exact app-owned state locations are
+eligible for cleanup. Signing keys, notarization credentials, unrelated apps,
+other users' settings, repository sources, and build/release outputs are not
+cleanup targets. Legacy shared Keychain records and imported diagnostic
+identities are outside this script's role-owned cleanup contract.
+
+If the installed signed cleanup executable is missing, its Keychain cleanup
+cannot be verified; the script reports the gap rather than promising that all
+records are gone. Keep a verified installed copy available until cleanup
+finishes. Permission-reset or file-removal failures are also reported.
+The signed cleanup command requires build `1003` or newer. Older copies are
+not executed as cleanup helpers and are retained with an incomplete result.
+
+The script resets TCC decisions only for `com.rudinyu.MacRemoteApp.Host` and
+`com.rudinyu.MacRemoteApp.Viewer`. It never resets permissions for every app.
+**Local Network is not covered by TCC reset.** In System Settings > Privacy &
+Security > Local Network, turn off remaining MacRemoteApp Host/Viewer entries.
+Apple provides no supported macOS command to return that permission to its
+undetermined state; historical entries may remain after uninstall. The helper
+does not edit the system database or disable security protections. See
+[Apple's Local Network privacy note](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy).
+
+The older role-specific `Uninstall-MacRemoteApp-Host.command` and
+`Uninstall-MacRemoteApp-Viewer.command` remain available for removing only the
+selected role's per-user app without resetting permissions. Choose the exact
+`Uninstall-MacRemoteApp.command` filename for both-role cleanup including TCC.
+Older `0.2.1008` DMGs do not contain this full-cleanup helper.
+
 ## Product boundaries
 
 V1 does not provide Internet relay, WebRTC, audio, file transfer, simultaneous
 multi-window control, background control, or locked-screen control.
+The separately authorized P6 source extension provides consented
+process-targeted background input with the limits above. It adds none of the
+other capabilities and does not imply physical two-Mac acceptance.

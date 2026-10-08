@@ -1,5 +1,37 @@
 # MacRemoteApp Protocol Design
 
+## P6 negotiated extension
+
+The separately authorized [P6 contract](P6_BACKGROUND_CONTROL.md) supplements
+the V1 foreground-only baseline below. Optional `backgroundControl` capability
+`0x000A` is separate from `keyframeRequest` (`0x0007`), `receiverReport`
+(`0x0008`), and `inputSourceSync` (`0x0009`). It grants nothing by negotiation
+alone: Host-local consent, current selection authorization, and the final
+platform safety checks remain required.
+
+Host `SessionState` adds optional field 5, `controlState` (u8), and field 6,
+`processTargetEligible` (bool), plus field 7, `controlGeneration` (u64).
+P6 input events echo that generation in optional field 11; input-source
+selections echo it in optional field 5. A negotiated P6 control operation
+requires a positive generation matching the current Host control admission.
+Pause, resume, and revoke advance the generation independently of video's
+authorization epoch. Missing or stale generations cannot reopen control;
+bytes delayed in the network across pause/resume are rejected. Existing
+non-P6 messages omit these fields and retain their golden encodings.
+These are additive optional TLVs under protocol `2.0`, gated by P6 negotiation.
+The existing `focusEligible` field continues
+to mean foreground eligibility. P6 readiness requires the active control
+state and a safe process target in addition to permission and current session
+authorization; missing fields cannot imply control permission. Old peers
+ignore optional fields and retain the existing foreground policy.
+Pause/revoke must fence both input events and input-source selections while
+retaining the authenticated video path. The transport must invalidate stale
+queued input rather than admitting it after a later resume.
+Input-source selection is still foreground-only: background process input
+does not authorize changing the Host's global input source. The Viewer uses
+manual source matching while the P6 target is background and starts a fresh
+source synchronization when the target returns to foreground.
+
 ## Protocol status and scope
 
 This document defines the V1 LAN session contract at design level. It is the

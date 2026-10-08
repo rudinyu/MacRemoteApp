@@ -36,6 +36,9 @@ public enum InputReadiness: Equatable, Sendable {
     case hostPermissionUnavailable
     case hostFocusUnavailable
     case hostStateUnavailable
+    case hostControlNegotiating
+    case hostControlUnavailable
+    case hostProcessTargetUnavailable
     case ready(windowGeneration: UInt64)
 
     public var isReady: Bool {
@@ -57,6 +60,12 @@ public enum InputReadiness: Equatable, Sendable {
             return "Input disabled: Host window is not foreground-eligible"
         case .hostStateUnavailable:
             return "Input disabled: Host input status unavailable"
+        case .hostControlNegotiating:
+            return "Input disabled: Host control setup is pending"
+        case .hostControlUnavailable:
+            return "Input disabled: Host has not granted Viewer control"
+        case .hostProcessTargetUnavailable:
+            return "Input disabled: Host target is not currently safe for process control"
         case .ready:
             return "Input ready"
         }

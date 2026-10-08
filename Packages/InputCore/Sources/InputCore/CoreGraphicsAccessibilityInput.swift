@@ -13,10 +13,12 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
     public typealias SessionStateProvider = @Sendable () -> HostInputSessionState
     public typealias SelectionProvider = @Sendable () -> HostInputWindowSelection?
     public typealias SecureInputStateProvider = @Sendable () -> HostInputSecureInputState
+    public typealias TargetSecureInputStateProvider = @Sendable (Int32) -> HostInputSecureInputState
 
     private let sessionStateProvider: SessionStateProvider
     private let selectionProvider: SelectionProvider
     private let secureInputStateProvider: SecureInputStateProvider
+    private let targetSecureInputStateProvider: TargetSecureInputStateProvider
 
     /// The public macOS API does not expose a general secure-input status
     /// query. The default is therefore `.unknown`. A Host UI/adapter may
@@ -26,11 +28,13 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
     public init(
         sessionStateProvider: @escaping SessionStateProvider,
         selectionProvider: @escaping SelectionProvider,
-        secureInputStateProvider: @escaping SecureInputStateProvider = Self.detectSecureInputState
+        secureInputStateProvider: @escaping SecureInputStateProvider = Self.detectSecureInputState,
+        targetSecureInputStateProvider: @escaping TargetSecureInputStateProvider = Self.detectTargetSecureInputState
     ) {
         self.sessionStateProvider = sessionStateProvider
         self.selectionProvider = selectionProvider
         self.secureInputStateProvider = secureInputStateProvider
+        self.targetSecureInputStateProvider = targetSecureInputStateProvider
     }
 
     /// Best-effort local secure-input signal. macOS does not expose a single
@@ -43,9 +47,68 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         guard AXIsProcessTrusted() else { return .unknown }
 
         let system = AXUIElementCreateSystemWide()
+        return focusedSecureInputState(in: system, expectedProcessIdentifier: nil)
+    }
+
+    /// Inspects the selected process itself instead of inferring its safety
+    /// from the unrelated foreground application. A missing or mismatched AX
+    /// focus owner is unknown and cannot authorize P6 background input.
+    public static func detectTargetSecureInputState(
+        processIdentifier: Int32
+    ) -> HostInputSecureInputState {
+        guard processIdentifier > 0,
+              AXIsProcessTrusted() else { return .unknown }
+        let application = AXUIElementCreateApplication(pid_t(processIdentifier))
+        return focusedSecureInputState(
+            in: application,
+            expectedProcessIdentifier: processIdentifier
+        )
+    }
+
+    /// Deterministic classifier for the target application's focused element.
+    /// Tests exercise secure roles, missing AX facts, and PID mismatches without
+    /// querying or controlling the desktop.
+    public static func classifyTargetSecureInputState(
+        expectedProcessIdentifier: Int32,
+        focusedElementProcessIdentifier: Int32?,
+        role: String?,
+        subrole: String?,
+        subroleInspectionFailed: Bool = false
+    ) -> HostInputSecureInputState {
+        guard expectedProcessIdentifier > 0,
+              focusedElementProcessIdentifier == expectedProcessIdentifier,
+              let role else { return .unknown }
+        if role == "AXSecureTextField" || subrole == "AXSecureTextField" {
+            return .active
+        }
+        return subroleInspectionFailed ? .unknown : .inactive
+    }
+
+    public static func classifyBackgroundSecureInput(
+        global: HostInputSecureInputState,
+        target: HostInputSecureInputState
+    ) -> HostInputFocusState {
+        switch global {
+        case .active:
+            return .secureInput
+        case .unknown:
+            return .unknown
+        case .inactive:
+            switch target {
+            case .active: return .secureInput
+            case .inactive: return .backgroundEligible
+            case .unknown: return .unknown
+            }
+        }
+    }
+
+    private static func focusedSecureInputState(
+        in root: AXUIElement,
+        expectedProcessIdentifier: Int32?
+    ) -> HostInputSecureInputState {
         var focusedValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
-            system,
+            root,
             kAXFocusedUIElementAttribute as CFString,
             &focusedValue
         ) == .success,
@@ -54,6 +117,14 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             return .unknown
         }
         let focused = unsafeDowncast(focusedValue, to: AXUIElement.self)
+
+        if let expectedProcessIdentifier {
+            var focusedProcessIdentifier: pid_t = 0
+            guard AXUIElementGetPid(focused, &focusedProcessIdentifier) == .success,
+                  Int32(focusedProcessIdentifier) == expectedProcessIdentifier else {
+                return .unknown
+            }
+        }
 
         var roleValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
@@ -65,22 +136,38 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             return .unknown
         }
 
-        if role == "AXSecureTextField" {
-            return .active
-        }
-
         var subroleValue: CFTypeRef?
-        if AXUIElementCopyAttributeValue(
+        let subrole: String?
+        let subroleInspectionFailed: Bool
+        let subroleStatus = AXUIElementCopyAttributeValue(
             focused,
             kAXSubroleAttribute as CFString,
             &subroleValue
-        ) == .success,
-           let subrole = subroleValue as? String,
-           subrole == "AXSecureTextField" {
+        )
+        if subroleStatus == .success {
+            guard let value = subroleValue as? String else { return .unknown }
+            subrole = value
+            subroleInspectionFailed = false
+        } else if subroleStatus == .attributeUnsupported || subroleStatus == .noValue {
+            subrole = nil
+            subroleInspectionFailed = false
+        } else {
+            subrole = nil
+            subroleInspectionFailed = true
+        }
+        if let expectedProcessIdentifier {
+            return classifyTargetSecureInputState(
+                expectedProcessIdentifier: expectedProcessIdentifier,
+                focusedElementProcessIdentifier: expectedProcessIdentifier,
+                role: role,
+                subrole: subrole,
+                subroleInspectionFailed: subroleInspectionFailed
+            )
+        }
+        if role == "AXSecureTextField" || subrole == "AXSecureTextField" {
             return .active
         }
-
-        return .inactive
+        return subroleInspectionFailed ? .unknown : .inactive
     }
 
     /// Returns the current local permission state without presenting a
@@ -117,7 +204,8 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
                 permission: Self.permissionState(),
                 focus: .windowUnavailable,
                 mouseInputEnabled: session.mouseInputEnabled,
-                keyboardInputEnabled: session.keyboardInputEnabled
+                keyboardInputEnabled: session.keyboardInputEnabled,
+                processTargetingAuthorized: session.processTargetingAuthorized
             )
         }
 
@@ -126,14 +214,25 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             sessionAuthorized: session.authorized,
             authorizedWindowGeneration: session.authorizedWindowGeneration,
             selectedWindow: selection,
-            currentWindowIdentifier: currentWindowIdentifier(for: selection, windows: windows),
-            currentProcessIdentifier: currentProcessIdentifier(windows: windows),
-            currentApplicationIdentifier: currentApplicationIdentifier(windows: windows),
+            currentWindowIdentifier: session.processTargetingAuthorized
+                ? liveTarget(for: selection, windows: windows)?.windowIdentifier
+                : currentWindowIdentifier(for: selection, windows: windows),
+            currentProcessIdentifier: session.processTargetingAuthorized
+                ? liveTarget(for: selection, windows: windows)?.processIdentifier
+                : currentProcessIdentifier(windows: windows),
+            currentApplicationIdentifier: session.processTargetingAuthorized
+                ? liveTarget(for: selection, windows: windows)?.applicationIdentifier
+                : currentApplicationIdentifier(windows: windows),
             currentWindowBounds: currentWindowBounds(for: selection, windows: windows),
             permission: Self.permissionState(),
-            focus: focusState(for: selection, windows: windows),
+            focus: focusState(
+                for: selection,
+                windows: windows,
+                allowsBackgroundTargeting: session.processTargetingAuthorized
+            ),
             mouseInputEnabled: session.mouseInputEnabled,
-            keyboardInputEnabled: session.keyboardInputEnabled
+            keyboardInputEnabled: session.keyboardInputEnabled,
+            processTargetingAuthorized: session.processTargetingAuthorized
         )
     }
 
@@ -163,14 +262,25 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             sessionAuthorized: session.authorized,
             authorizedWindowGeneration: session.authorizedWindowGeneration,
             selectedWindow: selection,
-            currentWindowIdentifier: currentWindowIdentifier(for: selection, windows: windows),
-            currentProcessIdentifier: currentProcessIdentifier(windows: windows),
-            currentApplicationIdentifier: currentApplicationIdentifier(windows: windows),
+            currentWindowIdentifier: session.processTargetingAuthorized
+                ? liveWindow.windowIdentifier
+                : currentWindowIdentifier(for: selection, windows: windows),
+            currentProcessIdentifier: session.processTargetingAuthorized
+                ? liveWindow.processIdentifier
+                : currentProcessIdentifier(windows: windows),
+            currentApplicationIdentifier: session.processTargetingAuthorized
+                ? liveWindow.applicationIdentifier
+                : currentApplicationIdentifier(windows: windows),
             currentWindowBounds: liveWindow.bounds,
             permission: Self.permissionState(),
-            focus: focusState(for: selection, windows: windows),
+            focus: focusState(
+                for: selection,
+                windows: windows,
+                allowsBackgroundTargeting: session.processTargetingAuthorized
+            ),
             mouseInputEnabled: session.mouseInputEnabled,
-            keyboardInputEnabled: session.keyboardInputEnabled
+            keyboardInputEnabled: session.keyboardInputEnabled,
+            processTargetingAuthorized: session.processTargetingAuthorized
         )
     }
 
@@ -183,9 +293,11 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
 
     private func focusState(
         for selection: HostInputWindowSelection,
-        windows: [OnScreenWindow]
+        windows: [OnScreenWindow],
+        allowsBackgroundTargeting: Bool = false
     ) -> HostInputFocusState {
-        switch secureInputStateProvider() {
+        let globalSecureInputState = secureInputStateProvider()
+        switch globalSecureInputState {
         case .active:
             return .secureInput
         case .unknown:
@@ -200,24 +312,67 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             return consoleState
         }
 
+        let focus = Self.selectedWindowFocusState(for: selection, windows: windows)
+        if allowsBackgroundTargeting {
+            let targetSecureInputState = targetSecureInputStateProvider(selection.processIdentifier)
+            if focus == .notForeground {
+                // Background P6 requires both a known global safe signal and
+                // a target-specific safe AX result. Foreground legacy control
+                // continues to use independent WindowServer focus checks.
+                return Self.classifyBackgroundSecureInput(
+                    global: globalSecureInputState,
+                    target: targetSecureInputState
+                )
+            }
+            if targetSecureInputState == .active {
+                return .secureInput
+            }
+        }
+        return focus
+    }
+
+    private func liveTarget(
+        for selection: HostInputWindowSelection,
+        windows: [OnScreenWindow]
+    ) -> OnScreenWindow? {
+        windows.first(where: {
+            $0.windowIdentifier == selection.windowIdentifier &&
+                $0.processIdentifier == selection.processIdentifier &&
+                $0.applicationIdentifier == selection.applicationIdentifier
+        })
+    }
+
+    /// Classifies a deterministic WindowServer snapshot. An unresolved window
+    /// ahead of the selection blocks focus only if its bounds overlap the
+    /// selected window; invalid geometry remains a blocker because its
+    /// occlusion cannot be ruled out. The first regular application window
+    /// must still be the exact selected window.
+    static func selectedWindowFocusState(
+        for selection: HostInputWindowSelection,
+        windows: [OnScreenWindow]
+    ) -> HostInputFocusState {
         guard !windows.isEmpty else { return .windowUnavailable }
-        // An unresolved owner can be a security/authentication surface. It
-        // must remain a blocker; filtering it out would make a covered app
-        // look foreground-eligible.
-        guard windows.first?.applicationIdentifier != nil else { return .unknown }
-        guard let selected = windows.first(where: {
+        guard let selectedIndex = windows.firstIndex(where: {
             $0.windowIdentifier == selection.windowIdentifier &&
                 $0.processIdentifier == selection.processIdentifier &&
                 $0.applicationIdentifier == selection.applicationIdentifier
         }) else {
             return .windowUnavailable
         }
+
+        let selected = windows[selectedIndex]
         guard selected.bounds.isValid else { return .windowUnavailable }
 
-        // CGWindowList is ordered front-to-back, but its first entry may be a
-        // WindowServer/menu-bar surface rather than the frontmost regular
-        // application window. Ignore known non-regular system surfaces while
-        // retaining unresolved/security surfaces as blockers above.
+        // WindowServer's ordered list may begin with a system surface whose
+        // owner cannot be resolved. Ignore it only when its geometry proves
+        // that it cannot cover the selected target.
+        if windows[..<selectedIndex].contains(where: { window in
+            window.applicationIdentifier == nil &&
+                Self.mayOverlap(window.bounds, selected.bounds)
+        }) {
+            return .unknown
+        }
+
         guard let frontmostApplication = Self.frontmostApplicationWindow(in: windows),
               frontmostApplication.windowIdentifier == selection.windowIdentifier,
               frontmostApplication.processIdentifier == selection.processIdentifier,
@@ -225,6 +380,17 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             return .notForeground
         }
         return .eligible
+    }
+
+    private static func mayOverlap(
+        _ first: InputWindowBounds,
+        _ second: InputWindowBounds
+    ) -> Bool {
+        guard first.isValid, second.isValid else { return true }
+        return first.originX < second.originX + second.width &&
+            second.originX < first.originX + first.width &&
+            first.originY < second.originY + second.height &&
+            second.originY < first.originY + first.height
     }
 
     private func currentWindowIdentifier(
@@ -253,13 +419,12 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         })?.bounds
     }
 
-    fileprivate struct OnScreenWindow: Sendable {
+    struct OnScreenWindow: Sendable {
         let windowIdentifier: UInt64
         let processIdentifier: Int32
         /// `nil` means WindowServer reported an on-screen owner that this
-        /// process could not resolve. Unknown windows remain in the ordered
-        /// list as blockers; dropping them could make a covered selected
-        /// window look foreground-eligible.
+        /// process could not resolve. Keep unknown windows in order so focus
+        /// classification can reject them when they may cover the selection.
         let applicationIdentifier: String?
         let isRegularApplication: Bool
         let bounds: InputWindowBounds
@@ -343,26 +508,17 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
 /// selected. Accessibility is used only for the local AXRaise action; input
 /// authorization still independently requires a fresh foreground check.
 public enum CoreGraphicsAccessibilityWindowFocus {
-    /// Confirms that WindowServer currently lists the selected regular-app
-    /// window as the frontmost regular application window.
+    /// Confirms that WindowServer currently lists the exact selected window
+    /// as the frontmost regular application window, with overlapping unknown
+    /// surfaces remaining fail-closed.
     public static func isSelectedWindowForeground(
         _ selection: HostInputWindowSelection
     ) -> Bool {
         let windows = CoreGraphicsAccessibilityContextProvider.onScreenApplicationWindows()
-        guard let first = windows.first,
-              first.applicationIdentifier != nil,
-              let selected = windows.first(where: {
-                  $0.windowIdentifier == selection.windowIdentifier &&
-                      $0.processIdentifier == selection.processIdentifier &&
-                      $0.applicationIdentifier == selection.applicationIdentifier
-              }),
-              selected.bounds.isValid,
-              let frontmost = CoreGraphicsAccessibilityContextProvider.frontmostApplicationWindow(in: windows) else {
-            return false
-        }
-        return frontmost.windowIdentifier == selection.windowIdentifier &&
-            frontmost.processIdentifier == selection.processIdentifier &&
-            frontmost.applicationIdentifier == selection.applicationIdentifier
+        return CoreGraphicsAccessibilityContextProvider.selectedWindowFocusState(
+            for: selection,
+            windows: windows
+        ) == .eligible
     }
 
     /// Raises a uniquely identified AX window for an explicit Viewer window
@@ -795,7 +951,8 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
             throw HostInputAdapterError.targetUnavailable
         }
 
-        if context.focus == .eligible {
+        if context.focus == .eligible ||
+            (context.focus == .backgroundEligible && context.processTargetingAuthorized) {
             guard context.currentWindowIdentifier == target.windowIdentifier,
                   context.currentProcessIdentifier == target.processIdentifier,
                   context.currentApplicationIdentifier == target.applicationIdentifier else {
