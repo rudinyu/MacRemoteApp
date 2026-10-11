@@ -10,18 +10,18 @@ Host; this is deliberately not a full remote-desktop product.
 Milestone state and open evidence gaps are tracked in one place:
 [`docs/STATUS.md`](docs/STATUS.md).
 
-The current signed and notarized test release is `0.2.1009` (Version `0.2`,
-Build `1009`) in `build/rc/`, including the full-cleanup uninstaller in both
-DMGs, Viewer-led input-source following, and the earlier capture, input,
+The current signed and notarized test release is `0.2.1010` (Version `0.2`,
+Build `1010`) in `build/rc/`, including P6 control and the full-cleanup
+uninstaller in both DMGs, Viewer-led input-source following, and the earlier capture, input,
 reconnect, and presentation reliability fixes.
 Apple submission IDs and verification evidence are recorded in
-[`docs/STATUS.md`](docs/STATUS.md#021009-notarized-rc).
+[`docs/STATUS.md`](docs/STATUS.md#021010-notarized-rc).
 Passing local tests does not replace the pending two-Mac acceptance run.
 
 The current source tree also contains the user-authorized P6 extension,
 [Host-controlled Viewer input](docs/P6_BACKGROUND_CONTROL.md). It adds a
 separate local, saved control grant and optional process-targeted background
-input. It is not included in the retained `0.2.1009` RC artifacts and does not
+input. It is included in the `0.2.1010` RC artifacts and does not
 complete the pending V1 physical acceptance. The V1 baseline described below
 continues to apply to peers without the P6 capability.
 

@@ -13,6 +13,76 @@ private enum HostPairingPromptOutcome: Sendable {
     case sessionEnded
 }
 
+enum HostRuntimeWindowSelectionAction: Equatable {
+    case restoreExistingSelection
+    case activateRequestedSelection
+
+    static func resolve(currentWindowHasSameOwner: Bool) -> Self {
+        currentWindowHasSameOwner
+            ? .restoreExistingSelection
+            : .activateRequestedSelection
+    }
+}
+
+enum HostRuntimeForegroundRestorationPolicy {
+    static func permits(
+        activeSession: Bool,
+        selectionTransitionInProgress: Bool,
+        authorized: Bool,
+        selectedWindowMatches: Bool,
+        requestGeneration: UInt64?,
+        selectedWindowGeneration: UInt64?,
+        authorizedWindowGeneration: UInt64?,
+        processTargetingNegotiated: Bool,
+        requiresHostFrontmost: Bool,
+        hostIsFrontmost: Bool
+    ) -> Bool {
+        guard activeSession,
+              !selectionTransitionInProgress,
+              authorized,
+              selectedWindowMatches,
+              let requestGeneration,
+              selectedWindowGeneration == requestGeneration,
+              authorizedWindowGeneration == requestGeneration,
+              !processTargetingNegotiated else {
+            return false
+        }
+        return !requiresHostFrontmost || hostIsFrontmost
+    }
+}
+
+enum HostRuntimeForegroundActivationPolicy {
+    static func permits(
+        explicitViewerSelection: Bool,
+        processTargetingNegotiated: Bool,
+        targetApplicationAvailable: Bool,
+        targetIsRegularApplication: Bool
+    ) -> Bool {
+        explicitViewerSelection &&
+            !processTargetingNegotiated &&
+            targetApplicationAvailable &&
+            targetIsRegularApplication
+    }
+}
+
+enum HostRuntimeCooperativeActivationPolicy {
+    static func permitsYield(
+        cooperativeAPIAvailable: Bool,
+        hostIsFrontmost: Bool
+    ) -> Bool {
+        cooperativeAPIAvailable && hostIsFrontmost
+    }
+}
+
+enum HostRuntimeCallbackTeardownScheduler {
+    @discardableResult
+    static func schedule(
+        _ operation: @escaping @Sendable () async -> Void
+    ) -> Task<Void, Never> {
+        Task { await operation() }
+    }
+}
+
 enum HostRuntimeStatus: Sendable, Equatable, CustomStringConvertible {
     case starting
     case needsScreenRecording
@@ -1060,7 +1130,7 @@ actor HostRuntime {
         guard snapshot.authorized,
               snapshot.state != .failed,
               snapshot.state != .stopping else {
-            await teardown(session: session)
+            scheduleTeardown(session: session)
             return
         }
         advertisedWindowGeneration = snapshot.authorizedWindowGeneration ?? fallbackWindowGeneration
@@ -1218,8 +1288,20 @@ actor HostRuntime {
                     await republishWindowCatalogAfterRejectedSelection(session, discoveredWindows: windows)
                     return
                 }
-                if selectedWindow?.hasSameOwner(as: window) == true {
+                switch HostRuntimeWindowSelectionAction.resolve(
+                    currentWindowHasSameOwner: selectedWindow?.hasSameOwner(as: window) == true
+                ) {
+                case .restoreExistingSelection:
+                    guard let selectedWindowGeneration else { return }
+                    _ = await restoreSelectedApplicationToForeground(
+                        window,
+                        for: session,
+                        requestGeneration: selectedWindowGeneration,
+                        requiresHostFrontmost: false
+                    )
                     return
+                case .activateRequestedSelection:
+                    break
                 }
                 let previousWindowGeneration = advertisedWindowGeneration
                 guard previousWindowGeneration < UInt64.max else {
@@ -1292,9 +1374,63 @@ actor HostRuntime {
     /// Defer teardown until that callback returns; otherwise `stop()` would
     /// try to join the very task that is currently awaiting this callback.
     private func scheduleTeardown(session: SessionCoordinator) {
-        Task { [weak self] in
+        HostRuntimeCallbackTeardownScheduler.schedule { [weak self] in
             await self?.teardown(session: session)
         }
+    }
+
+    private func restoreSelectedApplicationToForeground(
+        _ window: CaptureWindow,
+        for session: SessionCoordinator,
+        requestGeneration: UInt64,
+        requiresHostFrontmost: Bool
+    ) async -> Bool {
+        let snapshot = await session.snapshot()
+        let hostIsFrontmost: Bool
+        if requiresHostFrontmost {
+            hostIsFrontmost = await MainActor.run {
+                NSWorkspace.shared.frontmostApplication?.processIdentifier ==
+                    ProcessInfo.processInfo.processIdentifier
+            }
+        } else {
+            hostIsFrontmost = false
+        }
+        guard HostRuntimeForegroundRestorationPolicy.permits(
+            activeSession: activeSession === session,
+            selectionTransitionInProgress: selectionTransitionInProgress,
+            authorized: snapshot.authorized,
+            selectedWindowMatches: selectedWindow?.hasSameOwner(as: window) == true,
+            requestGeneration: requestGeneration,
+            selectedWindowGeneration: selectedWindowGeneration,
+            authorizedWindowGeneration: snapshot.authorizedWindowGeneration,
+            processTargetingNegotiated: snapshot.negotiatedCapabilities.contains(.backgroundControl),
+            requiresHostFrontmost: requiresHostFrontmost,
+            hostIsFrontmost: hostIsFrontmost
+        ) else {
+            return false
+        }
+
+        let didRestore = await bringSelectedApplicationToForeground(
+            window,
+            explicitViewerSelection: true,
+            processTargetingNegotiated: snapshot.negotiatedCapabilities.contains(.backgroundControl)
+        )
+        let currentSnapshot = await session.snapshot()
+        guard HostRuntimeForegroundRestorationPolicy.permits(
+            activeSession: activeSession === session,
+            selectionTransitionInProgress: selectionTransitionInProgress,
+            authorized: currentSnapshot.authorized,
+            selectedWindowMatches: selectedWindow?.hasSameOwner(as: window) == true,
+            requestGeneration: requestGeneration,
+            selectedWindowGeneration: selectedWindowGeneration,
+            authorizedWindowGeneration: currentSnapshot.authorizedWindowGeneration,
+            processTargetingNegotiated: currentSnapshot.negotiatedCapabilities.contains(.backgroundControl),
+            requiresHostFrontmost: false,
+            hostIsFrontmost: true
+        ) else {
+            return false
+        }
+        return didRestore
     }
 
     private func activateSelection(
@@ -1368,9 +1504,9 @@ actor HostRuntime {
             authorizedCapabilities.remove(.textClipboard)
         }
 
-        // Legacy peers retain the foreground activation behavior. P6 peers
-        // use the separately granted process-targeted path and never cause
-        // the selected app to be brought to the front.
+        // This path is entered only for an explicit Viewer window selection.
+        // P6 uses its separately granted process-targeted path and never
+        // causes the selected app to be brought to the front.
         let didForegroundSelectedApplication = processControlNegotiated
             ? false
             : await bringSelectedApplicationToForeground(selected)
@@ -1515,7 +1651,9 @@ actor HostRuntime {
 
     private func scheduleClipboardConsentPrompt(for session: SessionCoordinator) {
         guard !clipboardConsentPromptedForSession,
-              activeSession === session else { return }
+              activeSession === session,
+              let selectedWindow,
+              let selectedWindowGeneration else { return }
         clipboardConsentPromptedForSession = true
         clipboardConsentTask = Task { [weak self] in
             let consented = await HostClipboardPrompt.requestConsent(
@@ -1531,16 +1669,30 @@ actor HostRuntime {
                     }
                 }
             )
-            await self?.completeClipboardConsent(consented, for: session)
+            await self?.completeClipboardConsent(
+                consented,
+                for: session,
+                selectedWindowAtPrompt: selectedWindow,
+                selectionGenerationAtPrompt: selectedWindowGeneration
+            )
         }
     }
 
     private func completeClipboardConsent(
         _ consented: Bool,
-        for session: SessionCoordinator
+        for session: SessionCoordinator,
+        selectedWindowAtPrompt: CaptureWindow,
+        selectionGenerationAtPrompt: UInt64
     ) async {
         guard activeSession === session else { return }
         clipboardConsentTask = nil
+        _ = await restoreSelectedApplicationToForeground(
+            selectedWindowAtPrompt,
+            for: session,
+            requestGeneration: selectionGenerationAtPrompt,
+            requiresHostFrontmost: true
+        )
+        guard activeSession === session else { return }
         guard consented,
               (await session.snapshot()).negotiatedCapabilities.contains(.textClipboard) else {
             return
@@ -1695,8 +1847,26 @@ actor HostRuntime {
 
     @MainActor
     private func bringSelectedApplicationToForeground(_ window: CaptureWindow) async -> Bool {
+        await bringSelectedApplicationToForeground(
+            window,
+            explicitViewerSelection: true,
+            processTargetingNegotiated: false
+        )
+    }
+
+    @MainActor
+    private func bringSelectedApplicationToForeground(
+        _ window: CaptureWindow,
+        explicitViewerSelection: Bool,
+        processTargetingNegotiated: Bool
+    ) async -> Bool {
         guard let application = NSRunningApplication(processIdentifier: window.processIdentifier),
-              application.activationPolicy == .regular else {
+              HostRuntimeForegroundActivationPolicy.permits(
+                  explicitViewerSelection: explicitViewerSelection,
+                  processTargetingNegotiated: processTargetingNegotiated,
+                  targetApplicationAvailable: true,
+                  targetIsRegularApplication: application.activationPolicy == .regular
+              ) else {
             return false
         }
 
@@ -1712,7 +1882,32 @@ actor HostRuntime {
                 height: window.bounds.height
             )
         )
-        _ = application.activate(options: [.activateIgnoringOtherApps])
+        if CoreGraphicsAccessibilityWindowFocus.isSelectedWindowForeground(selection) {
+            return true
+        }
+
+        guard #available(macOS 14.0, *) else {
+            // The cooperative API is required for this explicit legacy
+            // foreground request. On macOS 13, leave control fail-closed and
+            // let the Viewer ask the Host user to reactivate the Host.
+            return false
+        }
+
+        let hostApplication = NSRunningApplication.current
+        NSApplication.shared.activate()
+        guard await waitForHostToBecomeFrontmost(
+            processIdentifier: hostApplication.processIdentifier
+        ),
+        HostRuntimeCooperativeActivationPolicy.permitsYield(
+            cooperativeAPIAvailable: true,
+            hostIsFrontmost: NSWorkspace.shared.frontmostApplication?.processIdentifier ==
+                hostApplication.processIdentifier
+        ) else {
+            return false
+        }
+
+        NSApplication.shared.yieldActivation(to: application)
+        guard application.activate(from: hostApplication, options: []) else { return false }
 
         for attempt in 0 ..< 20 {
             if CoreGraphicsAccessibilityWindowFocus.isSelectedWindowForeground(selection) {
@@ -1737,6 +1932,22 @@ actor HostRuntime {
             }
         }
         return CoreGraphicsAccessibilityWindowFocus.isSelectedWindowForeground(selection)
+    }
+
+    @MainActor
+    private func waitForHostToBecomeFrontmost(processIdentifier: pid_t) async -> Bool {
+        for _ in 0 ..< 20 {
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier {
+                return true
+            }
+            if Task.isCancelled { return false }
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            } catch {
+                return false
+            }
+        }
+        return NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier
     }
 
     private func stopVideoPipelineIfCurrent(_ session: SessionCoordinator) async {

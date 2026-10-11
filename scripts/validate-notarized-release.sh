@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
+source "${script_dir}/notarization-config.sh"
 source "${script_dir}/artifact-naming.sh"
 release_root="${1:-${repo_root}/build/release}"
 
@@ -24,8 +25,14 @@ artifact_channel="$(macremoteapp_resolve_artifact_channel "${repo_root}" "${rele
 release_identity="$(macremoteapp_release_identity \
     "${release_root}/MacRemoteApp-Host.app/Contents/Info.plist" \
     "${release_root}/MacRemoteApp-Viewer.app/Contents/Info.plist")" || exit 2
+macremoteapp_notarization_helper_path >/dev/null || exit 2
 
-MACREMOTEAPP_ARTIFACT_CHANNEL="${artifact_channel}" \
+env \
+    -u MACOS_NOTARY_PROFILE \
+    -u MACOS_NOTARY_KEY_PATH \
+    -u MACOS_NOTARY_KEY_ID \
+    -u MACOS_NOTARY_ISSUER \
+    MACREMOTEAPP_ARTIFACT_CHANNEL="${artifact_channel}" \
     bash "${script_dir}/audit-release.sh" "${release_root}"
 
 validation_tmp_dir="$(mktemp -d "${TMPDIR:-/private/tmp}/macremoteapp-notarized-validation.XXXXXX")"
@@ -107,9 +114,7 @@ validate_app_archive() {
         echo "Notarized release validation failed: ${app_zip} differs from ${app_path}" >&2
         return 1
     fi
-    codesign --verify --deep --strict "${extracted_app}"
-    xcrun stapler validate "${extracted_app}"
-    spctl --assess --type exec --verbose=4 "${extracted_app}"
+    macremoteapp_notary_verify "${extracted_app}"
 }
 
 for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
@@ -126,8 +131,7 @@ for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
     fi
 
     echo "Validating notarization ticket for ${app_name}.app (${release_identity})"
-    xcrun stapler validate "${app_path}"
-    spctl --assess --type exec --verbose=4 "${app_path}"
+    macremoteapp_notary_verify "${app_path}"
 done
 
 for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
@@ -141,8 +145,7 @@ for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
     fi
 
     echo "Validating notarization ticket for ${dmg_name}"
-    xcrun stapler validate "${dmg_path}"
-    spctl --assess --type install --verbose=4 "${dmg_path}"
+    macremoteapp_notary_verify "${dmg_path}"
 done
 
 echo "Notarized release validation passed for ${release_identity} (${artifact_channel}): ${release_root}"

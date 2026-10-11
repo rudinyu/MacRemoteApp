@@ -290,14 +290,8 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "MacRemoteApp Host"
         item.button?.toolTip = "MacRemoteApp Host — listening for a paired Viewer"
-        if let image = NSImage(
-            systemSymbolName: "macwindow",
-            accessibilityDescription: "MacRemoteApp Host"
-        ) {
-            image.isTemplate = true
-            item.button?.image = image
-            item.button?.imagePosition = .imageOnly
-        }
+        item.button?.image = HostStatusItemIcon.makeTemplateImage()
+        item.button?.imagePosition = .imageOnly
 
         let menu = NSMenu()
         menu.autoenablesItems = false

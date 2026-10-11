@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
+source "${script_dir}/notarization-config.sh"
 source "${script_dir}/artifact-naming.sh"
 cd "${repo_root}"
 
@@ -275,18 +276,11 @@ if [[ "${signing_identity}" == "-" ]]; then
     echo "For stable macOS TCC identity, set it to a Developer ID Application certificate." >&2
 fi
 
-timestamp_arguments=(--timestamp)
-if [[ "${signing_identity}" == "-" ]]; then
-    timestamp_arguments=(--timestamp=none)
-fi
-
 for app_dir in \
     "${release_root}/MacRemoteApp-Host.app" \
     "${release_root}/MacRemoteApp-Viewer.app"
 do
-    codesign --force --deep --options runtime \
-        --sign "${signing_identity}" \
-        "${timestamp_arguments[@]}" "${app_dir}"
+    macremoteapp_sign_app "${app_dir}" "${signing_identity}"
     codesign --verify --deep --strict "${app_dir}"
     if (( require_developer_id )); then
         signature_info="$(codesign --display --verbose=4 "${app_dir}" 2>&1)"

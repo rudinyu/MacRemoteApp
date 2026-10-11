@@ -210,19 +210,14 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         }
 
         let windows = Self.onScreenApplicationWindows()
+        let selectedTarget = Self.liveTarget(for: selection, windows: windows)
         return HostInputContext(
             sessionAuthorized: session.authorized,
             authorizedWindowGeneration: session.authorizedWindowGeneration,
             selectedWindow: selection,
-            currentWindowIdentifier: session.processTargetingAuthorized
-                ? liveTarget(for: selection, windows: windows)?.windowIdentifier
-                : currentWindowIdentifier(for: selection, windows: windows),
-            currentProcessIdentifier: session.processTargetingAuthorized
-                ? liveTarget(for: selection, windows: windows)?.processIdentifier
-                : currentProcessIdentifier(windows: windows),
-            currentApplicationIdentifier: session.processTargetingAuthorized
-                ? liveTarget(for: selection, windows: windows)?.applicationIdentifier
-                : currentApplicationIdentifier(windows: windows),
+            currentWindowIdentifier: selectedTarget?.windowIdentifier,
+            currentProcessIdentifier: selectedTarget?.processIdentifier,
+            currentApplicationIdentifier: selectedTarget?.applicationIdentifier,
             currentWindowBounds: currentWindowBounds(for: selection, windows: windows),
             permission: Self.permissionState(),
             focus: focusState(
@@ -239,11 +234,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
     public func currentReleaseContext(for target: HostInputTarget) -> HostInputContext? {
         let session = sessionStateProvider()
         let windows = Self.onScreenApplicationWindows()
-        guard let liveWindow = windows.first(where: {
-            $0.windowIdentifier == target.windowIdentifier &&
-                $0.processIdentifier == target.processIdentifier &&
-                $0.applicationIdentifier == target.applicationIdentifier
-        }) else {
+        guard let liveWindow = Self.liveTarget(for: target, windows: windows) else {
             return nil
         }
 
@@ -262,15 +253,9 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             sessionAuthorized: session.authorized,
             authorizedWindowGeneration: session.authorizedWindowGeneration,
             selectedWindow: selection,
-            currentWindowIdentifier: session.processTargetingAuthorized
-                ? liveWindow.windowIdentifier
-                : currentWindowIdentifier(for: selection, windows: windows),
-            currentProcessIdentifier: session.processTargetingAuthorized
-                ? liveWindow.processIdentifier
-                : currentProcessIdentifier(windows: windows),
-            currentApplicationIdentifier: session.processTargetingAuthorized
-                ? liveWindow.applicationIdentifier
-                : currentApplicationIdentifier(windows: windows),
+            currentWindowIdentifier: liveWindow.windowIdentifier,
+            currentProcessIdentifier: liveWindow.processIdentifier,
+            currentApplicationIdentifier: liveWindow.applicationIdentifier,
             currentWindowBounds: liveWindow.bounds,
             permission: Self.permissionState(),
             focus: focusState(
@@ -312,7 +297,11 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             return consoleState
         }
 
-        let focus = Self.selectedWindowFocusState(for: selection, windows: windows)
+        let focus = Self.selectedWindowFocusState(
+            for: selection,
+            windows: windows,
+            frontmostProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier
+        )
         if allowsBackgroundTargeting {
             let targetSecureInputState = targetSecureInputStateProvider(selection.processIdentifier)
             if focus == .notForeground {
@@ -331,31 +320,61 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         return focus
     }
 
-    private func liveTarget(
+    static func liveTarget(
         for selection: HostInputWindowSelection,
         windows: [OnScreenWindow]
     ) -> OnScreenWindow? {
+        liveTarget(
+            windowIdentifier: selection.windowIdentifier,
+            processIdentifier: selection.processIdentifier,
+            applicationIdentifier: selection.applicationIdentifier,
+            windows: windows
+        )
+    }
+
+    static func liveTarget(
+        for target: HostInputTarget,
+        windows: [OnScreenWindow]
+    ) -> OnScreenWindow? {
+        liveTarget(
+            windowIdentifier: target.windowIdentifier,
+            processIdentifier: target.processIdentifier,
+            applicationIdentifier: target.applicationIdentifier,
+            windows: windows
+        )
+    }
+
+    private static func liveTarget(
+        windowIdentifier: UInt64,
+        processIdentifier: Int32,
+        applicationIdentifier: String,
+        windows: [OnScreenWindow]
+    ) -> OnScreenWindow? {
         windows.first(where: {
-            $0.windowIdentifier == selection.windowIdentifier &&
-                $0.processIdentifier == selection.processIdentifier &&
-                $0.applicationIdentifier == selection.applicationIdentifier
+            $0.windowIdentifier == windowIdentifier &&
+                $0.processIdentifier == processIdentifier &&
+                $0.applicationIdentifier == applicationIdentifier
         })
     }
 
-    /// Classifies a deterministic WindowServer snapshot. An unresolved window
-    /// ahead of the selection blocks focus only if its bounds overlap the
-    /// selected window; invalid geometry remains a blocker because its
-    /// occlusion cannot be ruled out. The first regular application window
-    /// must still be the exact selected window.
+    /// Classifies a deterministic WindowServer snapshot and active workspace
+    /// process. An unresolved layer-0 window ahead of the selection blocks
+    /// focus only if its bounds overlap the selected window; invalid geometry
+    /// remains a blocker because its occlusion cannot be ruled out. Nonzero
+    /// layers do not participate. The first regular layer-0 application
+    /// window must belong to the selected process and bundle. It may be a
+    /// child window with a different WindowServer identifier.
     static func selectedWindowFocusState(
         for selection: HostInputWindowSelection,
-        windows: [OnScreenWindow]
+        windows: [OnScreenWindow],
+        frontmostProcessIdentifier: Int32?
     ) -> HostInputFocusState {
         guard !windows.isEmpty else { return .windowUnavailable }
         guard let selectedIndex = windows.firstIndex(where: {
             $0.windowIdentifier == selection.windowIdentifier &&
                 $0.processIdentifier == selection.processIdentifier &&
-                $0.applicationIdentifier == selection.applicationIdentifier
+                $0.applicationIdentifier == selection.applicationIdentifier &&
+                $0.layer == 0
         }) else {
             return .windowUnavailable
         }
@@ -363,18 +382,23 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         let selected = windows[selectedIndex]
         guard selected.bounds.isValid else { return .windowUnavailable }
 
-        // WindowServer's ordered list may begin with a system surface whose
-        // owner cannot be resolved. Ignore it only when its geometry proves
-        // that it cannot cover the selected target.
+        // Nonzero-layer surfaces are outside this classifier. A layer value
+        // we cannot read remains conservative because it may be a layer-0
+        // overlay. An unresolved owner at layer 0 blocks only when it may
+        // cover the selected target.
         if windows[..<selectedIndex].contains(where: { window in
-            window.applicationIdentifier == nil &&
+            (window.layer == 0 || window.layer == nil) &&
+                window.applicationIdentifier == nil &&
                 Self.mayOverlap(window.bounds, selected.bounds)
         }) {
             return .unknown
         }
 
+        guard let frontmostProcessIdentifier else { return .unknown }
+        guard frontmostProcessIdentifier == selection.processIdentifier else {
+            return .notForeground
+        }
         guard let frontmostApplication = Self.frontmostApplicationWindow(in: windows),
-              frontmostApplication.windowIdentifier == selection.windowIdentifier,
               frontmostApplication.processIdentifier == selection.processIdentifier,
               frontmostApplication.applicationIdentifier == selection.applicationIdentifier else {
             return .notForeground
@@ -393,21 +417,6 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             second.originY < first.originY + first.height
     }
 
-    private func currentWindowIdentifier(
-        for selection: HostInputWindowSelection,
-        windows: [OnScreenWindow]
-    ) -> UInt64? {
-        Self.frontmostApplicationWindow(in: windows)?.windowIdentifier
-    }
-
-    private func currentProcessIdentifier(windows: [OnScreenWindow]) -> Int32? {
-        Self.frontmostApplicationWindow(in: windows)?.processIdentifier
-    }
-
-    private func currentApplicationIdentifier(windows: [OnScreenWindow]) -> String? {
-        Self.frontmostApplicationWindow(in: windows)?.applicationIdentifier
-    }
-
     private func currentWindowBounds(
         for selection: HostInputWindowSelection,
         windows: [OnScreenWindow]
@@ -422,6 +431,9 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
     struct OnScreenWindow: Sendable {
         let windowIdentifier: UInt64
         let processIdentifier: Int32
+        /// WindowServer layer. Missing metadata remains distinguishable so
+        /// potentially overlapping unknown layers can fail closed.
+        let layer: Int?
         /// `nil` means WindowServer reported an on-screen owner that this
         /// process could not resolve. Keep unknown windows in order so focus
         /// classification can reject them when they may cover the selection.
@@ -434,7 +446,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         in windows: [OnScreenWindow]
     ) -> OnScreenWindow? {
         windows.first(where: {
-            $0.applicationIdentifier != nil && $0.isRegularApplication
+            $0.layer == 0 && $0.applicationIdentifier != nil && $0.isRegularApplication
         })
     }
 
@@ -466,6 +478,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             return OnScreenWindow(
                 windowIdentifier: windowNumber,
                 processIdentifier: processIdentifier,
+                layer: (info["kCGWindowLayer"] as? NSNumber)?.intValue,
                 applicationIdentifier: application?.bundleIdentifier,
                 isRegularApplication: application?.activationPolicy == .regular,
                 bounds: InputWindowBounds(
@@ -508,16 +521,18 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
 /// selected. Accessibility is used only for the local AXRaise action; input
 /// authorization still independently requires a fresh foreground check.
 public enum CoreGraphicsAccessibilityWindowFocus {
-    /// Confirms that WindowServer currently lists the exact selected window
-    /// as the frontmost regular application window, with overlapping unknown
-    /// surfaces remaining fail-closed.
+    /// Confirms the exact selected target is still live and its process is the
+    /// active workspace app. The top regular layer-0 WindowServer window must
+    /// belong to that app, but may have a different window identifier.
+    /// Overlapping unknown-owner layer-0 surfaces remain fail-closed.
     public static func isSelectedWindowForeground(
         _ selection: HostInputWindowSelection
     ) -> Bool {
         let windows = CoreGraphicsAccessibilityContextProvider.onScreenApplicationWindows()
         return CoreGraphicsAccessibilityContextProvider.selectedWindowFocusState(
             for: selection,
-            windows: windows
+            windows: windows,
+            frontmostProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier
         ) == .eligible
     }
 

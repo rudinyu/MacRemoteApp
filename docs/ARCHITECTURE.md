@@ -195,12 +195,17 @@ Additional rules:
   requirement. The Host remains authoritative by validating eligibility and
   generation before authorization. During an active session it refreshes the
   eligible-window catalog so the Viewer can replace the selected app without
-  reconnecting. A direct Viewer selection activates that regular app and may
-  use the public Accessibility raise action to foreground the exact selected
-  window when the Host already has Accessibility trust and can match its
-  geometry unambiguously. This expresses the user's explicit target choice;
-  InputCore still requires a fresh exact-window foreground check for every
-  event. If raising is unavailable or ambiguous, input remains fail-closed.
+  reconnecting. On macOS 14 or later, a direct Viewer selection activates
+  Host, confirms Host is frontmost, and cooperatively yields activation to
+  that regular app. It may use the public Accessibility raise action for the
+  exact selected target when the Host already has Accessibility trust and can
+  match its geometry unambiguously. Every event still requires the exact
+  selected target to remain live and the active PID plus top regular layer-0
+  window to identify that same app; the top window may have a different ID
+  for an app-owned sheet or popover. If Host foreground cannot be confirmed,
+  cooperative activation is unavailable, or raising is unavailable or
+  ambiguous, input remains fail-closed and the Viewer asks the Host user to
+  click or reactivate MacRemoteApp Host.
   The Viewer
   shows explicit Connecting, Connected, and Reconnecting states and disables
   duplicate Connect actions while a session is active. Host and Viewer send
@@ -369,6 +374,16 @@ M6 splits Host input handling across these owners:
   on-screen window identity, foreground ordering/identity, and lock state.
 - `CoreGraphicsAccessibilityInputAdapter` is the only M6 code that
   constructs/posts `CGEvent` values.
+- For an explicit legacy window selection, `HostRuntime` may make a bounded
+  cooperative AppKit activation request on macOS 14 or later, after Host
+  foreground status is confirmed. It is never used for P6 process targeting
+  and is not itself proof of focus. Fresh input checks require the exact
+  selected target to remain a valid layer-0 window, the selected PID to be
+  the active workspace process, and the top regular layer-0 WindowServer
+  window to belong to the selected PID and bundle; the top window may have a
+  different identifier. If Host foreground cannot be confirmed or the
+  cooperative API is unavailable, input stays fail-closed and the Viewer
+  instructs the Host user to click or reactivate MacRemoteApp Host.
 
 The state of admitted pressed input (held keys and buttons) for one selected
 target moves through these states:
@@ -397,8 +412,10 @@ Invariants:
    complete target/focus/owning-application/permission check immediately
    before target-bound process posting. A `TransportCore` authorization
    decision alone never authorizes an OS event.
-2. **No background activation.** The adapter never activates a background
-   window. No private API or bypass is used.
+2. **No background activation.** The input adapter never activates a window.
+   HostRuntime activation is limited to an explicit legacy selection; P6
+   process targeting never foregrounds its app. No private API or bypass is
+   used.
 3. **Fail-closed secure input.** A detected secure-input field or an unknown
    console state is rejected. When the optional AX secure-input signal is
    unavailable, it does not replace the independent foreground/window checks,

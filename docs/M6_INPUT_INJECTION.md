@@ -59,9 +59,13 @@ Every event is checked immediately before adapter invocation:
 ```text
 authenticated and authorized session
   AND authorized selected-window generation matches
-  AND selected window identity, owning application, and process still match
+  AND exact selected target still exists with valid geometry and layer 0
+  AND selected target identity, owner, and process still match
+  AND NSWorkspace.frontmostApplication PID matches the selected process
+  AND top regular layer-0 WindowServer window belongs to the selected PID and bundle
+      (it may have a different window identifier, such as an app-owned sheet)
+  AND no overlapping unresolved layer-0 window can cover the selected target
   AND PostEvent permission is authorized
-  AND selected window is the eligible foreground window
   AND input capability is enabled
   AND event shape, modifier mask, sequence, and rate are valid
 ```

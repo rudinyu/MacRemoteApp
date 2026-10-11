@@ -5,242 +5,253 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
 source "${script_dir}/notarization-config.sh"
 
-fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/macremoteapp-notary-config.XXXXXX")"
+fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/macremoteapp-notary-adapter.XXXXXX")"
 trap 'rm -rf -- "${fixture_root}"' EXIT
-chmod 700 "${fixture_root}"
 fixture_repo="${fixture_root}/project"
-fixture_external="${fixture_root}/external keys"
 fixture_bin="${fixture_root}/bin"
-mkdir -p "${fixture_repo}" "${fixture_external}" "${fixture_bin}"
-chmod 700 "${fixture_repo}" "${fixture_external}" "${fixture_bin}"
-fixture_key="${fixture_external}/AuthKey_fixture.p8"
-printf 'synthetic fixture only\n' >"${fixture_key}"
-chmod 600 "${fixture_key}"
+fixture_helper="${fixture_root}/macos_notarization.py"
+arguments_log="${fixture_root}/helper-arguments.log"
+mkdir -p "${fixture_repo}" "${fixture_bin}"
 
-write_config() {
-    local path="$1"
-    shift
-    printf '%s\n' "$@" >"${path}"
-    chmod 600 "${path}"
-}
+cat >"${fixture_helper}" <<'MOCK_HELPER'
+import os
+import sys
 
-expect_resolve_failure() {
-    local root="$1"
-    local config="$2"
-    local label="$3"
-    local stdout_path="${fixture_root}/stdout"
-    local stderr_path="${fixture_root}/stderr"
+args = sys.argv[1:]
+command = args[0] if args else ""
+with open(os.environ["MACREMOTEAPP_TEST_HELPER_LOG"], "a", encoding="utf-8") as log:
+    log.write(command + "\n")
+    log.write("\n".join(args) + "\n")
+    log.write("--end-call--\n")
 
-    if macremoteapp_notary_resolve "$root" "$config" >"${stdout_path}" 2>"${stderr_path}"; then
-        echo "Notarization fixture unexpectedly accepted ${label}" >&2
-        exit 1
-    fi
-    if grep -Eq 'SYNTHETIC_PRIVATE_SENTINEL|synthetic fixture only|AuthKey_fixture|fixture-key-id|fixture-issuer|touch ' \
-        "${stdout_path}" "${stderr_path}"; then
-        echo "Notarization fixture leaked a value while rejecting ${label}" >&2
-        exit 1
-    fi
-}
+def option(name):
+    try:
+        return args[args.index(name) + 1]
+    except (ValueError, IndexError):
+        return None
 
-unset MACREMOTEAPP_NOTARY_PROFILE
-macremoteapp_notary_resolve "${fixture_repo}" "${fixture_root}/missing.env"
-[[ "${MACREMOTEAPP_RESOLVED_NOTARY_MODE}" == profile &&
-   "${MACREMOTEAPP_RESOLVED_NOTARY_PROFILE}" == notarytool-profile ]]
+if command == "resolve-auth":
+    if os.environ.get("MACREMOTEAPP_TEST_AUTH_KIND") == "error":
+        print("synthetic configuration failure", file=sys.stderr)
+        raise SystemExit(1)
+    requested = option("--auth") or "auto"
+    if requested == "keychain-profile":
+        selected = "keychain-profile"
+    elif requested == "api-key":
+        selected = "api-key"
+    elif os.environ.get("MACOS_NOTARY_PROFILE") or all(
+        os.environ.get(name)
+        for name in ("MACOS_NOTARY_KEY_PATH", "MACOS_NOTARY_KEY_ID", "MACOS_NOTARY_ISSUER")
+    ):
+        selected = "api-key" if os.environ.get("MACOS_NOTARY_KEY_PATH") else "keychain-profile"
+    else:
+        selected = os.environ.get("MACREMOTEAPP_TEST_AUTH_KIND", "keychain-profile")
+    capture = os.environ.get("MACREMOTEAPP_TEST_AUTH_CAPTURE")
+    if capture:
+        with open(capture, "a", encoding="utf-8") as log:
+            log.write(selected + "\n")
+    print(selected)
+elif command == "resolve-signing-identity":
+    print(option("--identity") or os.environ.get("MACREMOTEAPP_TEST_GLOBAL_IDENTITY", "-"))
+elif command == "submit":
+    print("Apple submission status: Accepted")
+    print("Apple submission ID: 12345678-1234-1234-1234-123456789abc")
+    if os.environ.get("MACREMOTEAPP_TEST_SUBMIT_FAIL") == "1":
+        raise SystemExit(1)
+elif command in ("sign", "staple", "verify"):
+    pass
+else:
+    print("unexpected mock command", file=sys.stderr)
+    raise SystemExit(2)
+MOCK_HELPER
 
-default_home="${fixture_root}/default-home"
-mkdir -p "${default_home}/.config/codex"
-chmod 700 "${default_home}" "${default_home}/.config" "${default_home}/.config/codex"
-write_config "${default_home}/.config/codex/notarization.env" \
-    "MACOS_NOTARY_KEY_PATH=\"${fixture_key}\"" \
-    'MACOS_NOTARY_KEY_ID="fixture-key-id"' \
-    'MACOS_NOTARY_ISSUER="fixture-issuer"'
-(
-    unset MACREMOTEAPP_NOTARY_PROFILE
-    HOME="${default_home}"
-    export HOME
-    macremoteapp_notary_resolve "${fixture_repo}"
-    [[ "${MACREMOTEAPP_RESOLVED_NOTARY_MODE}" == api-key &&
-       "${MACREMOTEAPP_RESOLVED_NOTARY_KEY_PATH}" == "${fixture_key}" ]]
-)
-
-write_config "${fixture_root}/profile.env" 'MACOS_NOTARY_PROFILE="shared-profile-fixture"'
-macremoteapp_notary_resolve "${fixture_repo}" "${fixture_root}/profile.env"
-[[ "${MACREMOTEAPP_RESOLVED_NOTARY_MODE}" == profile &&
-   "${MACREMOTEAPP_RESOLVED_NOTARY_PROFILE}" == shared-profile-fixture ]]
-
-# The explicit project Keychain profile wins without opening an unsafe shared
-# file, matching the existing MACREMOTEAPP_NOTARY_PROFILE contract.
-ln -s "${fixture_root}/missing.env" "${fixture_root}/unsafe-link.env"
-(
-    export MACREMOTEAPP_NOTARY_PROFILE=project-profile-fixture
-    macremoteapp_notary_resolve "${fixture_repo}" "${fixture_root}/unsafe-link.env"
-    [[ "${MACREMOTEAPP_RESOLVED_NOTARY_MODE}" == profile &&
-       "${MACREMOTEAPP_RESOLVED_NOTARY_PROFILE}" == project-profile-fixture &&
-       "${MACREMOTEAPP_NOTARY_PROFILE}" == project-profile-fixture ]]
-)
-
-write_config "${fixture_root}/api.env" \
-    "MACOS_NOTARY_KEY_PATH=\"${fixture_key}\"" \
-    'MACOS_NOTARY_KEY_ID="fixture-key-id"' \
-    'MACOS_NOTARY_ISSUER="fixture-issuer"'
-macremoteapp_notary_resolve "${fixture_repo}" "${fixture_root}/api.env"
-[[ "${MACREMOTEAPP_RESOLVED_NOTARY_MODE}" == api-key &&
-   "${MACREMOTEAPP_RESOLVED_NOTARY_KEY_PATH}" == "${fixture_key}" &&
-   "${MACREMOTEAPP_RESOLVED_NOTARY_KEY_ID}" == fixture-key-id &&
-   "${MACREMOTEAPP_RESOLVED_NOTARY_ISSUER}" == fixture-issuer ]]
-
-(
-    unset MACREMOTEAPP_NOTARY_PROFILE
-    set -a
-    macremoteapp_notary_resolve "${fixture_repo}" "${fixture_root}/api.env"
-    case "$-" in
-        *a*) echo "Notarization resolver left allexport enabled" >&2; exit 1 ;;
-    esac
-    [[ "${MACREMOTEAPP_RESOLVED_NOTARY_MODE}" == api-key ]]
-)
-
-cat >"${fixture_bin}/xcrun" <<'FAKE_XCRUN'
+cat >"${fixture_bin}/codesign" <<'MOCK_CODESIGN'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$@" >"${MACREMOTEAPP_TEST_NOTARY_ARGUMENT_LOG}"
-if [[ "${MACOS_NOTARY_KEY_PATH+x}" == x ||
-      "${MACOS_NOTARY_KEY_ID+x}" == x ||
-      "${MACOS_NOTARY_ISSUER+x}" == x ||
-      "${MACREMOTEAPP_RESOLVED_NOTARY_KEY_ID+x}" == x ]]; then
-    echo "notary credential environment leaked to xcrun" >&2
-    exit 1
+printf '%s\n' "$@" >"${MACREMOTEAPP_TEST_CODESIGN_LOG}"
+MOCK_CODESIGN
+chmod 700 "${fixture_bin}/codesign"
+cat >"${fixture_bin}/lockf" <<'MOCK_LOCKF'
+#!/bin/sh
+if [ "$1" != "-t" ]; then
+    exit 2
 fi
-FAKE_XCRUN
-chmod 700 "${fixture_bin}/xcrun"
-arguments_log="${fixture_root}/xcrun-arguments"
-PATH="${fixture_bin}:${PATH}" MACREMOTEAPP_TEST_NOTARY_ARGUMENT_LOG="${arguments_log}" \
-    macremoteapp_notary_submit "${fixture_root}/Host app.zip" --wait
-grep -Fqx -- "${fixture_key}" "${arguments_log}"
-grep -Fqx -- fixture-key-id "${arguments_log}"
-grep -Fqx -- fixture-issuer "${arguments_log}"
-grep -Fqx -- --wait "${arguments_log}"
-grep -Fqx -- submit "${arguments_log}"
-if grep -Fq -- --keychain-profile "${arguments_log}"; then
-    echo "API-key notarization fixture used the Keychain-profile option" >&2
+shift 3
+exec "$@"
+MOCK_LOCKF
+cat >"${fixture_bin}/bash" <<'MOCK_BASH'
+#!/bin/sh
+case "${1:-}" in
+    */scripts/validate.sh)
+        exit 0
+        ;;
+    */scripts/notarize-device-apps.sh)
+        scripts_dir=$(dirname -- "$1")
+        project_root=$(cd -- "${scripts_dir}/.." && pwd -P)
+        exec /bin/bash -c \
+            'source "$1/notarization-config.sh"; macremoteapp_notary_resolve "$2"' \
+            _ "${scripts_dir}" "${project_root}"
+        ;;
+    *)
+        exec /bin/bash "$@"
+        ;;
+esac
+MOCK_BASH
+chmod 700 "${fixture_bin}/codesign" "${fixture_bin}/lockf" "${fixture_bin}/bash"
+export MACREMOTEAPP_NOTARIZATION_HELPER="${fixture_helper}"
+export MACREMOTEAPP_TEST_HELPER_LOG="${arguments_log}"
+export MACREMOTEAPP_TEST_CODESIGN_LOG="${fixture_root}/codesign-arguments.log"
+export PATH="${fixture_bin}:${PATH}"
+: >"${arguments_log}"
+
+fail() {
+    echo "Notarization adapter fixture failed: $*" >&2
     exit 1
+}
+
+contains() {
+    local needle="$1"
+    local file="$2"
+    grep -Fq -- "$needle" "$file" || fail "expected to find $needle"
+}
+
+unset MACREMOTEAPP_NOTARY_PROFILE
+export MACREMOTEAPP_TEST_AUTH_KIND=api-key
+macremoteapp_notary_resolve "${fixture_repo}"
+[[ "${MACREMOTEAPP_RESOLVED_NOTARY_MODE}" == "api-key" ]] ||
+    fail "legacy API-key auth mode was not selected from helper metadata"
+contains "resolve-auth" "${arguments_log}"
+contains "auto" "${arguments_log}"
+contains "notarytool-profile" "${arguments_log}"
+contains "--project-root" "${arguments_log}"
+contains "${fixture_repo}" "${arguments_log}"
+
+submit_output="${fixture_root}/submit-output.txt"
+macremoteapp_notary_submit "${fixture_root}/Host app.zip" >"${submit_output}"
+contains "Apple submission status: Accepted" "${submit_output}"
+contains "Apple submission ID: 12345678-1234-1234-1234-123456789abc" "${submit_output}"
+contains "api-key" "${arguments_log}"
+contains "--authorized" "${arguments_log}"
+contains "--wait" "${arguments_log}"
+contains "--project-root" "${arguments_log}"
+contains "${fixture_repo}" "${arguments_log}"
+if grep -Eq 'SYNTHETIC_PRIVATE_SENTINEL|fixture-key-id|fixture-issuer|AuthKey_fixture' \
+    "${arguments_log}" "${submit_output}"; then
+    fail "notarization credential data appeared in helper arguments or output"
 fi
 
-MACREMOTEAPP_NOTARY_PROFILE=explicit-profile-fixture \
-    macremoteapp_notary_resolve "${fixture_repo}" "${fixture_root}/api.env"
-[[ "${MACREMOTEAPP_RESOLVED_NOTARY_MODE}" == profile &&
-   "${MACREMOTEAPP_RESOLVED_NOTARY_PROFILE}" == explicit-profile-fixture ]]
-PATH="${fixture_bin}:${PATH}" MACREMOTEAPP_TEST_NOTARY_ARGUMENT_LOG="${arguments_log}" \
-    macremoteapp_notary_submit "${fixture_root}/Viewer.dmg" --wait
-grep -Fqx -- --keychain-profile "${arguments_log}"
-grep -Fqx -- explicit-profile-fixture "${arguments_log}"
-if grep -Fqx -- --key "${arguments_log}"; then
-    echo "Explicit Keychain profile fixture also selected API-key authentication" >&2
-    exit 1
+before_submit_count="$(grep -xc 'submit' "${arguments_log}" || true)"
+if MACREMOTEAPP_TEST_SUBMIT_FAIL=1 \
+    macremoteapp_notary_submit "${fixture_root}/Host app.zip" >/dev/null 2>&1; then
+    fail "mock submission failure was accepted"
 fi
+after_submit_count="$(grep -xc 'submit' "${arguments_log}" || true)"
+[[ "$after_submit_count" -eq $((before_submit_count + 2)) ]] ||
+    fail "submission failure triggered a retry"
+
+export MACREMOTEAPP_NOTARY_PROFILE=project-profile-fixture
+export MACREMOTEAPP_TEST_AUTH_KIND=keychain-profile
+macremoteapp_notary_resolve "${fixture_repo}"
+[[ "${MACREMOTEAPP_RESOLVED_NOTARY_MODE}" == "profile" &&
+   "${MACREMOTEAPP_RESOLVED_NOTARY_PROFILE}" == "project-profile-fixture" ]] ||
+    fail "project Keychain-profile override was not preserved"
+macremoteapp_notary_submit "${fixture_root}/Viewer.dmg" >/dev/null
+contains "project-profile-fixture" "${arguments_log}"
+contains "keychain-profile" "${arguments_log}"
+
+MACREMOTEAPP_NOTARY_PROFILE="" macremoteapp_notary_resolve "${fixture_repo}"
+[[ "${MACREMOTEAPP_RESOLVED_NOTARY_PROFILE}" == "notarytool-profile" ]] ||
+    fail "empty project profile did not preserve the notarytool-profile fallback"
 unset MACREMOTEAPP_NOTARY_PROFILE
 
-write_config "${fixture_root}/partial.env" \
-    'MACOS_NOTARY_KEY_ID="fixture-key-id"' \
-    'MACOS_NOTARY_ISSUER="fixture-issuer"'
-expect_resolve_failure "${fixture_repo}" "${fixture_root}/partial.env" "partial API-key configuration"
+export MACREMOTEAPP_TEST_GLOBAL_IDENTITY='Developer ID Application: Fixture (TEAMID)'
+signing_identity="$(macremoteapp_resolve_signing_identity -)"
+[[ "$signing_identity" == 'Developer ID Application: Fixture (TEAMID)' ]] ||
+    fail "shared signing identity was not resolved"
+contains "resolve-signing-identity" "${arguments_log}"
+contains "--default-identity" "${arguments_log}"
+contains "-" "${arguments_log}"
 
-cp "${fixture_root}/api.env" "${fixture_root}/insecure.env"
-chmod 644 "${fixture_root}/insecure.env"
-expect_resolve_failure "${fixture_repo}" "${fixture_root}/insecure.env" "insecure shared-file permissions"
+export MACREMOTEAPP_SIGNING_IDENTITY='Developer ID Application: Project (TEAMID)'
+signing_identity="$(macremoteapp_resolve_signing_identity -)"
+[[ "$signing_identity" == 'Developer ID Application: Project (TEAMID)' ]] ||
+    fail "project signing identity override was not preserved"
+contains 'Developer ID Application: Project (TEAMID)' "${arguments_log}"
 
-ln -s "${fixture_root}/api.env" "${fixture_root}/config-link.env"
-expect_resolve_failure "${fixture_repo}" "${fixture_root}/config-link.env" "symlinked shared configuration"
+fixture_app="${fixture_root}/MacRemoteApp-Host.app"
+fixture_dmg="${fixture_root}/MacRemoteApp-Host.dmg"
+mkdir -p "${fixture_app}"
+: >"${fixture_dmg}"
+macremoteapp_sign_app "${fixture_app}" "$signing_identity"
+contains "sign" "${arguments_log}"
+contains "--authorized" "${arguments_log}"
+macremoteapp_notary_staple "${fixture_app}"
+macremoteapp_notary_verify "${fixture_app}"
+macremoteapp_notary_verify "${fixture_dmg}"
+contains "staple" "${arguments_log}"
+contains "verify" "${arguments_log}"
 
-inside_key="${fixture_repo}/AuthKey_fixture.p8"
-cp "${fixture_key}" "${inside_key}"
-chmod 600 "${inside_key}"
-write_config "${fixture_root}/inside-key.env" \
-    "MACOS_NOTARY_KEY_PATH=\"${inside_key}\"" \
-    'MACOS_NOTARY_KEY_ID="fixture-key-id"' \
-    'MACOS_NOTARY_ISSUER="fixture-issuer"'
-expect_resolve_failure "${fixture_repo}" "${fixture_root}/inside-key.env" "a private key inside the repository"
+before_sign_count="$(grep -xc 'resolve-signing-identity' "${arguments_log}" || true)"
+MACREMOTEAPP_SIGNING_IDENTITY=- macremoteapp_resolve_signing_identity - >/dev/null
+after_sign_count="$(grep -xc 'resolve-signing-identity' "${arguments_log}" || true)"
+[[ "$after_sign_count" == "$before_sign_count" ]] ||
+    fail "explicit ad-hoc identity unexpectedly read shared signing configuration"
+MACREMOTEAPP_SIGNING_IDENTITY=- macremoteapp_sign_app "${fixture_app}" -
+contains "--timestamp=none" "${MACREMOTEAPP_TEST_CODESIGN_LOG}"
 
-chmod 644 "${fixture_key}"
-expect_resolve_failure "${fixture_repo}" "${fixture_root}/api.env" "non-private API key permissions"
-chmod 600 "${fixture_key}"
+for release_script in notarize-device-apps.sh validate-notarized-release.sh; do
+    script_path="${script_dir}/${release_script}"
+    grep -Fq 'macremoteapp_notary_verify "${dmg_path}"' "$script_path" ||
+        fail "${release_script} does not verify DMGs through the shared helper"
+    if grep -Fq -- '--type install' "$script_path"; then
+        fail "${release_script} still uses the incorrect DMG Gatekeeper assessment type"
+    fi
+done
 
-key_link="${fixture_external}/AuthKey_fixture-link.p8"
-ln -s "${fixture_key}" "${key_link}"
-write_config "${fixture_root}/key-link.env" \
-    "MACOS_NOTARY_KEY_PATH=\"${key_link}\"" \
-    'MACOS_NOTARY_KEY_ID="fixture-key-id"' \
-    'MACOS_NOTARY_ISSUER="fixture-issuer"'
-expect_resolve_failure "${fixture_repo}" "${fixture_root}/key-link.env" "a symlinked API key"
+for local_packaging_script in package-device-apps.sh create-device-dmgs.sh; do
+    script_path="${script_dir}/${local_packaging_script}"
+    if grep -Fq 'macremoteapp_resolve_signing_identity' "$script_path"; then
+        fail "${local_packaging_script} unexpectedly resolves a global signing identity for local packaging"
+    fi
+    grep -Fq 'signing_identity="${MACREMOTEAPP_SIGNING_IDENTITY:-}"' "$script_path" ||
+        fail "${local_packaging_script} does not preserve project-only local signing selection"
+done
 
-write_config "${fixture_root}/unsupported.env" \
-    "MACOS_NOTARY_KEY_PATH=\"${fixture_key}\"" \
-    'MACOS_NOTARY_KEY_ID="fixture-key-id"' \
-    'MACOS_NOTARY_ISSUER="fixture-issuer"' \
-    'UNKNOWN_FIXTURE="SYNTHETIC_PRIVATE_SENTINEL"'
-expect_resolve_failure "${fixture_repo}" "${fixture_root}/unsupported.env" "an unknown active variable"
-
-marker_path="${fixture_root}/must-not-exist"
-write_config "${fixture_root}/shell-code.env" \
-    "MACOS_NOTARY_KEY_PATH=\"${fixture_key}\"" \
-    'MACOS_NOTARY_KEY_ID="fixture-key-id"' \
-    'MACOS_NOTARY_ISSUER="fixture-issuer"' \
-    "\$(touch '${marker_path}')"
-expect_resolve_failure "${fixture_repo}" "${fixture_root}/shell-code.env" "active shell syntax"
-test ! -e "${marker_path}"
-
-# Both release entry points resolve auth before they run CI/build work; only
-# the lower-level notarizer invokes the shared submit adapter.
-grep -Fq 'macremoteapp_notary_resolve' "${script_dir}/notarize-device-apps.sh"
-grep -Fq 'macremoteapp_notary_resolve' "${script_dir}/release-notarized.sh"
-grep -Fq 'macremoteapp_notary_submit' "${script_dir}/notarize-device-apps.sh"
-grep -Fq 'scripts/notarization-config.sh' "${script_dir}/validate.sh"
-if grep -Eq '^[[:space:]]*MACREMOTEAPP_NOTARY_PROFILE=' "${script_dir}/release-notarized.sh"; then
-    echo "Release wrapper overwrites an inherited project Keychain profile" >&2
-    exit 1
+export MACREMOTEAPP_TEST_AUTH_KIND=error
+release_output="${fixture_root}/release-preflight.txt"
+if bash "${script_dir}/release-notarized.sh" rc >"${release_output}" 2>&1; then
+    fail "release wrapper accepted helper configuration failure"
 fi
-release_preflight_line="$(grep -n 'macremoteapp_notary_resolve' "${script_dir}/release-notarized.sh" | head -1 | cut -d: -f1)"
-release_artifact_line="$(grep -n 'mkdir -p -- "${artifact_root}"' "${script_dir}/release-notarized.sh" | head -1 | cut -d: -f1)"
-if [[ -z "${release_preflight_line}" || -z "${release_artifact_line}" ||
-      "${release_preflight_line}" -ge "${release_artifact_line}" ]]; then
-    echo "Release wrapper must resolve notarization configuration before creating release output" >&2
-    exit 1
-fi
-
-# Exercise the real release wrapper's preflight with a fixture HOME. It must
-# reject an insecure config before entering CI or touching release channels.
-release_home="${fixture_root}/release-home"
-mkdir -p "${release_home}/.config/codex"
-chmod 700 "${release_home}" "${release_home}/.config" "${release_home}/.config/codex"
-cp "${fixture_root}/api.env" "${release_home}/.config/codex/notarization.env"
-chmod 644 "${release_home}/.config/codex/notarization.env"
-release_output="${fixture_root}/release-preflight-output"
-if (
-    unset MACREMOTEAPP_NOTARY_PROFILE
-    HOME="${release_home}"
-    export HOME
-    bash "${script_dir}/release-notarized.sh" rc
-) >"${release_output}" 2>&1; then
-    echo "Release wrapper accepted an insecure shared config" >&2
-    exit 1
-fi
-grep -Fq 'owner-only mode 600' "${release_output}"
 if grep -Fq 'Running deterministic CI before notarization' "${release_output}"; then
-    echo "Release wrapper entered CI before rejecting the shared config" >&2
-    exit 1
+    fail "release wrapper entered CI before resolving helper authentication"
 fi
 
-# Exercise the owner gate when the test process can create a file belonging to
-# another uid. This is skipped on ordinary unprivileged developer accounts.
-wrong_owner_config="${fixture_root}/wrong-owner.env"
-cp "${fixture_root}/profile.env" "${wrong_owner_config}"
-chmod 600 "${wrong_owner_config}"
-current_uid="$(id -u)"
-other_uid=0
-if [[ "${current_uid}" == 0 ]]; then
-    other_uid=501
-fi
-if chown "${other_uid}" "${wrong_owner_config}" 2>/dev/null && [[ ! -O "${wrong_owner_config}" ]]; then
-    expect_resolve_failure "${fixture_repo}" "${wrong_owner_config}" "a config owned by another user"
+# Run the release wrapper in an isolated Git fixture. The mock low-level
+# notarizer sources the same adapter and resolves auth in its child process;
+# generic shared API settings must survive that delegation unchanged.
+wrapper_root="${fixture_root}/release-wrapper-project"
+wrapper_scripts="${wrapper_root}/scripts"
+mkdir -p "${wrapper_scripts}"
+git -C "${wrapper_root}" init -q
+cp "${script_dir}/release-notarized.sh" \
+   "${script_dir}/notarize-device-apps.sh" \
+   "${script_dir}/notarization-config.sh" \
+   "${script_dir}/artifact-naming.sh" \
+   "${script_dir}/ensure-local-build-exclude.sh" \
+   "${wrapper_scripts}/"
+auth_capture="${fixture_root}/delegated-auth-modes.txt"
+: >"${auth_capture}"
+unset MACREMOTEAPP_TEST_AUTH_KIND MACREMOTEAPP_NOTARY_PROFILE
+export MACREMOTEAPP_TEST_AUTH_CAPTURE="${auth_capture}"
+export MACOS_NOTARY_KEY_PATH="${fixture_root}/synthetic-key.p8"
+export MACOS_NOTARY_KEY_ID="fixture-key-id"
+export MACOS_NOTARY_ISSUER="fixture-issuer"
+MACREMOTEAPP_NOTARIZATION_HELPER="${fixture_helper}" \
+    bash "${wrapper_scripts}/release-notarized.sh" rc \
+    >"${fixture_root}/release-wrapper-output.txt" 2>&1 ||
+    fail "mock release wrapper did not complete its isolated delegation"
+if [[ ! -s "${auth_capture}" ]] || grep -Evx 'api-key' "${auth_capture}" >/dev/null; then
+    fail "release wrapper and low-level notarizer did not resolve the same API-key mode"
 fi
 
-echo "Notarization configuration fixtures passed"
+echo "Shared notarization helper adapter fixtures passed"

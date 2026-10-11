@@ -11,6 +11,12 @@ selected window, and must never leave an OS key or button pressed when
 authorization, focus, permission, or selection changes. The resulting
 admission and cleanup state machine is documented in
 [Host input admission and cleanup](../ARCHITECTURE.md#host-input-admission-and-cleanup).
+Foreground eligibility is a local fact: the selected process must be the
+active workspace process, and the exact selected target must remain a valid
+layer-0 window. The top regular layer-0 WindowServer window must belong to the
+selected process and bundle, though it may have a different window identifier
+for an app-owned sheet or popover. Unresolved layer-0 windows that may overlap
+remain blockers.
 
 ## Decision
 
@@ -25,6 +31,14 @@ admission and cleanup state machine is documented in
   secure-input inspection, eligible foreground focus, and the negotiated
   mouse/keyboard capability. Commands retain the selected target identity so
   the OS adapter can repeat the check immediately before posting.
+- The Host may request bounded cooperative AppKit activation only after an
+  explicit legacy window selection and only on macOS 14 or later. It first
+  activates itself and confirms it is the frontmost process before yielding
+  to the selected app. Failed confirmation or unsupported cooperative APIs
+  leave input fail-closed and instruct the Host user to click or reactivate
+  MacRemoteApp Host. Activation is not authorization; the active PID and
+  layer-0 foreground checks still gate every event. Negotiated P6 process
+  targeting never activates the selected app.
 - Normalized coordinates map to the selected window's current global screen
   bounds. Only typed CoreGraphics commands are accepted; arbitrary `CGEvent`
   archives, background activation, locked-screen control, and secure-input

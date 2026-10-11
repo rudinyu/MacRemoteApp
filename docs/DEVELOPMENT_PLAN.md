@@ -335,19 +335,34 @@ has not been run automatically.
 - Implement Host-side InputCore mapping and the CoreGraphics/Accessibility
   adapter.
 - Require current session authorization, selected-window generation, required
-  permission, and foreground/focus eligibility before each injection.
+  permission, and foreground/focus eligibility before each legacy injection.
+  The exact selected target must remain a valid layer-0 window. Foreground
+  eligibility requires an active-PID match and a top regular layer-0
+  WindowServer window owned by the selected PID and bundle; its identifier
+  may differ from the selected window, allowing app-owned sheets or popovers.
+  Potentially overlapping unresolved layer-0 windows remain blockers.
+- Limit cooperative foreground activation to explicit legacy window
+  selection on macOS 14 or later. Host must confirm it is frontmost before
+  yielding activation to the target. If that confirmation fails or the API is
+  unavailable, input stays fail-closed and the Viewer asks the Host user to
+  click or reactivate MacRemoteApp Host. Activation does not authorize input,
+  and the separately accepted P6 process-target path never activates the
+  selected app.
 - Add explicit failure states and stop-input behavior for window/focus/
   permission changes.
 
 ### Explicit non-scope
 
-No background/unfocused control, locked-screen control, secure-input bypass,
-system authentication-dialog automation, or privilege escalation.
+No ungranted background/unfocused control beyond the separately accepted P6
+contract, locked-screen control, secure-input bypass, system
+authentication-dialog automation, or privilege escalation.
 
 ### Exit criteria
 
 - Authorized pointer, button, scroll, keyboard, and modifier events affect
-  only the selected eligible foreground window.
+  only the selected target while its app has eligible foreground state;
+  foreground eligibility includes active-process identity and the layer-0
+  window classifier.
 - Losing permission, focus, window identity, or session state disables/rejects
   input immediately and visibly.
 - No arbitrary event archive or unvalidated remote event reaches the OS API.

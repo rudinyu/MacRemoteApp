@@ -6,11 +6,18 @@ M9 adds a repeatable release audit, hardened-runtime checks, development-command
 gating, negative-test coverage, and this residual-risk record. It adds no V1
 product feature. The repository also provides
 `scripts/notarize-device-apps.sh` for the operator-run Developer ID and
-notarization flow. The packaging flow produces signed app bundles,
-role-specific DMGs, and role-specific install/uninstall command files. The
-Keychain profile name is configurable through `MACREMOTEAPP_NOTARY_PROFILE`
-and defaults to `notarytool-profile`; profile credentials never enter the
-repository or validation logs. Public validation packages are isolated under
+notarization flow. The release scripts use the shared
+`~/.codex/skills/macos-notarization-release/scripts/macos_notarization.py`
+helper for app signing, authentication selection, submission, stapling, and
+verification; this repository retains ownership of builds, packaging, channel
+selection, and promotion. `MACREMOTEAPP_SIGNING_IDENTITY` and
+`MACREMOTEAPP_NOTARY_PROFILE` remain project overrides. Formal release entry
+points resolve unset signing identities and notarization authentication from
+the shared Codex configuration; package-only local builds remain ad-hoc unless
+a project identity is explicitly supplied. The Keychain profile defaults to
+`notarytool-profile` when no shared profile or complete API-key configuration
+is available. Credentials and private-key configuration stay outside the
+repository and are not printed in validation logs. Public validation packages are isolated under
 `.build/public-validation/` and only that cache is removed after a successful run;
 they are never treated as distributable release output. The complete local
 release gate is `scripts/release-notarized.sh`: it acquires the release lock and
@@ -117,16 +124,21 @@ notarized release without rebuilding or replacing it.
   the same role identifiers share settings, identity, and approvals, so resolve
   production-state preservation before any reset. Do not print Keychain values,
   edit TCC databases, or remove unrelated release channels/source.
-- `scripts/notarize-device-apps.sh` requires a Developer ID identity, submits
-  both app archives and both DMGs with `xcrun notarytool --keychain-profile`,
-  staples the tickets, validates them, and refreshes the distributable
-  archives. It refuses direct writes to `build/beta`, `build/rc`, or
+- `scripts/notarize-device-apps.sh` requires a Developer ID identity, resolves
+  either shared Keychain-profile or legacy API-key authentication locally
+  before building, then submits each app archive and DMG once through the
+  shared helper with explicit authorization and waits for Apple's result. It
+  never retries a failed submission or changes authentication modes after an
+  upload attempt. It staples tickets, verifies app and DMG Gatekeeper/ticket
+  state, and refreshes distributable archives. DMGs are assessed as openable
+  disks using `spctl --type open --context context:primary-signature`. It
+  refuses direct writes to `build/beta`, `build/rc`, or
   `build/release`; those channels can only be promoted through the
   lock-protected `scripts/release-notarized.sh` flow. It does not create,
   print, or store Keychain credentials.
 - `scripts/check-notary-profile.sh` is an optional history-based Keychain
-  diagnostic. It is not a release gate: the actual `notarytool submit`
-  operation used by the release flow is the authoritative profile check, and
+  diagnostic. It is not a release gate: the actual submission operation used
+  by the release flow is the authoritative credential check, and
   a Codex runner may reject the separate `history` operation even when the
   submit path can read the profile. A profile that works in a normal Terminal
   session may still have different visibility for other Keychain operations;

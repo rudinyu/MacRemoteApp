@@ -226,6 +226,44 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         )
     }
 
+    func testInputStatusDistinguishesBackgroundReadyFromForegroundReady() {
+        XCTAssertEqual(
+            ViewerInputStatusPresentation.readyStatus(
+                focusEligible: true,
+                processTargetEligible: nil
+            ),
+            "Connected — input ready"
+        )
+        XCTAssertEqual(
+            ViewerInputStatusPresentation.readyStatus(
+                focusEligible: false,
+                processTargetEligible: true
+            ),
+            "Connected — Background control ready — app not active"
+        )
+        let unsafeTargetStatus = ViewerInputStatusPresentation.readyStatus(
+            focusEligible: false,
+            processTargetEligible: false
+        )
+        XCTAssertNotEqual(unsafeTargetStatus, "Connected — input ready")
+        XCTAssertTrue(unsafeTargetStatus.localizedCaseInsensitiveContains("not active"))
+    }
+
+    func testForegroundActivationFailureAsksHostUserToReactivateHost() {
+        let status = ViewerInputStatusPresentation.hostFocusUnavailableStatus
+
+        XCTAssertTrue(status.localizedCaseInsensitiveContains("click or reactivate"))
+        XCTAssertTrue(status.localizedCaseInsensitiveContains("Host"))
+        XCTAssertNotEqual(status, "Connected — input ready")
+        XCTAssertEqual(
+            ViewerInputStatusPresentation.readyStatus(
+                focusEligible: false,
+                processTargetEligible: true
+            ),
+            "Connected — Background control ready — app not active"
+        )
+    }
+
     func testDrawableCallbackFromPreviousPresentationLifetimeIsRejected() {
         let lifetime = ViewerPresentationLifetime()
         let oldDrawableToken = lifetime.token

@@ -21,9 +21,11 @@ events from the same aspect-fit surface. The Viewer can request a safe
 same-session window replacement; the Host refreshes the window catalog while
 connected and activates the explicitly selected regular application. If the
 Host already has Accessibility trust, it may request a public AXRaise for the
-exact selected window after an unambiguous geometry match. Input is still
-accepted only after a fresh Host-side exact-window foreground and PostEvent
-check pass. The Viewer visibly distinguishes Connecting, Connected, and
+exact selected window after an unambiguous geometry match. Input is accepted
+only while the exact selected target remains live, its PID is the active
+workspace app, and the top regular layer-0 window belongs to that app; that
+frontmost child may have a different window ID. A fresh Host-side PostEvent
+check must also pass. The Viewer visibly distinguishes Connecting, Connected, and
 Reconnecting, and disables Connect while active. The Host's default Bonjour
 name is its short macOS hostname, while the Viewer sends its hostname as
 display-only pairing metadata. The Host remains resident when Screen
@@ -54,13 +56,17 @@ is not physical acceptance.
 
 ## Current candidate and manual acceptance
 
-The current source candidate is `0.2.1010`; the retained notarized RC is
-`0.2.1009`. The latter does not contain the
-[P6 process-control extension](P6_BACKGROUND_CONTROL.md). On 2026-10-08 the
-operator elected to perform physical acceptance manually. Every physical row
-below remains unchecked until the operator records evidence for the exact
-installed build. The canonical local CI for `0.2.1010` passed; its temporary
-ad-hoc packages are not a new notarized candidate.
+The working source and retained notarized RC share version metadata
+`0.2.1010`, but are different code states. The current uncommitted M6/M10
+runtime follow-ups passed canonical local CI on 2026-10-11; they are not in the
+retained RC built from source commit
+`1e422da8799f183487276e2295008c6ebe499ec8`. No new RC or release was created.
+The authorized signing, notarization, staple, and release audit evidence below
+applies to that retained RC; see the
+[release evidence](STATUS.md#021010-notarized-rc). On 2026-10-08 the operator
+elected to perform physical acceptance manually. Every physical row below
+remains unchecked until the operator records evidence for the exact installed
+build.
 
 The runtime description above describes the V1 foreground-only baseline.
 When both `0.2.1010` peers negotiate P6, selecting a window does not activate
@@ -107,8 +113,8 @@ foreground-only behavior. Record P6 evidence separately from V1 M10 evidence.
    profile or the existing external API-key reference; see the
    [configuration contract](../README.md#physical-m2-test).
    Do not place credential material or signing configuration in the repository.
-   A new Apple submission requires release authorization; none was performed
-   for the source-only `0.2.1010` completion.
+   A new Apple submission requires release authorization. The `0.2.1010` RC
+   was submitted and accepted under the operator's explicit DMG request.
    If a separate read-only profile diagnostic is useful, run it in the same
    logged-in macOS session that will run the release command:
 
@@ -150,7 +156,8 @@ foreground-only behavior. Record P6 evidence separately from V1 M10 evidence.
    requests PostEvent access from the Host bundle. Accessibility may also be
    requested as an optional secure-input/exact-window-raise enhancement. If
    it is unavailable, the Host may still activate the app, but input remains
-   blocked until the selected window is actually foreground. Until PostEvent
+   blocked until the selected PID is active and a regular layer-0 window from
+   that app is frontmost; the exact selected target must remain live. Until PostEvent
    is authorized, the Host remains view-only and does not authorize
    mouse/keyboard capabilities.
    The capability may still appear in the negotiation offer; authorization is
@@ -205,7 +212,7 @@ from the production bundle's first-pairing flow.
 | Host display name | Host `Rename Host…` changes the Bonjour discovery name and the listener restarts without changing the TLS identity | ☐ |
 | Default/display device names | Host defaults to its macOS short hostname; Viewer pairing UI and trust metadata use the Viewer hostname; names never affect authentication | ☐ |
 | Window selection | Exactly one eligible window is selected; legacy control requires foreground eligibility, while negotiated P6 requires separate local approval and a safe process target | ☐ |
-| Same-session app/window switching | Start streaming one window and replace it without reconnecting. For legacy peers verify exact-window foreground checks; for P6 verify no app activation, current generation/target checks, and the disclosed multi-window process-target limit. Missing required permission or inspection keeps input blocked | ☐ |
+| Same-session app/window switching | Start streaming one window and replace it without reconnecting. For legacy peers verify exact selected-target identity remains checked while foreground eligibility accepts a frontmost regular layer-0 child window from the same app; for P6 verify no app activation, current generation/target checks, and the disclosed multi-window process-target limit. Missing required permission or inspection keeps input blocked | ☐ |
 | P6 local control | Deny initial control and confirm view-only operation; allow locally, reconnect using the saved identity, pause/resume with held input, and revoke. Video remains available, stale input is rejected, and a revoked grant needs fresh approval | ☐ |
 | P6 background safety | On a disposable app verify background mouse/keyboard without activation, manual IME/source matching, target closure, secure input, screen lock, and PostEvent/AX loss. Record app-specific event routing and multi-window limitations separately from V1 acceptance | ☐ |
 | Viewer connection state | Connect changes to disabled `Connected`; disconnect shows `Reconnecting…` during retry and re-enables Connect only when disconnected | ☐ |

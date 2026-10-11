@@ -26,6 +26,24 @@ enum ViewerProcessControlReadiness {
     }
 }
 
+enum ViewerInputStatusPresentation {
+    static let hostFocusUnavailableStatus =
+        "Connected — click or reactivate MacRemoteApp Host, then select the window again"
+
+    static func readyStatus(
+        focusEligible: Bool,
+        processTargetEligible: Bool?
+    ) -> String {
+        if focusEligible {
+            return "Connected — input ready"
+        }
+        if processTargetEligible == true {
+            return "Connected — Background control ready — app not active"
+        }
+        return "Connected — the selected app is not active on the Host"
+    }
+}
+
 private let viewerApplicationMetadata = ApplicationMetadata(bundle: .main)
 private let viewerProtocolVersion = "\(ProtocolVersion.current.major).\(ProtocolVersion.current.minor)"
 
@@ -1850,11 +1868,16 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
         switch readiness {
         case .ready:
-            setStatus("Connected — input ready")
+            setStatus(
+                ViewerInputStatusPresentation.readyStatus(
+                    focusEligible: hostInputFocusEligible,
+                    processTargetEligible: hostProcessTargetEligible
+                )
+            )
         case .hostPermissionUnavailable:
             setStatus("Connected — enable PostEvent permission for MacRemoteApp Host")
         case .hostFocusUnavailable:
-            setStatus("Connected — the selected app must be foreground on the Host")
+            setStatus(ViewerInputStatusPresentation.hostFocusUnavailableStatus)
         case .hostStateUnavailable:
             setStatus("Connected — waiting for Host input status")
         case .hostControlNegotiating:

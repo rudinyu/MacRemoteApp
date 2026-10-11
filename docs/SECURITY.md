@@ -14,8 +14,22 @@ For P6, normal input requires current local admission, a live matching target
 and generation, valid geometry, PostEvent permission, a safe console/lock
 state, and the existing secure-input checks. The foreground signal remains
 truthful but does not by itself veto an explicitly granted safe process target.
-The target app is not activated. Process posting cannot guarantee which
-window within the app receives an event; that limit is disclosed before grant.
+Foreground eligibility also requires the selected PID to match
+`NSWorkspace.frontmostApplication.processIdentifier`. The exact selected
+target must still exist as a valid layer-0 window owned by the selected PID
+and bundle. The top regular layer-0 WindowServer window must belong to that
+same PID and bundle, but may have a different window identifier, as with an
+app-owned sheet or popover. Only layer-0 windows participate; nonzero layers
+are excluded, and an overlapping unknown-owner layer-0 window or window with
+missing layer metadata is an unresolved blocker. A bounded cooperative
+AppKit activation request is allowed only for an explicit legacy window
+selection. The Host must first confirm that it is frontmost before yielding
+activation to the target; if that cannot be confirmed, or cooperative
+activation is unavailable, input stays fail-closed and the Viewer tells the
+Host user to click or reactivate MacRemoteApp Host. The request does not
+authorize input, and P6 process targeting never activates its selected app.
+Process posting cannot guarantee which window within the app receives an
+event; that limit is disclosed before grant.
 Pausing/revoking closes input admission and invalidates queued work without
 revoking video. A separate control generation is echoed on every negotiated
 P6 input/source request; missing or stale generations are rejected even if

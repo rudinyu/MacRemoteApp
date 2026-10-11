@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
+source "${script_dir}/notarization-config.sh"
 source "${script_dir}/artifact-naming.sh"
 
 if (( $# > 1 )); then
@@ -11,10 +12,6 @@ if (( $# > 1 )); then
 fi
 
 release_root="${1:-${repo_root}/build/testing}"
-signing_identity="${MACREMOTEAPP_SIGNING_IDENTITY:-}"
-if [[ -z "${signing_identity}" ]]; then
-    signing_identity="-"
-fi
 
 if [[ "${release_root}" != /* ]]; then
     release_root="${repo_root}/${release_root}"
@@ -38,6 +35,10 @@ case "${release_root}" in
         exit 2
         ;;
 esac
+signing_identity="${MACREMOTEAPP_SIGNING_IDENTITY:-}"
+if [[ -z "${signing_identity}" ]]; then
+    signing_identity="-"
+fi
 require_developer_id=0
 if [[ "${MACREMOTEAPP_REQUIRE_DEVELOPER_ID:-0}" == "1" ]]; then
     require_developer_id=1
@@ -139,15 +140,10 @@ create_applications_drop_target() {
             -c "Add :NSAppleEventsUsageDescription string ${helper_usage_description}" \
             "${output_path}/Contents/Info.plist"
 
-    if [[ "${signing_identity}" == "-" ]]; then
-        codesign --force --deep --options runtime \
-            --entitlements "${script_dir}/dmg-applications-helper.entitlements" \
-            --sign - --timestamp=none "${output_path}"
-    else
-        codesign --force --deep --options runtime \
-            --entitlements "${script_dir}/dmg-applications-helper.entitlements" \
-            --sign "${signing_identity}" --timestamp "${output_path}"
-    fi
+    macremoteapp_sign_app \
+        "${output_path}" \
+        "${signing_identity}" \
+        "${script_dir}/dmg-applications-helper.entitlements"
     codesign --verify --deep --strict "${output_path}"
     local signature_info
     signature_info="$(codesign --display --verbose=4 "${output_path}" 2>&1)"

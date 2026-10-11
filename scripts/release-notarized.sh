@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-unset MACOS_NOTARY_PROFILE MACOS_NOTARY_KEY_PATH MACOS_NOTARY_KEY_ID MACOS_NOTARY_ISSUER
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
@@ -21,6 +20,7 @@ case "${artifact_channel}" in
 esac
 
 macremoteapp_notary_resolve "${repo_root}"
+signing_identity="$(macremoteapp_resolve_signing_identity -)"
 
 artifact_root="${repo_root}/build"
 if [[ -L "${artifact_root}" || ( -e "${artifact_root}" && ! -d "${artifact_root}" ) ]]; then
@@ -68,7 +68,6 @@ for channel in testing beta rc release; do
 done
 default_release_root="${repo_root}/build/${artifact_channel}"
 release_root="${MACREMOTEAPP_RELEASE_ROOT:-${default_release_root}}"
-signing_identity="${MACREMOTEAPP_SIGNING_IDENTITY:-}"
 
 if [[ "${release_root}" != /* ]]; then
     release_root="${repo_root}/${release_root}"
@@ -202,7 +201,13 @@ if [[ -e "${repo_root}/.build" ]]; then
 fi
 
 echo "Running deterministic CI before notarization"
-MACREMOTEAPP_ARTIFACT_CHANNEL=testing bash "${script_dir}/validate.sh"
+env \
+    -u MACOS_NOTARY_PROFILE \
+    -u MACOS_NOTARY_KEY_PATH \
+    -u MACOS_NOTARY_KEY_ID \
+    -u MACOS_NOTARY_ISSUER \
+    MACREMOTEAPP_ARTIFACT_CHANNEL=testing \
+    bash "${script_dir}/validate.sh"
 
 if [[ -d "${repo_root}/.build" && ! -L "${repo_root}/.build" ]]; then
     rm -rf -- "${repo_root}/.build"
@@ -211,10 +216,11 @@ fi
 
 staging_release_root="$(mktemp -d "${staging_parent}/MacRemoteApp-${artifact_channel}.staging.XXXXXX")"
 echo "Building, notarizing, stapling, and validating ${artifact_channel} channel artifacts"
-MACREMOTEAPP_ARTIFACT_CHANNEL="${artifact_channel}" \
-MACREMOTEAPP_RELEASE_ROOT="${staging_release_root}" \
-MACREMOTEAPP_RELEASE_BUILD_ROOT="${repo_root}/.build/notarized-release-build" \
-MACREMOTEAPP_SIGNING_IDENTITY="${signing_identity}" \
+env \
+    MACREMOTEAPP_ARTIFACT_CHANNEL="${artifact_channel}" \
+    MACREMOTEAPP_RELEASE_ROOT="${staging_release_root}" \
+    MACREMOTEAPP_RELEASE_BUILD_ROOT="${repo_root}/.build/notarized-release-build" \
+    MACREMOTEAPP_SIGNING_IDENTITY="${signing_identity}" \
     bash "${script_dir}/notarize-device-apps.sh"
 
 echo "Promoting validated notarized artifacts into ${release_root}"

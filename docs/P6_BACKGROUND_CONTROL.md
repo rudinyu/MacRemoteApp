@@ -27,9 +27,18 @@ The optional `backgroundControl` capability uses protocol ID `0x000A`;
 `keyframeRequest`, `receiverReport`, and `inputSourceSync` retain IDs `0x0007`,
 `0x0008`, and `0x0009`. Session status carries a separate Host control state and
 process-target safety signal. The existing `focusEligible` field remains a
-truthful foreground signal: it may be false while an explicitly granted and
-otherwise safe process target is ready. Viewer input readiness uses the P6
-control state and process-target signal, not foreground eligibility.
+truthful foreground signal: it is true only when the selected process is the
+active `NSWorkspace.frontmostApplication`, the exact selected target remains
+a valid layer-0 window, and the top regular layer-0 WindowServer window
+belongs to the selected PID and bundle. That top window may have a different
+identifier, as with an app-owned sheet or popover. Only layer-0 windows
+participate; nonzero-layer windows are excluded. An overlapping layer-0
+window with an unresolved owner, or a window whose layer metadata is
+missing, keeps foreground eligibility unknown. `focusEligible` may be false
+while an explicitly granted and otherwise safe process target is ready.
+Viewer input readiness uses the P6 control state and process-target signal,
+not foreground eligibility, and labels that state as background control while
+the app is inactive.
 
 Control has its own positive wire generation, independent of the video
 authorization epoch. The Host publishes it in `SessionState`; the Viewer
@@ -48,8 +57,12 @@ source of another foreground application.
 
 Process targeting does not activate the selected application. It targets the
 selected process; exact-window targeting is not guaranteed for applications
-with multiple windows. Secure input, a locked/non-console session, unknown or
-unsafe target geometry, and lost Host input permission remain fail-closed.
+with multiple windows. The Host's cooperative foreground activation is
+reserved for an explicit legacy window selection and does not grant input by
+itself; fresh active-process, layer-0 window, permission, geometry, and
+per-event checks still apply. P6 never invokes that activation path. Secure
+input, a locked/non-console session, unknown or unsafe target geometry, and
+lost Host input permission remain fail-closed.
 Pausing or revoking immediately closes Host-side input admission and clears
 pressed-input state while leaving the authenticated video path intact.
 

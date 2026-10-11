@@ -1,27 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
-unset MACOS_NOTARY_PROFILE MACOS_NOTARY_KEY_PATH MACOS_NOTARY_KEY_ID MACOS_NOTARY_ISSUER
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
 source "${script_dir}/notarization-config.sh"
-macremoteapp_notary_resolve "${repo_root}"
 source "${script_dir}/artifact-naming.sh"
 if [[ "${MACREMOTEAPP_ARTIFACT_CHANNEL+x}" != "x" ]]; then
     MACREMOTEAPP_ARTIFACT_CHANNEL=testing
     export MACREMOTEAPP_ARTIFACT_CHANNEL
 fi
 artifact_root="${repo_root}/build"
-bash "${script_dir}/ensure-local-build-exclude.sh" "${repo_root}"
 if [[ -L "${artifact_root}" || ( -e "${artifact_root}" && ! -d "${artifact_root}" ) ]]; then
     echo "Refusing to use a non-directory or symlink artifact root: ${artifact_root}" >&2
     exit 2
 fi
-mkdir -p -- "${artifact_root}"
 default_release_root="${repo_root}/build/MacRemoteApp-notarize.staging.$$"
 release_root="${MACREMOTEAPP_RELEASE_ROOT:-${default_release_root}}"
 release_build_root="${MACREMOTEAPP_RELEASE_BUILD_ROOT:-${repo_root}/.build/notarized-release-build}"
-signing_identity="${MACREMOTEAPP_SIGNING_IDENTITY:-}"
 
 if [[ "${release_root}" != /* ]]; then
     release_root="${repo_root}/${release_root}"
@@ -80,18 +75,27 @@ if [[ -d "${release_root}" && -n "$(find "${release_root}" -mindepth 1 -print -q
     exit 2
 fi
 
+macremoteapp_notary_resolve "${repo_root}"
+signing_identity="$(macremoteapp_resolve_signing_identity -)"
 if [[ -z "${signing_identity}" || "${signing_identity}" == "-" ]]; then
     echo "Set MACREMOTEAPP_SIGNING_IDENTITY to a Developer ID Application identity." >&2
     exit 2
 fi
+bash "${script_dir}/ensure-local-build-exclude.sh" "${repo_root}"
+mkdir -p -- "${artifact_root}"
 cd "${repo_root}"
 
 echo "Building and signing release apps with Developer ID"
-MACREMOTEAPP_ARTIFACT_CHANNEL="${artifact_channel}" \
-MACREMOTEAPP_RELEASE_BUILD_ROOT="${release_build_root}" \
-MACREMOTEAPP_RELEASE_ROOT="${release_root}" \
-MACREMOTEAPP_SIGNING_IDENTITY="${signing_identity}" \
-MACREMOTEAPP_REQUIRE_DEVELOPER_ID=1 \
+env \
+    -u MACOS_NOTARY_PROFILE \
+    -u MACOS_NOTARY_KEY_PATH \
+    -u MACOS_NOTARY_KEY_ID \
+    -u MACOS_NOTARY_ISSUER \
+    MACREMOTEAPP_ARTIFACT_CHANNEL="${artifact_channel}" \
+    MACREMOTEAPP_RELEASE_BUILD_ROOT="${release_build_root}" \
+    MACREMOTEAPP_RELEASE_ROOT="${release_root}" \
+    MACREMOTEAPP_SIGNING_IDENTITY="${signing_identity}" \
+    MACREMOTEAPP_REQUIRE_DEVELOPER_ID=1 \
     bash "${script_dir}/package-device-apps.sh"
 
 release_identity="$(macremoteapp_release_identity \
@@ -120,17 +124,12 @@ for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
         exit 1
     fi
 
-    if [[ "${MACREMOTEAPP_RESOLVED_NOTARY_MODE}" == profile ]]; then
-        echo "Submitting ${app_zip_name} with Keychain profile ${MACREMOTEAPP_RESOLVED_NOTARY_PROFILE}"
-    else
-        echo "Submitting ${app_zip_name} with the shared API-key configuration"
-    fi
-    macremoteapp_notary_submit "${app_zip}" --wait
+    echo "Submitting ${app_zip_name} with resolved notarization authentication."
+    macremoteapp_notary_submit "${app_zip}"
 
-    echo "Stapling and validating ${app_name}"
-    xcrun stapler staple "${app_path}"
-    xcrun stapler validate "${app_path}"
-    spctl --assess --type exec --verbose=4 "${app_path}"
+    echo "Stapling and verifying ${app_name}"
+    macremoteapp_notary_staple "${app_path}"
+    macremoteapp_notary_verify "${app_path}"
 
     # Rebuild the distributable archive after stapling so the shipped zip
     # contains the notarization ticket. The temporary archive stays outside
@@ -142,8 +141,13 @@ done
 
 # Rebuild the disk images after the nested app tickets have been stapled, then
 # notarize and staple each distributable DMG as its own release artifact.
-MACREMOTEAPP_ARTIFACT_CHANNEL="${artifact_channel}" \
-MACREMOTEAPP_SIGNING_IDENTITY="${signing_identity}" \
+env \
+    -u MACOS_NOTARY_PROFILE \
+    -u MACOS_NOTARY_KEY_PATH \
+    -u MACOS_NOTARY_KEY_ID \
+    -u MACOS_NOTARY_ISSUER \
+    MACREMOTEAPP_ARTIFACT_CHANNEL="${artifact_channel}" \
+    MACREMOTEAPP_SIGNING_IDENTITY="${signing_identity}" \
     bash "${script_dir}/create-device-dmgs.sh" "${release_root}"
 
 for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
@@ -158,20 +162,20 @@ for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
         exit 1
     fi
 
-    if [[ "${MACREMOTEAPP_RESOLVED_NOTARY_MODE}" == profile ]]; then
-        echo "Submitting ${dmg_name} with Keychain profile ${MACREMOTEAPP_RESOLVED_NOTARY_PROFILE}"
-    else
-        echo "Submitting ${dmg_name} with the shared API-key configuration"
-    fi
-    macremoteapp_notary_submit "${dmg_path}" --wait
+    echo "Submitting ${dmg_name} with resolved notarization authentication."
+    macremoteapp_notary_submit "${dmg_path}"
 
-    echo "Stapling and validating ${dmg_name}"
-    xcrun stapler staple "${dmg_path}"
-    xcrun stapler validate "${dmg_path}"
-    spctl --assess --type install --verbose=4 "${dmg_path}"
+    echo "Stapling and verifying ${dmg_name}"
+    macremoteapp_notary_staple "${dmg_path}"
+    macremoteapp_notary_verify "${dmg_path}"
 done
 
-MACREMOTEAPP_ARTIFACT_CHANNEL="${artifact_channel}" \
+env \
+    -u MACOS_NOTARY_PROFILE \
+    -u MACOS_NOTARY_KEY_PATH \
+    -u MACOS_NOTARY_KEY_ID \
+    -u MACOS_NOTARY_ISSUER \
+    MACREMOTEAPP_ARTIFACT_CHANNEL="${artifact_channel}" \
     bash "${script_dir}/validate-notarized-release.sh" "${release_root}"
 echo "Developer ID notarization and staple validation passed for apps and DMGs"
 echo "Release artifacts: ${release_root}"
