@@ -137,7 +137,7 @@ control; enable Host Accessibility and recheck the safe target state.
 
 ### Host-controlled process input (P6)
 
-The current `0.2.1010` RC adds P6; the earlier `0.2.1009` RC did not include it.
+The current `0.2.1011` RC adds P6; the earlier `0.2.1009` RC did not include it.
 Both endpoints must support the new capability. After pairing, the Host asks
 locally before granting mouse and keyboard control to this Viewer. Denying
 the request keeps the session view-only. Approval is saved for the Viewer's

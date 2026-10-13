@@ -56,20 +56,19 @@ is not physical acceptance.
 
 ## Current candidate and manual acceptance
 
-The working source and retained notarized RC share version metadata
-`0.2.1010`, but are different code states. The current uncommitted M6/M10
-runtime follow-ups passed canonical local CI on 2026-10-11; they are not in the
-retained RC built from source commit
-`1e422da8799f183487276e2295008c6ebe499ec8`. No new RC or release was created.
-The authorized signing, notarization, staple, and release audit evidence below
-applies to that retained RC; see the
-[release evidence](STATUS.md#021010-notarized-rc). On 2026-10-08 the operator
-elected to perform physical acceptance manually. Every physical row below
-remains unchecked until the operator records evidence for the exact installed
-build.
+The current notarized `0.2.1011` RC was built from source commit
+`daf2561eaee9428135135d5d56e3b24208574ed2`, with both bundle build numbers set
+to `1011`. It includes the M6/M10 runtime follow-ups that were absent from the
+superseded `0.2.1010` RC built from
+`1e422da8799f183487276e2295008c6ebe499ec8`. Canonical CI, Apple notarization,
+stapling, and release audit passed on 2026-10-13; see the
+[release evidence](STATUS.md#021011-notarized-rc). This remains local build and
+notarization evidence only. The operator elected to perform physical
+acceptance manually, so every physical row below remains unchecked until the
+operator records evidence for the exact installed build.
 
 The runtime description above describes the V1 foreground-only baseline.
-When both `0.2.1010` peers negotiate P6, selecting a window does not activate
+When both `0.2.1011` peers negotiate P6, selecting a window does not activate
 its app. Pairing is followed by separate Host-local control approval; without
 that grant the session is view-only. An active grant permits only a safe
 selected process, with pause/revoke preserving video. Background control needs
@@ -90,7 +89,7 @@ foreground-only behavior. Record P6 evidence separately from V1 M10 evidence.
    This first runs the canonical `scripts/validate.sh` repository validation.
    Only after deterministic CI passes does it
    build, submit, staple, and validate versioned RC DMGs such as
-   `MacRemoteApp-Host-0.2.1010.dmg` and `MacRemoteApp-Viewer-0.2.1010.dmg`,
+   `MacRemoteApp-Host-0.2.1011.dmg` and `MacRemoteApp-Viewer-0.2.1011.dmg`,
    together with the stapled app bundles. The command above targets
    `build/rc/`; without a channel argument the default is `build/release/`, outside
    `.build`. Local artifacts are organized under `build/testing/`,
@@ -113,7 +112,7 @@ foreground-only behavior. Record P6 evidence separately from V1 M10 evidence.
    profile or the existing external API-key reference; see the
    [configuration contract](../README.md#physical-m2-test).
    Do not place credential material or signing configuration in the repository.
-   A new Apple submission requires release authorization. The `0.2.1010` RC
+   A new Apple submission requires release authorization. The `0.2.1011` RC
    was submitted and accepted under the operator's explicit DMG request.
    If a separate read-only profile diagnostic is useful, run it in the same
    logged-in macOS session that will run the release command:
@@ -303,7 +302,7 @@ CI and notarization succeed.
 | Combination | Current evidence | Acceptance state |
 | --- | --- | --- |
 | Intel Host (`x86_64`) → Apple Silicon Viewer (`arm64`), same LAN | Both architectures build; protocol, input, transport, and package gates pass locally | Physical runtime unverified; operator manual run required |
-| Local Apple Silicon build host, macOS `27.0.1` (`26A434`) | Canonical `0.2.1010` CI and ad-hoc universal Host / arm64 Viewer packaging passed | Local build evidence only |
+| Local Apple Silicon build host, macOS `27.0.1` (`26A434`) | Canonical `0.2.1011` CI, release audit, and notarized universal Host / arm64 Viewer packaging passed | Local build evidence only |
 | macOS `13.0` deployment minimum from both app plists | Deployment target declared; current-toolchain compilation passed | Minimum-OS launch, capture, codec, permissions, and UI unverified |
 | Apple Silicon as a production Host | Host `arm64` builds for development | Not a verified V1 Host hardware target |
 | Internet relay, locked-screen control, audio, files, and concurrent multi-window control | No implementation or acceptance scope | Unsupported |

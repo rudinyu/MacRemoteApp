@@ -81,9 +81,11 @@ macremoteapp_read_plist_string() {
         return 1
     fi
 
-    value_file="$(mktemp "${TMPDIR:-/private/tmp}/macremoteapp-release-value.XXXXXX")" || {
-        echo "Unable to read ${role} release metadata" >&2
-        return 1
+    value_file="$(mktemp "${TMPDIR:-/private/tmp}/macremoteapp-release-value.XXXXXX" 2>/dev/null)" || {
+        value_file="$(mktemp "/private/tmp/macremoteapp-release-value.XXXXXX" 2>/dev/null)" || {
+            echo "Unable to read ${role} release metadata" >&2
+            return 1
+        }
     }
     if ! /usr/bin/plutil -extract "${key}" raw -n "${plist_path}" >"${value_file}" 2>/dev/null; then
         rm -f -- "${value_file}"

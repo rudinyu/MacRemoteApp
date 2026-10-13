@@ -4,7 +4,7 @@
 
 Except for the explicitly authorized [P6 extension](P6_BACKGROUND_CONTROL.md),
 this remains a planning document. P6 is current-source work, not a capability
-of the historical M10 `0.2.1009` RC; it is included in the current `0.2.1010`
+of the historical M10 `0.2.1009` RC; it is included in the current `0.2.1011`
 RC. V1 remains a LAN-only
 session between one Host and one Viewer for one foreground-eligible window,
 with H.264 video, mouse/keyboard input, and opt-in text clipboard.

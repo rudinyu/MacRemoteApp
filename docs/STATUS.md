@@ -12,12 +12,12 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 
 ## Summary
 
-The working source and retained notarized RC share version metadata
-`0.2.1010`, but are different code states. Current uncommitted M6/M10 runtime
-follow-ups passed canonical CI on 2026-10-11 and are absent from the retained
-RC built from commit `1e422da8799f183487276e2295008c6ebe499ec8`. No new RC or
-release was created. Physical acceptance remains pending operator-recorded
-evidence for the exact installed build. The source also contains the
+The current source code at commit `daf2561eaee9428135135d5d56e3b24208574ed2`
+is included in the signed and notarized `0.2.1011` RC; both app bundle plists
+use Build `1011`. The prior `0.2.1010` RC was built from commit
+`1e422da8799f183487276e2295008c6ebe499ec8` and is superseded. Physical
+acceptance remains pending operator-recorded evidence for the exact installed
+build. The source also contains the
 separately authorized [P6 Host-controlled input extension](P6_BACKGROUND_CONTROL.md),
 whose local completion and physical evidence are tracked separately from V1
 below.
@@ -33,7 +33,7 @@ below.
 | M6 | Implementation/test gate complete | Real OS event posting (manual disposable-application test) |
 | M7 | Implementation/test gate complete | Physical two-machine clipboard walkthrough |
 | M8 | Deterministic measurement/resilience gate implemented | Physical clock-synchronized performance report |
-| M9 | Release-audit gate implemented; current `0.2.1010` notarized RC artifacts verified | Physical acceptance remains separate |
+| M9 | Release-audit gate implemented; current `0.2.1011` notarized RC artifacts verified | Physical acceptance remains separate |
 | M10 | Production composition, final gate, pairing UI, and checklist implemented | Physical Intel-to-Apple-Silicon acceptance, including connected UI rows |
 
 ## Authorized source follow-ups (2026-10-08)
@@ -163,11 +163,11 @@ post-V1 feature was performed.
 - Release-only debug gating, hardened-runtime artifact audit, negative-test
   documentation, and a residual-risk record are implemented; the
   release-audit gate is implemented.
-- The current `0.2.1010` RC apps and DMGs are Developer ID signed, Apple
+- The current `0.2.1011` RC apps and DMGs are Developer ID signed, Apple
   notarized, stapled, and verified; both DMGs include the full-cleanup helper,
   alongside input-source following and the reliability fixes below.
   Credentials remain outside the repository in the shared configuration. See the
-  [release evidence](#021010-notarized-rc).
+  [release evidence](#021011-notarized-rc).
 
 ### M10 — V1 integration pilot
 
@@ -287,7 +287,47 @@ composition remain unchanged. See
   keyboard/mouse walkthrough remain manual acceptance items. Third-party IME
   modes not exposed as macOS input sources are not claimed supported.
 
-#### 0.2.1010 notarized RC
+#### 0.2.1011 notarized RC
+
+On 2026-10-13, the operator authorized the canonical `rc` release flow for
+source commit `daf2561eaee9428135135d5d56e3b24208574ed2`. The Host and Viewer
+bundle build numbers were advanced to `1011` for this release, yielding
+Version `0.2`, Build `1011`. The flow used the configured Keychain-backed
+Developer ID identity and shared API-key reference; no credentials were
+copied into the repository or global configuration.
+
+The canonical `rc` command ran with the installed Xcode toolchain and the
+unique valid Developer ID Application identity resolved from Keychain. It
+passed deterministic CI, built a universal `x86_64 arm64` Host and `arm64`
+Viewer, signed both apps and DMGs, and received `Accepted` for all four Apple
+submissions. Stapling, ticket, signature, Gatekeeper, and M9 release-audit
+checks passed before the verified staging directory was promoted to
+`build/rc/`.
+
+| Artifact | Apple submission ID | Status |
+| --- | --- | --- |
+| Host app ZIP | `5b8b44d5-04d0-4cb5-8374-f078b23bcfb4` | Accepted |
+| Viewer app ZIP | `d291a93b-c466-43a3-8efc-8ea95f04747c` | Accepted |
+| Host DMG | `cd628d51-4325-413d-b316-a4a201632034` | Accepted |
+| Viewer DMG | `e0ae554c-fb80-4836-9ba5-c2b4d0171a8e` | Accepted |
+
+| Delivered artifact | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host-0.2.1011.dmg` | `e44426dcf16f60d6453911b30b730bb9ca170e9e19736a174be94335364a3a13` |
+| `MacRemoteApp-Viewer-0.2.1011.dmg` | `862ac18c5c6d06064fee77b689ed7b1ba86cbe7c392c597b7b93c39a0d028417` |
+| `MacRemoteApp-Host-0.2.1011.app.zip` | `4506fa186809da1685496d4fe5af2f7a8bd39fd7e61e247c892e118940abefaa` |
+| `MacRemoteApp-Viewer-0.2.1011.app.zip` | `c2d11583b59192469863d72a109e171691bc4fae60b26a16884d10cfecd0fff3` |
+
+The same four checksums are in `build/rc/SHA256SUMS.txt`; verification with
+`shasum -a 256 -c SHA256SUMS.txt` passed from that directory.
+
+Log: `build/notarized-1011-release-attempt-4.log`. The successful flow
+removed its documented build caches and superseded the prior `0.2.1010` RC
+only after all final checks passed. P6 physical input/IME and V1 M10 two-Mac
+acceptance remain operator-owned manual evidence; Apple acceptance does not
+close them.
+
+#### 0.2.1010 notarized RC (superseded)
 
 On 2026-10-08, the operator authorized notarized DMG generation for source
 commit `1e422da8799f183487276e2295008c6ebe499ec8`. The exact command was:

@@ -48,6 +48,8 @@ viewer_plist="${test_root}/Viewer-Info.plist"
 make_plist "${host_plist}" 0.2 1009
 make_plist "${viewer_plist}" 0.2 1009
 assert_identity 0.2.1009 "${host_plist}" "${viewer_plist}"
+fallback_identity="$(TMPDIR="${test_root}/missing-tmp" macremoteapp_release_identity "${host_plist}" "${viewer_plist}")" || fail "release metadata could not be read with an unusable TMPDIR"
+[[ "${fallback_identity}" == "0.2.1009" ]] || fail "unusable TMPDIR changed the release identity"
 
 unset MACREMOTEAPP_ARTIFACT_CHANNEL
 test_repo="${test_root}/repo"

@@ -1,6 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Make the fixture independent of the developer's release and test settings.
+unset \
+    MACREMOTEAPP_SIGNING_IDENTITY \
+    MACREMOTEAPP_NOTARY_PROFILE \
+    MACREMOTEAPP_NOTARIZATION_HELPER \
+    MACREMOTEAPP_TEST_HELPER_LOG \
+    MACREMOTEAPP_TEST_CODESIGN_LOG \
+    MACREMOTEAPP_TEST_AUTH_KIND \
+    MACREMOTEAPP_TEST_AUTH_CAPTURE \
+    MACREMOTEAPP_TEST_GLOBAL_IDENTITY \
+    MACREMOTEAPP_TEST_SUBMIT_FAIL \
+    MACREMOTEAPP_TEST_EXPECTED_DELEGATED_SIGNING_IDENTITY \
+    MACREMOTEAPP_TEST_BOUNDARY_LOG \
+    MACREMOTEAPP_RESOLVED_NOTARY_MODE \
+    MACREMOTEAPP_RESOLVED_NOTARY_PROFILE \
+    MACREMOTEAPP_NOTARY_PROJECT_ROOT \
+    MACREMOTEAPP_RELEASE_ROOT \
+    MACREMOTEAPP_RELEASE_BUILD_ROOT \
+    MACREMOTEAPP_ARTIFACT_CHANNEL \
+    MACOS_SIGNING_IDENTITY \
+    MACOS_NOTARY_PROFILE \
+    MACOS_NOTARY_KEY_PATH \
+    MACOS_NOTARY_KEY_ID \
+    MACOS_NOTARY_ISSUER
+
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
 source "${script_dir}/notarization-config.sh"
@@ -81,11 +106,37 @@ exec "$@"
 MOCK_LOCKF
 cat >"${fixture_bin}/bash" <<'MOCK_BASH'
 #!/bin/sh
+record_ci_environment() {
+    printf 'boundary=ci\n' >>"${MACREMOTEAPP_TEST_BOUNDARY_LOG}"
+    for name in \
+        MACREMOTEAPP_SIGNING_IDENTITY \
+        MACREMOTEAPP_NOTARY_PROFILE \
+        MACOS_SIGNING_IDENTITY \
+        MACOS_NOTARY_PROFILE \
+        MACOS_NOTARY_KEY_PATH \
+        MACOS_NOTARY_KEY_ID \
+        MACOS_NOTARY_ISSUER; do
+        if /usr/bin/printenv "${name}" >/dev/null 2>&1; then
+            state=present
+        else
+            state=unset
+        fi
+        printf 'ci:%s=%s\n' "${name}" "${state}" >>"${MACREMOTEAPP_TEST_BOUNDARY_LOG}"
+    done
+}
 case "${1:-}" in
     */scripts/validate.sh)
+        record_ci_environment
         exit 0
         ;;
     */scripts/notarize-device-apps.sh)
+        expected_identity="${MACREMOTEAPP_TEST_EXPECTED_DELEGATED_SIGNING_IDENTITY:-}"
+        if [ -n "${expected_identity}" ] &&
+           [ "${MACREMOTEAPP_SIGNING_IDENTITY:-}" = "${expected_identity}" ]; then
+            printf 'delegated-signing-identity=preserved\n' >>"${MACREMOTEAPP_TEST_BOUNDARY_LOG}"
+        else
+            printf 'delegated-signing-identity=changed\n' >>"${MACREMOTEAPP_TEST_BOUNDARY_LOG}"
+        fi
         scripts_dir=$(dirname -- "$1")
         project_root=$(cd -- "${scripts_dir}/.." && pwd -P)
         exec /bin/bash -c \
@@ -240,12 +291,19 @@ cp "${script_dir}/release-notarized.sh" \
    "${script_dir}/ensure-local-build-exclude.sh" \
    "${wrapper_scripts}/"
 auth_capture="${fixture_root}/delegated-auth-modes.txt"
+boundary_capture="${fixture_root}/release-environment-boundaries.txt"
 : >"${auth_capture}"
+: >"${boundary_capture}"
 unset MACREMOTEAPP_TEST_AUTH_KIND MACREMOTEAPP_NOTARY_PROFILE
 export MACREMOTEAPP_TEST_AUTH_CAPTURE="${auth_capture}"
+export MACREMOTEAPP_TEST_BOUNDARY_LOG="${boundary_capture}"
 export MACOS_NOTARY_KEY_PATH="${fixture_root}/synthetic-key.p8"
 export MACOS_NOTARY_KEY_ID="fixture-key-id"
 export MACOS_NOTARY_ISSUER="fixture-issuer"
+ambient_signing_identity='Developer ID Application: Ambient Fixture (TESTONLY)'
+MACREMOTEAPP_SIGNING_IDENTITY="${ambient_signing_identity}" \
+MACREMOTEAPP_TEST_EXPECTED_DELEGATED_SIGNING_IDENTITY="${ambient_signing_identity}" \
+MACOS_SIGNING_IDENTITY='Developer ID Application: Shared Fixture (TESTONLY)' \
 MACREMOTEAPP_NOTARIZATION_HELPER="${fixture_helper}" \
     bash "${wrapper_scripts}/release-notarized.sh" rc \
     >"${fixture_root}/release-wrapper-output.txt" 2>&1 ||
@@ -253,5 +311,39 @@ MACREMOTEAPP_NOTARIZATION_HELPER="${fixture_helper}" \
 if [[ ! -s "${auth_capture}" ]] || grep -Evx 'api-key' "${auth_capture}" >/dev/null; then
     fail "release wrapper and low-level notarizer did not resolve the same API-key mode"
 fi
+for variable in \
+    MACREMOTEAPP_SIGNING_IDENTITY \
+    MACREMOTEAPP_NOTARY_PROFILE \
+    MACOS_SIGNING_IDENTITY \
+    MACOS_NOTARY_PROFILE \
+    MACOS_NOTARY_KEY_PATH \
+    MACOS_NOTARY_KEY_ID \
+    MACOS_NOTARY_ISSUER; do
+    contains "ci:${variable}=unset" "${boundary_capture}"
+done
+contains "delegated-signing-identity=preserved" "${boundary_capture}"
+
+project_profile_auth_capture="${fixture_root}/project-profile-auth-modes.txt"
+project_profile_boundary_capture="${fixture_root}/project-profile-environment-boundaries.txt"
+: >"${project_profile_auth_capture}"
+: >"${project_profile_boundary_capture}"
+MACREMOTEAPP_SIGNING_IDENTITY="${ambient_signing_identity}" \
+MACREMOTEAPP_TEST_EXPECTED_DELEGATED_SIGNING_IDENTITY="${ambient_signing_identity}" \
+MACREMOTEAPP_NOTARY_PROFILE='ambient-project-profile-fixture' \
+MACOS_NOTARY_PROFILE='ambient-shared-profile-fixture' \
+MACREMOTEAPP_TEST_AUTH_CAPTURE="${project_profile_auth_capture}" \
+MACREMOTEAPP_TEST_BOUNDARY_LOG="${project_profile_boundary_capture}" \
+MACREMOTEAPP_NOTARIZATION_HELPER="${fixture_helper}" \
+    bash "${wrapper_scripts}/release-notarized.sh" rc \
+    >"${fixture_root}/project-profile-wrapper-output.txt" 2>&1 ||
+    fail "mock release wrapper did not preserve the project notary-profile delegation"
+if [[ ! -s "${project_profile_auth_capture}" ]] ||
+   grep -Evx 'keychain-profile' "${project_profile_auth_capture}" >/dev/null; then
+    fail "project notary-profile override did not reach the low-level notarizer"
+fi
+contains 'ambient-project-profile-fixture' "${arguments_log}"
+contains "ci:MACREMOTEAPP_NOTARY_PROFILE=unset" "${project_profile_boundary_capture}"
+contains "ci:MACOS_NOTARY_PROFILE=unset" "${project_profile_boundary_capture}"
+contains "delegated-signing-identity=preserved" "${project_profile_boundary_capture}"
 
 echo "Shared notarization helper adapter fixtures passed"

@@ -202,6 +202,9 @@ fi
 
 echo "Running deterministic CI before notarization"
 env \
+    -u MACREMOTEAPP_SIGNING_IDENTITY \
+    -u MACREMOTEAPP_NOTARY_PROFILE \
+    -u MACOS_SIGNING_IDENTITY \
     -u MACOS_NOTARY_PROFILE \
     -u MACOS_NOTARY_KEY_PATH \
     -u MACOS_NOTARY_KEY_ID \
