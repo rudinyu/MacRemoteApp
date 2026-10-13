@@ -12,7 +12,7 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 
 ## Summary
 
-The current source code at commit `daf2561eaee9428135135d5d56e3b24208574ed2`
+The current source code at commit `a63222e`
 is included in the signed and notarized `0.2.1011` RC; both app bundle plists
 use Build `1011`. The prior `0.2.1010` RC was built from commit
 `1e422da8799f183487276e2295008c6ebe499ec8` and is superseded. Physical
@@ -290,38 +290,39 @@ composition remain unchanged. See
 #### 0.2.1011 notarized RC
 
 On 2026-10-13, the operator authorized the canonical `rc` release flow for
-source commit `daf2561eaee9428135135d5d56e3b24208574ed2`. The Host and Viewer
+source commit `a63222e`. The Host and Viewer
 bundle build numbers were advanced to `1011` for this release, yielding
 Version `0.2`, Build `1011`. The flow used the configured Keychain-backed
 Developer ID identity and shared API-key reference; no credentials were
 copied into the repository or global configuration.
 
 The canonical `rc` command ran with the installed Xcode toolchain and the
-unique valid Developer ID Application identity resolved from Keychain. It
-passed deterministic CI, built a universal `x86_64 arm64` Host and `arm64`
-Viewer, signed both apps and DMGs, and received `Accepted` for all four Apple
-submissions. Stapling, ticket, signature, Gatekeeper, and M9 release-audit
-checks passed before the verified staging directory was promoted to
-`build/rc/`.
+unique valid Developer ID Application identity resolved from Keychain. The
+delivered rebuild refreshed the user guide included in both DMGs to name
+`0.2.1011`. It passed deterministic CI, built a universal `x86_64 arm64` Host
+and `arm64` Viewer, signed both apps and DMGs, and received `Accepted` for all
+four Apple submissions. Stapling, ticket, signature, Gatekeeper, and M9
+release-audit checks passed before the verified staging directory was
+promoted to `build/rc/`.
 
 | Artifact | Apple submission ID | Status |
 | --- | --- | --- |
-| Host app ZIP | `5b8b44d5-04d0-4cb5-8374-f078b23bcfb4` | Accepted |
-| Viewer app ZIP | `d291a93b-c466-43a3-8efc-8ea95f04747c` | Accepted |
-| Host DMG | `cd628d51-4325-413d-b316-a4a201632034` | Accepted |
-| Viewer DMG | `e0ae554c-fb80-4836-9ba5-c2b4d0171a8e` | Accepted |
+| Host app ZIP | `aeec0724-5eb6-4989-baa2-a09a6d26c915` | Accepted |
+| Viewer app ZIP | `3b574772-a3ba-4f02-91fd-4df31d0943b8` | Accepted |
+| Host DMG | `b6bfc339-1d23-459e-84c9-539459ef85da` | Accepted |
+| Viewer DMG | `288e0ece-ef3b-40d3-8d74-6c169338a7eb` | Accepted |
 
 | Delivered artifact | SHA-256 |
 | --- | --- |
-| `MacRemoteApp-Host-0.2.1011.dmg` | `e44426dcf16f60d6453911b30b730bb9ca170e9e19736a174be94335364a3a13` |
-| `MacRemoteApp-Viewer-0.2.1011.dmg` | `862ac18c5c6d06064fee77b689ed7b1ba86cbe7c392c597b7b93c39a0d028417` |
-| `MacRemoteApp-Host-0.2.1011.app.zip` | `4506fa186809da1685496d4fe5af2f7a8bd39fd7e61e247c892e118940abefaa` |
-| `MacRemoteApp-Viewer-0.2.1011.app.zip` | `c2d11583b59192469863d72a109e171691bc4fae60b26a16884d10cfecd0fff3` |
+| `MacRemoteApp-Host-0.2.1011.dmg` | `8aacf0d80aa9ea1a0d5ca517a5ff9b3d7df7e69a746d51135ccbd98f405429a6` |
+| `MacRemoteApp-Viewer-0.2.1011.dmg` | `d5f5c1f3ebcfe144d16d7d3ca84de39f36478cc6708e472999602bcbc24349a8` |
+| `MacRemoteApp-Host-0.2.1011.app.zip` | `b403cadff68d0c9b8400cc983f803004009d747ff4984e8f00450e0ab29df1d5` |
+| `MacRemoteApp-Viewer-0.2.1011.app.zip` | `8c64e36876e7d0bef2db40f9d50f2f082c9375ce815d2047c319f75b80958c2f` |
 
 The same four checksums are in `build/rc/SHA256SUMS.txt`; verification with
 `shasum -a 256 -c SHA256SUMS.txt` passed from that directory.
 
-Log: `build/notarized-1011-release-attempt-4.log`. The successful flow
+Log: `build/notarized-1011-release-attempt-5.log`. The successful flow
 removed its documented build caches and superseded the prior `0.2.1010` RC
 only after all final checks passed. P6 physical input/IME and V1 M10 two-Mac
 acceptance remain operator-owned manual evidence; Apple acceptance does not

@@ -56,9 +56,9 @@ is not physical acceptance.
 
 ## Current candidate and manual acceptance
 
-The current notarized `0.2.1011` RC was built from source commit
-`daf2561eaee9428135135d5d56e3b24208574ed2`, with both bundle build numbers set
-to `1011`. It includes the M6/M10 runtime follow-ups that were absent from the
+The current notarized `0.2.1011` RC was built from source commit `a63222e`,
+with both app bundle plists set to Build `1011`. It includes the M6/M10
+runtime follow-ups that were absent from the
 superseded `0.2.1010` RC built from
 `1e422da8799f183487276e2295008c6ebe499ec8`. Canonical CI, Apple notarization,
 stapling, and release audit passed on 2026-10-13; see the
