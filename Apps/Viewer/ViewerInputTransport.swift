@@ -1,11 +1,56 @@
+import Foundation
 import InputCore
 import RemoteProtocol
 import TransportCore
+
+private final class ViewerInputAdmissionObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var wasAdmitted = false
+
+    func record(admitted: Bool) {
+        lock.lock()
+        wasAdmitted = admitted
+        lock.unlock()
+    }
+
+    var mayHaveWritten: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return wasAdmitted
+    }
+}
 
 enum ViewerInputTransportError: Error, Equatable, Sendable, CustomStringConvertible {
     case inputNotReady
     case capabilityUnavailable
     case inputSourceRequestNotAdmitted
+    case localPreflightRejected
+    case deliveryUncertain
+    case deliveryUncertainUnknownBoundary
+
+    var failureCategory: ViewerInputFailureCategory {
+        switch self {
+        case .inputNotReady, .inputSourceRequestNotAdmitted:
+            return .authorizationNotReady
+        case .capabilityUnavailable:
+            return .capabilityUnavailable
+        case .localPreflightRejected:
+            return .localPreflight
+        case .deliveryUncertain, .deliveryUncertainUnknownBoundary:
+            return .deliveryUncertain
+        }
+    }
+
+    var failureBoundary: ViewerInputSendBoundary {
+        switch self {
+        case .deliveryUncertain:
+            return .transportSendStarted
+        case .deliveryUncertainUnknownBoundary:
+            return .unknown
+        case .inputNotReady, .capabilityUnavailable, .inputSourceRequestNotAdmitted, .localPreflightRejected:
+            return .beforeTransportInvocation
+        }
+    }
 
     var description: String {
         switch self {
@@ -15,6 +60,12 @@ enum ViewerInputTransportError: Error, Equatable, Sendable, CustomStringConverti
             return "the negotiated session does not authorize this input kind"
         case .inputSourceRequestNotAdmitted:
             return "the input-source request is no longer current"
+        case .localPreflightRejected:
+            return "input failed local preflight"
+        case .deliveryUncertain:
+            return "input delivery status is uncertain"
+        case .deliveryUncertainUnknownBoundary:
+            return "input delivery status is uncertain"
         }
     }
 }
@@ -36,24 +87,41 @@ final class ViewerInputTransport {
         expectedAuthorizationGeneration: UInt64? = nil,
         controlGeneration: UInt64? = nil
     ) async throws {
-        try record.validate(limits: limits)
-        guard record.estimatedEncodedPayloadBytes <= limits.maxEncodedPayloadBytes else {
-            throw InputCoreError.eventTooLarge(
-                actual: record.estimatedEncodedPayloadBytes,
-                maximum: limits.maxEncodedPayloadBytes
-            )
+#if DEBUG
+        M10ViewerDiagnosticRecorder.shared.recordViewerInputAttempt()
+        var locallyAccepted = false
+        defer {
+            if locallyAccepted {
+                M10ViewerDiagnosticRecorder.shared.recordViewerInputLocallyAccepted()
+            } else {
+                M10ViewerDiagnosticRecorder.shared.recordViewerInputSendFailure()
+            }
+        }
+#endif
+        let message: InputEventMessage
+        do {
+            try record.validate(limits: limits)
+            guard record.estimatedEncodedPayloadBytes <= limits.maxEncodedPayloadBytes else {
+                throw InputCoreError.eventTooLarge(
+                    actual: record.estimatedEncodedPayloadBytes,
+                    maximum: limits.maxEncodedPayloadBytes
+                )
+            }
+
+            message = try Self.message(for: record, controlGeneration: controlGeneration)
+            // Keep this explicit so a future schema extension cannot silently turn
+            // an input event into an oversized control payload.
+            let encoded = try message.encoded(using: .default)
+            guard encoded.count <= limits.maxEncodedPayloadBytes else {
+                throw InputCoreError.eventTooLarge(
+                    actual: encoded.count,
+                    maximum: limits.maxEncodedPayloadBytes
+                )
+            }
+        } catch {
+            throw ViewerInputTransportError.localPreflightRejected
         }
 
-        let message = try Self.message(for: record, controlGeneration: controlGeneration)
-        // Keep this explicit so a future schema extension cannot silently turn
-        // an input event into an oversized control payload.
-        let encoded = try message.encoded(using: .default)
-        guard encoded.count <= limits.maxEncodedPayloadBytes else {
-            throw InputCoreError.eventTooLarge(
-                actual: encoded.count,
-                maximum: limits.maxEncodedPayloadBytes
-            )
-        }
         let admission: SessionInputAdmissionToken
         do {
             admission = try await session.makeInputAdmission(
@@ -72,13 +140,33 @@ final class ViewerInputTransport {
             case .authorizationChanged, .reconnectRequired:
                 throw ViewerInputTransportError.inputNotReady
             default:
-                throw error
+                // Admission is synchronous actor-side validation. No event has
+                // entered the transport, so the live session can be rechecked.
+                throw ViewerInputTransportError.inputNotReady
             }
+        } catch {
+            // This call only creates an admission token. Any non-session error
+            // here is likewise known to precede transport delivery.
+            throw ViewerInputTransportError.localPreflightRejected
         }
 
+        let sendObservation = SessionInputSendObservation()
         do {
-            try await session.sendInput(message, using: admission)
-        } catch SessionError.authorizationChanged, SessionError.reconnectRequired {
+            try await session.sendInput(
+                message,
+                using: admission,
+                observation: sendObservation
+            )
+#if DEBUG
+            locallyAccepted = true
+#endif
+        } catch {
+            // Only failures after the actual transport invocation are
+            // ambiguous. Earlier session validation failures remain
+            // recoverable and can be retried after authorization is ready.
+            if sendObservation.state == .transportSendStarted {
+                throw ViewerInputTransportError.deliveryUncertain
+            }
             throw ViewerInputTransportError.inputNotReady
         }
     }
@@ -94,13 +182,21 @@ final class ViewerInputTransport {
             sourceIdentifier: request.source.identifier,
             controlGeneration: request.scope.controlGeneration
         )
+        let admissionObservation = ViewerInputAdmissionObservation()
         do {
             try await session.send(
                 .inputSourceSelection(message),
                 expectedAuthorizationGeneration: request.scope.authorizationGeneration,
-                localAdmission: localAdmission
+                localAdmission: {
+                    let admitted = localAdmission()
+                    admissionObservation.record(admitted: admitted)
+                    return admitted
+                }
             )
         } catch SessionError.authorizationChanged, SessionError.reconnectRequired {
+            if admissionObservation.mayHaveWritten {
+                throw ViewerInputTransportError.deliveryUncertainUnknownBoundary
+            }
             throw ViewerInputTransportError.inputSourceRequestNotAdmitted
         }
     }

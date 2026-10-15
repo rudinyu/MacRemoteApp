@@ -1,8 +1,63 @@
 import Foundation
+import CaptureCore
 import XCTest
 @testable import Host
 
 final class HostRuntimeRecoveryPolicyTests: XCTestCase {
+    func testProductionHostAdvertisesP6BackgroundControlForNegotiation() {
+        XCTAssertTrue(HostRuntime.capabilities.contains(.backgroundControl))
+    }
+
+    func testCaptureRecoveryKeepsAuthenticatedSessionUntilRecoveryEnds() {
+        XCTAssertTrue(HostRuntimeCaptureLivenessPolicy.keepsAuthenticatedSession(
+            for: .capturing(windowIdentifier: 3, generation: 7)
+        ))
+        XCTAssertTrue(HostRuntimeCaptureLivenessPolicy.keepsAuthenticatedSession(
+            for: .recovering(windowIdentifier: 3, generation: 8)
+        ))
+        XCTAssertFalse(HostRuntimeCaptureLivenessPolicy.keepsAuthenticatedSession(for: .stopped(nil)))
+        XCTAssertFalse(HostRuntimeCaptureLivenessPolicy.keepsAuthenticatedSession(
+            for: .failed(.windowUnavailable)
+        ))
+    }
+
+    func testHostReportsCaptureRecoveryInsteadOfClaimingVideoIsLive() {
+        XCTAssertEqual(
+            HostRuntimeStatus.recovering(application: "Notes").description,
+            "Restoring video for Notes"
+        )
+    }
+
+    func testTransientCatalogGapDoesNotPublishAnEmptySelectedWindowList() {
+        let selected = CaptureWindow(
+            identifier: 19,
+            applicationIdentifier: "com.example.notes",
+            bounds: WindowBounds(x: 0, y: 0, width: 800, height: 600),
+            processIdentifier: 190,
+            eligible: true
+        )
+        let otherWindow = CaptureWindow(
+            identifier: 20,
+            applicationIdentifier: "com.example.browser",
+            bounds: WindowBounds(x: 0, y: 0, width: 800, height: 600),
+            processIdentifier: 200,
+            eligible: true
+        )
+
+        XCTAssertFalse(HostRuntimeWindowCatalogPolicy.shouldPublish(
+            [otherWindow],
+            preserving: selected
+        ), "publishing this snapshot would make the Viewer clear its active selection")
+        XCTAssertTrue(HostRuntimeWindowCatalogPolicy.shouldPublish(
+            [selected, otherWindow],
+            preserving: selected
+        ))
+        XCTAssertTrue(HostRuntimeWindowCatalogPolicy.shouldPublish(
+            [otherWindow],
+            preserving: nil
+        ))
+    }
+
     func testSameOwnerReselectionReassertsExistingSelection() {
         XCTAssertEqual(
             HostRuntimeWindowSelectionAction.resolve(currentWindowHasSameOwner: true),
@@ -25,7 +80,7 @@ final class HostRuntimeRecoveryPolicyTests: XCTestCase {
         XCTAssertFalse(permitsRestore(processTargetingNegotiated: true))
     }
 
-    func testClipboardPromptRestorationRequiresHostToRemainFrontmost() {
+    func testForegroundRestorationCanRequireHostToRemainFrontmost() {
         XCTAssertFalse(permitsRestore(requiresHostFrontmost: true, hostIsFrontmost: false))
         XCTAssertTrue(permitsRestore(requiresHostFrontmost: true, hostIsFrontmost: true))
     }
@@ -75,6 +130,49 @@ final class HostRuntimeRecoveryPolicyTests: XCTestCase {
         XCTAssertFalse(HostRuntimeCooperativeActivationPolicy.permitsYield(
             cooperativeAPIAvailable: false,
             hostIsFrontmost: true
+        ))
+    }
+
+    func testUnauthorizedVideoSendRecoversOnlyAfterAuthorizationTransition() {
+        XCTAssertTrue(HostRuntimeVideoAuthorizationRecoveryPolicy.shouldRecover(
+            capturedAuthorizationGeneration: 12,
+            capturedWindowGeneration: 7,
+            capturedAuthorized: true,
+            freshAuthorizationGeneration: 13,
+            freshWindowGeneration: 7,
+            freshAuthorized: true
+        ))
+        XCTAssertTrue(HostRuntimeVideoAuthorizationRecoveryPolicy.shouldRecover(
+            capturedAuthorizationGeneration: 12,
+            capturedWindowGeneration: 7,
+            capturedAuthorized: true,
+            freshAuthorizationGeneration: 13,
+            freshWindowGeneration: nil,
+            freshAuthorized: false
+        ))
+        XCTAssertTrue(HostRuntimeVideoAuthorizationRecoveryPolicy.shouldRecover(
+            capturedAuthorizationGeneration: 12,
+            capturedWindowGeneration: 7,
+            capturedAuthorized: true,
+            freshAuthorizationGeneration: 13,
+            freshWindowGeneration: 8,
+            freshAuthorized: true
+        ))
+        XCTAssertFalse(HostRuntimeVideoAuthorizationRecoveryPolicy.shouldRecover(
+            capturedAuthorizationGeneration: 12,
+            capturedWindowGeneration: 7,
+            capturedAuthorized: true,
+            freshAuthorizationGeneration: 12,
+            freshWindowGeneration: 7,
+            freshAuthorized: true
+        ))
+        XCTAssertFalse(HostRuntimeVideoAuthorizationRecoveryPolicy.shouldRecover(
+            capturedAuthorizationGeneration: 12,
+            capturedWindowGeneration: 7,
+            capturedAuthorized: false,
+            freshAuthorizationGeneration: 13,
+            freshWindowGeneration: nil,
+            freshAuthorized: false
         ))
     }
 

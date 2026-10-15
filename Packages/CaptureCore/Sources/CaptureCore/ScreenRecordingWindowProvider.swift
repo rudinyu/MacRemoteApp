@@ -15,9 +15,7 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
     }
 
     public func permissionState() async -> CapturePermissionState {
-        await MainActor.run {
-            CGPreflightScreenCaptureAccess() ? .authorized : .denied
-        }
+        CGPreflightScreenCaptureAccess() ? .authorized : .denied
     }
 
     public func requestPermission() async -> CapturePermissionState {
@@ -36,7 +34,7 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
             onScreenWindowsOnly: onScreenWindowsOnly
         )
         let displays = content.displays.map(Self.displayGeometry)
-        return content.windows.compactMap { makeWindow($0, displays: displays) }.sorted {
+        return content.windows.compactMap { evaluateWindow($0, displays: displays).window }.sorted {
             if $0.applicationIdentifier == $1.applicationIdentifier {
                 return $0.identifier < $1.identifier
             }
@@ -44,18 +42,143 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
         }
     }
 
-    private func makeWindow(_ window: SCWindow, displays: [CaptureDisplayGeometry]) -> CaptureWindow? {
-        guard window.isOnScreen,
-              window.windowLayer == 0,
-              let application = window.owningApplication else {
-            return nil
+    public func refreshSelectedWindow(
+        _ expectedWindow: CaptureWindow
+    ) async throws -> CaptureWindowRefreshResult {
+        guard await permissionState() == .authorized else {
+            throw CaptureCoreError.permissionDenied
+        }
+
+        return try await resolveSelectedWindow(
+            expectedWindow,
+            allowInactiveOffscreen: false
+        )
+    }
+
+    public func resolveSelectedWindowForCapture(
+        _ expectedWindow: CaptureWindow
+    ) async throws -> CaptureWindowRefreshResult {
+        guard await permissionState() == .authorized else {
+            throw CaptureCoreError.permissionDenied
+        }
+
+        // The app can become inactive after the Viewer selected it and before
+        // capture begins. A stream termination can also clear isActive. The
+        // Host-authorized descriptor is therefore resolved by ID, bundle ID,
+        // PID, layer, and bounds without requiring foreground or stream state.
+        return try await resolveSelectedWindow(
+            expectedWindow,
+            allowInactiveOffscreen: true
+        )
+    }
+
+    private func resolveSelectedWindow(
+        _ expectedWindow: CaptureWindow,
+        allowInactiveOffscreen: Bool
+    ) async throws -> CaptureWindowRefreshResult {
+
+        // The ordinary picker catalog is intentionally limited to on-screen
+        // windows. Recheck the selected target against the full catalog so a
+        // stream remains valid when ScreenCaptureKit reports it as active but
+        // offscreen after its app loses foreground.
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            true,
+            onScreenWindowsOnly: false
+        )
+        let candidates = content.windows.filter {
+            UInt64($0.windowID) == expectedWindow.identifier
+        }
+        guard !candidates.isEmpty else { return .unavailable }
+        let matchingOwner = candidates.first(where: {
+            $0.owningApplication?.bundleIdentifier == expectedWindow.applicationIdentifier &&
+                $0.owningApplication?.processID == expectedWindow.processIdentifier
+        })
+        guard let candidate = matchingOwner else {
+            return .ownerMismatch
+        }
+        guard allowInactiveOffscreen || SelectedWindowCaptureEligibility.permitsCapture(
+            isOnScreen: candidate.isOnScreen,
+            isActive: Self.isActive(candidate)
+        ) else {
+            return .unavailable
+        }
+
+        let displays = content.displays.map(Self.displayGeometry)
+        guard let window = evaluateWindow(
+            candidate,
+            displays: displays,
+            allowActiveOffscreen: true,
+            allowInactiveOffscreen: allowInactiveOffscreen
+        ).window else {
+            return .unavailable
+        }
+        if allowInactiveOffscreen,
+           !SelectedWindowCaptureTargetEligibility.permits(
+               expectedWindow: expectedWindow,
+               candidateWindow: window,
+               windowLayer: Int(candidate.windowLayer),
+               configuration: configuration
+           ) {
+            return .unavailable
+        }
+        return .available(window)
+    }
+
+#if DEBUG
+    /// Debug-only companion to `discoverWindows()` for fixed, shareable
+    /// candidate counts. No candidate names or identifiers leave this type.
+    public func discoverWindowsWithDiagnostics() async throws -> ScreenRecordingWindowDiscoveryResult {
+        guard await permissionState() == .authorized else {
+            throw CaptureCoreError.permissionDenied
+        }
+
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            true,
+            onScreenWindowsOnly: onScreenWindowsOnly
+        )
+        let displays = content.displays.map(Self.displayGeometry)
+        var counts = ScreenRecordingWindowDiscoveryCountAccumulator()
+        var windows: [CaptureWindow] = []
+        windows.reserveCapacity(content.windows.count)
+        for candidate in content.windows {
+            let evaluation = evaluateWindow(candidate, displays: displays)
+            counts.record(evaluation.rejection)
+            if let window = evaluation.window {
+                windows.append(window)
+            }
+        }
+        windows.sort {
+            if $0.applicationIdentifier == $1.applicationIdentifier {
+                return $0.identifier < $1.identifier
+            }
+            return $0.applicationIdentifier < $1.applicationIdentifier
+        }
+        return ScreenRecordingWindowDiscoveryResult(
+            windows: windows,
+            counts: counts.snapshot(candidateCount: UInt64(content.windows.count))
+        )
+    }
+#endif
+
+    private func evaluateWindow(
+        _ window: SCWindow,
+        displays: [CaptureDisplayGeometry],
+        allowActiveOffscreen: Bool = false,
+        allowInactiveOffscreen: Bool = false
+    ) -> WindowCandidateEvaluation {
+        guard allowInactiveOffscreen || window.isOnScreen || (allowActiveOffscreen && Self.isActive(window)) else {
+            return .rejected(.offScreen)
+        }
+        guard window.windowLayer == 0 else { return .rejected(.nonBaseLayer) }
+        guard let application = window.owningApplication else {
+            return .rejected(.missingApplication)
         }
 
         guard Self.isLikelyUserFacingApplication(
             applicationName: application.applicationName,
             bundleIdentifier: application.bundleIdentifier
         ) else {
-            return nil
+            return .rejected(.helperApplication)
         }
 
         let frame = window.frame
@@ -69,7 +192,7 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
                   )
               ),
               !application.bundleIdentifier.isEmpty else {
-            return nil
+            return .rejected(.invalidWindow)
         }
 
         let title = window.title?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -79,19 +202,28 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
             width: frame.width,
             height: frame.height
         )
-        return CaptureWindow(
-            identifier: UInt64(window.windowID),
-            applicationIdentifier: application.bundleIdentifier,
-            applicationName: application.applicationName,
-            title: title?.isEmpty == false ? title : nil,
-            bounds: bounds,
-            backingScaleFactor: CaptureBackingScale.backingScaleFactor(
-                forWindow: bounds,
-                displays: displays
-            ),
-            processIdentifier: application.processID,
-            eligible: true
+        return .included(
+            CaptureWindow(
+                identifier: UInt64(window.windowID),
+                applicationIdentifier: application.bundleIdentifier,
+                applicationName: application.applicationName,
+                title: title?.isEmpty == false ? title : nil,
+                bounds: bounds,
+                backingScaleFactor: CaptureBackingScale.backingScaleFactor(
+                    forWindow: bounds,
+                    displays: displays
+                ),
+                processIdentifier: application.processID,
+                eligible: true
+            )
         )
+    }
+
+    private static func isActive(_ window: SCWindow) -> Bool {
+        if #available(macOS 13.1, *) {
+            return window.isActive
+        }
+        return false
     }
 
     /// `SCDisplay.frame` and `SCWindow.frame` share the global point space.
@@ -146,5 +278,61 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
         return !helperMarkers.contains {
             name.contains($0) || identifier.contains($0)
         }
+    }
+}
+
+enum WindowCandidateRejection: Sendable {
+    case offScreen
+    case nonBaseLayer
+    case missingApplication
+    case helperApplication
+    case invalidWindow
+}
+
+struct WindowCandidateEvaluation {
+    let window: CaptureWindow?
+    let rejection: WindowCandidateRejection?
+
+    static func included(_ window: CaptureWindow) -> Self {
+        Self(window: window, rejection: nil)
+    }
+
+    static func rejected(_ reason: WindowCandidateRejection) -> Self {
+        Self(window: nil, rejection: reason)
+    }
+}
+
+struct ScreenRecordingWindowDiscoveryCountAccumulator {
+    private(set) var eligible: UInt64 = 0
+    private(set) var offScreen: UInt64 = 0
+    private(set) var nonBaseLayer: UInt64 = 0
+    private(set) var missingApplication: UInt64 = 0
+    private(set) var helperApplication: UInt64 = 0
+    private(set) var invalidWindow: UInt64 = 0
+
+    mutating func record(_ rejection: WindowCandidateRejection?) {
+        guard let rejection else {
+            eligible &+= 1
+            return
+        }
+        switch rejection {
+        case .offScreen: offScreen &+= 1
+        case .nonBaseLayer: nonBaseLayer &+= 1
+        case .missingApplication: missingApplication &+= 1
+        case .helperApplication: helperApplication &+= 1
+        case .invalidWindow: invalidWindow &+= 1
+        }
+    }
+
+    func snapshot(candidateCount: UInt64) -> ScreenRecordingWindowDiscoveryCounts {
+        ScreenRecordingWindowDiscoveryCounts(
+            candidates: candidateCount,
+            eligible: eligible,
+            offScreen: offScreen,
+            nonBaseLayer: nonBaseLayer,
+            missingApplication: missingApplication,
+            helperApplication: helperApplication,
+            invalidWindow: invalidWindow
+        )
     }
 }

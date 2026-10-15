@@ -1,15 +1,13 @@
 # MacRemoteApp Architecture
 
-The V1 baseline below is supplemented by the separately authorized
-[P6 Host-controlled input contract](P6_BACKGROUND_CONTROL.md). For a
-negotiated P6 session, `Apps/Host` owns local consent and control lifecycle,
-`SecurityCore` owns durable per-peer Keychain grants, `RemoteProtocol` owns
-the capability and separate control/target status fields, `TransportCore`
-owns the local input admission fence, and `InputCore` owns the final safe
-process-target check and posting. Legacy sessions retain foreground-only
-input. P6 permits no app activation, locked-screen input, or exact-window
-promise for an app with multiple windows. The foreground-only invariants in
-the V1 sections must be read with this explicit P6 exception.
+The [P6 Host-controlled input contract](P6_BACKGROUND_CONTROL.md) is an
+explicit negotiated extension to the foreground input path. Host acceptance
+of the authenticated Viewer pairing provides durable input trust for
+process-targeted input to the selected app while it is inactive, subject to
+the P6 target, permission, secure-input, session, and generation checks. Peers
+without P6 remain foreground-only. P6 does not activate the selected app or
+provide locked-screen control. Session pause closes control; unpairing removes
+trust and ends the active session.
 
 ## Architecture intent
 
@@ -103,11 +101,11 @@ responsibilities and dependency direction below.
 
 | Component | Owns | Does not own |
 | --- | --- | --- |
-| `Apps/Host` | Host UI, lifecycle, permission education, window-selection UX, composition of Host packages | Wire framing, codec internals, generic transport policy |
-| `Apps/Viewer` | Viewer UI, discovery/session UX, stream surface, input surface, clipboard consent UI | Host capture, Accessibility injection, trust-store internals |
+| `Apps/Host` | Host UI, lifecycle, permission education, window-selection UX, pairing-trust/capability composition, and Host clipboard bridge | Wire framing, codec internals, generic transport policy |
+| `Apps/Viewer` | Viewer UI, discovery/session UX, stream surface, input surface, and explicit local clipboard opt-in | Host capture, Accessibility injection, trust-store internals |
 | `AppSupport` | Native AppKit menu construction, reusable settings content/window presentation, bundle version/build formatting | Session ownership, permission requests, Keychain access, transport, capture, input authorization |
 | `RemoteProtocol` | Versioned wire messages, frame envelope, serialization/deserialization, capability identifiers, validation limits | Sockets, UI, ScreenCaptureKit, VideoToolbox, Keychain |
-| `CaptureCore` | Host-side application/window enumeration and ScreenCaptureKit capture orchestration, timestamps, capture state | H.264 bitstream policy, network I/O, remote input |
+| `CaptureCore` | Host-side application/window enumeration, selected offscreen/active-window revalidation, ScreenCaptureKit capture orchestration, bounded liveness/restart state, timestamps, capture state | H.264 bitstream policy, network I/O, remote input |
 | `CodecCore` | VideoToolbox compression/decompression adapters, codec configuration, frame metadata, decode output contract | Window selection, transport, user permissions |
 | `TransportCore` | Bonjour discovery, Network.framework connections, channel lifecycle, framing delivery, bounded queues, flow control, reconnect state, and session authorization delivery gates | Product UI, pairing policy, capture, event injection, current macOS permission/focus truth |
 | `InputCore` | Platform-neutral input model, Viewer event normalization, Host coordinate mapping, permission-aware injection adapter contract and final injection-time safety check | Wire serialization, trust decisions, arbitrary background control |
@@ -190,6 +188,10 @@ Additional rules:
   pilot uses TLS bootstrap plus a `SecurityCore.PairingCoordinator` backed by
   the Keychain trust store; the Host owns the consent alert and the Viewer
   owns a code-comparison consent prompt with explicit Accept/Deny actions.
+  After successful pairing, Host reuses that trust as durable input
+  authorization and enables negotiated text clipboard on reconnect without a
+  second Host prompt. Viewer still requires its session-local clipboard
+  opt-in. Unpairing removes trust and closes the active session.
   `MACREMOTEAPP_PEER_CERT` remains an
   optional pinned-peer migration/diagnostic input, not a new-installation
   requirement. The Host remains authoritative by validating eligibility and
@@ -197,15 +199,20 @@ Additional rules:
   eligible-window catalog so the Viewer can replace the selected app without
   reconnecting. On macOS 14 or later, a direct Viewer selection activates
   Host, confirms Host is frontmost, and cooperatively yields activation to
-  that regular app. It may use the public Accessibility raise action for the
-  exact selected target when the Host already has Accessibility trust and can
-  match its geometry unambiguously. Every event still requires the exact
-  selected target to remain live and the active PID plus top regular layer-0
-  window to identify that same app; the top window may have a different ID
-  for an app-owned sheet or popover. If Host foreground cannot be confirmed,
-  cooperative activation is unavailable, or raising is unavailable or
-  ambiguous, input remains fail-closed and the Viewer asks the Host user to
-  click or reactivate MacRemoteApp Host.
+  that regular app for peers without P6. It may use the public Accessibility
+  raise action for the exact selected target when the Host already has
+  Accessibility trust and can match its geometry unambiguously. Legacy input
+  requires the exact target live and the active PID plus top regular layer-0
+  window to identify that app. Negotiated P6 instead uses its Host-authorized
+  process-target and secure-input checks and leaves app activation unchanged.
+  CaptureCore resolves selected windows from the full ScreenCaptureKit
+  catalog, while the picker may show only on-screen targets. A transient
+  catalog snapshot that omits the active selection is withheld from Viewer;
+  three consecutive CaptureCore liveness misses are required before target
+  loss, and an unexpected stream end gets at most two delayed restarts after
+  the same window ID, bundle ID, PID, layer, and geometry are revalidated.
+  This keeps video lifecycle independent from input authorization and does not
+  change RemoteProtocol.
   The Viewer
   shows explicit Connecting, Connected, and Reconnecting states and disables
   duplicate Connect actions while a session is active. Host and Viewer send
@@ -319,8 +326,9 @@ Quit still stops the session through the existing delegate.
 
 The app retains one Settings controller and projects `HostRuntimeStatus` and
 the configured discovery name into it. Screen Recording, PostEvent, and
-optional Accessibility checks are read-only and refresh on activation and
-status updates. Bonjour service state is not a Local Network permission
+Accessibility checks are read-only and refresh on activation and status
+updates; Accessibility is required for P6 background-safety inspection.
+Bonjour service state is not a Local Network permission
 preflight. Rename, Retry setup, Privacy & Security, and confirmed Forget saved
 pairings actions reuse the existing app operations; the settings component
 does not grant permission or mutate trust independently.
@@ -332,9 +340,20 @@ the selected window rather than the whole display. It emits pixel frames with
 a Host monotonic capture-arrival timestamp and a separate media presentation
 timestamp, plus capture-state transitions. Output is sized in pixels at the
 window's display backing scale and fit to the negotiated 1920×1080 cap; the
-size is fixed per capture generation. It must stop or degrade safely when
-the window disappears, the permission is revoked, or the selected window
-becomes ineligible.
+size is fixed per capture generation. The discovery picker may remain limited
+to on-screen windows, but selected-window refresh and engine resolution query
+the full ScreenCaptureKit catalog. `isOnScreen` reports onscreen status, while
+`SCWindow.isActive` reports whether the window is currently streaming and may
+remain true when it is offscreen. A transient missing snapshot does not clear
+the selected capture: three consecutive misses are required before declaring
+target loss. An unexpected stream end enters a visible recovering state and
+gets at most two delayed restarts, each bound to the same window ID, bundle ID,
+PID, layer 0, and valid geometry. Restart lookup does not depend on `isActive`,
+because stream termination itself can clear that flag. Permission revocation,
+owner mismatch, or confirmed target loss still stops capture and fails closed.
+These capture rules do not authorize input; Host input keeps its independent
+pairing, generation, permission, target, focus/P6, secure-input, and lock
+checks.
 
 Stopping an engine can suspend while a replacement capture starts. Cleanup
 must remain bound to the engine and generation being stopped: a late stop or
@@ -351,7 +370,8 @@ with keyframe and timestamp metadata. It owns no socket or session identity.
 `InputCore` validates the Viewer event model, maps normalized Viewer
 coordinates to the selected window's current geometry, and invokes a
 permission-aware CoreGraphics/Accessibility adapter. It must fail closed when
-the selected window is no longer eligible or foreground-controlled.
+the selected window is no longer eligible, or when the applicable foreground
+or negotiated P6 process-target checks fail.
 
 ### Host input admission and cleanup
 
@@ -374,16 +394,13 @@ M6 splits Host input handling across these owners:
   on-screen window identity, foreground ordering/identity, and lock state.
 - `CoreGraphicsAccessibilityInputAdapter` is the only M6 code that
   constructs/posts `CGEvent` values.
-- For an explicit legacy window selection, `HostRuntime` may make a bounded
-  cooperative AppKit activation request on macOS 14 or later, after Host
-  foreground status is confirmed. It is never used for P6 process targeting
-  and is not itself proof of focus. Fresh input checks require the exact
-  selected target to remain a valid layer-0 window, the selected PID to be
-  the active workspace process, and the top regular layer-0 WindowServer
-  window to belong to the selected PID and bundle; the top window may have a
-  different identifier. If Host foreground cannot be confirmed or the
-  cooperative API is unavailable, input stays fail-closed and the Viewer
-  instructs the Host user to click or reactivate MacRemoteApp Host.
+- For an explicit window selection from a peer without P6, `HostRuntime` makes
+  a bounded cooperative AppKit activation request on macOS 14 or later, after
+  Host foreground status is confirmed. The request is not itself proof of
+  focus. Legacy input checks require the exact selected target to remain live,
+  the selected PID to be active, and a top regular layer-0 WindowServer window
+  from that app. Negotiated P6 skips foreground activation and requires its
+  Host pairing trust and known-safe process-target state instead.
 
 The state of admitted pressed input (held keys and buttons) for one selected
 target moves through these states:
@@ -395,7 +412,7 @@ stateDiagram-v2
     Idle --> Idle: unmatched release rejected
     Admitted --> Admitted: further input passes per-event checks
     Admitted --> Released: matching release on the normal input path
-    Admitted --> CleanupPending: revoke, reconnect, stop, focus loss, permission loss, selection change, or stream end
+    Admitted --> CleanupPending: revoke, reconnect, stop, applicable focus or target-safety loss, permission loss, selection change, or stream end
     CleanupPending --> Released: target-bound release while identity, generation, bounds, and permission match
     CleanupPending --> CleanupPending: permission unavailable, retry when a safe snapshot returns
     CleanupPending --> SessionClosed: old target cannot be identified for a safe release
@@ -405,27 +422,29 @@ stateDiagram-v2
 
 Invariants:
 
-1. **Layered per-event checks.** Every command carries the selected window
+1. **Layered per-event checks.** Every command carries the selected target
    identity, owning application identifier, process, and generation. The
-   controller rechecks session/window/capability facts and current
-   permission, foreground identity, and geometry; the adapter repeats the
-   complete target/focus/owning-application/permission check immediately
-   before target-bound process posting. A `TransportCore` authorization
-   decision alone never authorizes an OS event.
-2. **No background activation.** The input adapter never activates a window.
-   HostRuntime activation is limited to an explicit legacy selection; P6
-   process targeting never foregrounds its app. No private API or bypass is
-   used.
+   controller rechecks session/window/capability facts and current permission,
+   applicable focus or P6 process-target eligibility, and geometry; the
+   adapter repeats the complete target/owning-application/permission check
+   immediately before posting. A `TransportCore` authorization decision alone
+   never authorizes an OS event.
+2. **Explicit focus policy.** The adapter never activates a window. Legacy
+   peers require foreground eligibility; after explicit selection Host may
+   activate itself and cooperatively yield to the target. Negotiated P6 may
+   target the authorized selected process while inactive, without activating
+   it. No private API or locked-screen bypass is used.
 3. **Fail-closed secure input.** A detected secure-input field or an unknown
    console state is rejected. When the optional AX secure-input signal is
-   unavailable, it does not replace the independent foreground/window checks,
-   which still protect the base PostEvent path.
+   unavailable, it does not replace the independent foreground/window checks
+   for legacy input; P6 requires the stricter known-safe process-target state
+   defined in its contract.
 4. **Admission fence.** Local revoke, reconnect, and stop cannot invalidate
    authorization between the admission check and the Host injection call,
    because input handed to the stream waiter runs inside
    `withIncomingInputAdmission`.
-5. **Queued input is discarded** on local authorization, permission, focus,
-   and selection transitions (local safety transitions).
+5. **Queued input is discarded** on local authorization, permission,
+   applicable focus or P6 target-safety, and selection transitions.
 6. **Release before clear.** Host reset attempts a safe release of admitted
    pressed state before clearing it and uses a reserved state-ending rate
    lane. Unmatched releases are rejected.
@@ -433,9 +452,9 @@ Invariants:
    restricted target-bound path after authorization loss or a known focus
    loss. After authorization is revoked, cleanup may only release
    controller-admitted state while the same window identity, generation,
-   current bounds, and permission still match. A target known to be not
-   foreground is allowed only for this release path; normal input still
-   requires eligible foreground focus.
+   current bounds, and permission still match. A known inactive target may
+   receive negotiated P6 input only while its process-target checks pass;
+   otherwise it is allowed only for this release path.
 8. **Selection-change ordering.** Host lifecycle code uses
    `withSelectionReplacement()` (or pairs `selectionWillChange()`/
    `selectionDidChange()`) so the transition is announced before CaptureCore's
@@ -555,6 +574,11 @@ invalidates queued work before it can enter a replacement session. Queue
 overflow ends the affected session so Host-side held-input cleanup runs rather
 than silently losing a key or button release. Settings navigation within the
 same session still sends the surface's ordered release events.
+Failures proven to occur before a transport write, such as local preflight,
+capability, or current-readiness rejection, invalidate queued input and
+re-evaluate Viewer readiness while preserving the authenticated video session.
+Any send-stage failure with uncertain delivery ends the session so Host-side
+held-input cleanup runs; a rejected held-state release does the same.
 Precise scroll input retains a bounded per-axis fractional remainder before
 integer wire encoding; readiness/window changes clear that remainder.
 
@@ -587,9 +611,13 @@ independent bounded scheduling queue with a keyframe-aware drop policy:
 when full it discards the incoming delta frame, never a queued one, and then
 skips every later delta frame until a keyframe, because H.264 delta frames
 reference earlier pictures. A keyframe purges queued delta frames it
-supersedes. `VideoConfig` and keyframes are never discarded. Media sequences
-are strictly increasing, but a discarded frame may create a forward media gap;
-control sequences remain contiguous. The baseline V1 binding is one ordered
+supersedes. A newer independently decodable keyframe may also replace older
+queued keyframes and delta frames; it preserves queued `VideoConfig` and
+control messages. If required media fills the queue, the keyframe is rejected
+with media backpressure and later deltas remain gated until a keyframe is
+admitted. Media sequences are strictly increasing, but a discarded frame may
+create a forward media gap; control sequences remain contiguous. The baseline
+V1 binding is one ordered
 Network.framework TCP stream protected by the same authenticated session
 policy; control is prioritized between individual writes, while TCP
 head-of-line blocking remains an M8 measurement concern. M8 may evaluate a
@@ -634,8 +662,9 @@ selected-window identity, and permission state.
 - H.264 is the V1 interoperability baseline. HEVC or other codecs are not
   added as speculative features.
 - Screen Recording and PostEvent permissions are Host capabilities and are
-  surfaced by the Host UI; Accessibility is an optional AX/secure-input
-  enhancement. Packages must return structured permission states.
+  surfaced by the Host UI. Accessibility is optional for legacy foreground
+  input, but P6 background input requires known-safe AX inspection. Packages
+  must return structured permission states.
 - The exact macOS deployment target is an M0 decision and must be tested on
   both target architectures where possible.
 - All platform-specific APIs live behind package adapters so protocol and

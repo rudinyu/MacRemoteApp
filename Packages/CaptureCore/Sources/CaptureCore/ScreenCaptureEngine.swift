@@ -37,13 +37,14 @@ public final class ScreenCaptureEngine: NSObject, WindowCaptureEngine, SCStreamO
 
         let content = try await SCShareableContent.excludingDesktopWindows(
             true,
-            onScreenWindowsOnly: true
+            onScreenWindowsOnly: false
         )
         guard let shareableWindow = content.windows.first(where: {
             UInt64($0.windowID) == window.identifier &&
                 $0.owningApplication?.bundleIdentifier == window.applicationIdentifier &&
                 $0.owningApplication?.processID == window.processIdentifier &&
-                $0.isOnScreen
+                $0.windowLayer == 0 &&
+                Self.hasValidGeometry($0, configuration: configuration)
         }) else {
             throw CaptureCoreError.windowUnavailable
         }
@@ -146,6 +147,29 @@ public final class ScreenCaptureEngine: NSObject, WindowCaptureEngine, SCStreamO
         } else {
             continuation.finish()
         }
+    }
+
+    private static func hasValidGeometry(
+        _ window: SCWindow,
+        configuration: CaptureConfiguration
+    ) -> Bool {
+        let frame = window.frame
+        guard frame.origin.x.isFinite,
+              frame.origin.y.isFinite,
+              frame.width.isFinite,
+              frame.height.isFinite,
+              frame.width > 0,
+              frame.height > 0 else {
+            return false
+        }
+        return configuration.acceptsWindowSize(
+            WindowBounds(
+                x: frame.origin.x,
+                y: frame.origin.y,
+                width: frame.width,
+                height: frame.height
+            )
+        )
     }
 }
 

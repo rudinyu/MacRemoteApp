@@ -2,12 +2,18 @@
 
 ## P6 negotiated extension
 
-The separately authorized [P6 contract](P6_BACKGROUND_CONTROL.md) supplements
-the V1 foreground-only baseline below. Optional `backgroundControl` capability
+P6 is the negotiated process-target extension documented in
+[the P6 contract](P6_BACKGROUND_CONTROL.md). When both peers support it and
+the Host has accepted the authenticated Viewer pairing, the Viewer may control
+the selected app while it is inactive. Peers without the capability retain the
+foreground-only input path. Pairing trust does not bypass per-event checks, and
+capability negotiation alone grants no permission.
+
+Optional `backgroundControl` capability
 `0x000A` is separate from `keyframeRequest` (`0x0007`), `receiverReport`
 (`0x0008`), and `inputSourceSync` (`0x0009`). It grants nothing by negotiation
-alone: Host-local consent, current selection authorization, and the final
-platform safety checks remain required.
+alone: Host-accepted pairing trust, current selection authorization, and the
+final platform safety checks remain required.
 
 Host `SessionState` adds optional field 5, `controlState` (u8), and field 6,
 `processTargetEligible` (bool), plus field 7, `controlGeneration` (u64).
@@ -41,8 +47,12 @@ authorize implementing later milestone behavior early.
 The protocol supports one Viewer, one selected Host window, authenticated
 control, H.264 video, mouse/keyboard input, and opt-in text clipboard exchange.
 It excludes Internet traversal, WebRTC, audio, file transfer, arbitrary
-pasteboard types, multi-window sessions, background control, and locked-screen
-control.
+pasteboard types, multi-window sessions, arbitrary or unnegotiated background
+control, and locked-screen control. The negotiated P6 extension above defines
+Host-authorized process targeting for an inactive selected app. The M10
+capture-continuity integration does not add wire messages: the selected video
+stream is independent of app foreground state, and transient picker-catalog
+omissions do not revoke the active selection.
 
 ## Transport binding
 
@@ -169,8 +179,11 @@ canonical encoding, and golden test vectors in `docs/M1_PROTOCOL.md`.
 5. The Host reports whether a selected window and required permissions are
    available.
 6. The session becomes stream-ready only after authorization for the one
-   selected window. Input and clipboard are independently enabled according to
-   policy and consent.
+   selected window. Input remains separately authorized by capability,
+   accepted Host pairing trust, current target/generation, permissions, and
+   platform safety checks. The Host enables its negotiated clipboard bridge
+   from accepted pairing trust; the Viewer still requires its session-local
+   clipboard opt-in.
 
 Capabilities must be additive and versioned. Unknown optional capabilities may
 be ignored; unknown mandatory capabilities must fail closed.
@@ -184,13 +197,20 @@ eligibility state. The identifier is not a permanent security credential.
 The Host is authoritative for selection. A Viewer request cannot select a
 window that the Host did not expose, and a stale identifier is rejected. The
 Host refreshes the eligible catalog during an active session so the Viewer can
-switch applications without reconnecting. A requested eligible regular app is
-brought to the Host foreground as a direct consequence of that explicit
-selection; input remains disabled until the Host independently confirms the
-selected window is foreground-eligible. The per-event permission, focus,
-identity, and generation checks remain mandatory. When a window closes,
-changes identity, loses permission, or becomes ineligible, the Host disables
-input before stopping or renegotiating the stream.
+switch applications without reconnecting. The catalog is picker data, not the
+liveness authority for an already selected target: the Host does not publish a
+transient snapshot that omits its active selection, and CaptureCore tolerates
+brief selected-window lookup gaps before declaring confirmed target loss. For
+peers without P6, an explicitly selected eligible regular app may be brought
+to the Host foreground and input still requires foreground eligibility. P6
+keeps the selected app at its current activation state and permits process
+input only through its separate Host authorization and safety checks. In both
+paths, the selected-window stream continues while the app is inactive or
+occluded. Unexpected capture-stream completion enters a bounded local restart
+path after the Host rechecks the same window ID, bundle ID, PID, layer, and
+valid geometry; this state transition does not change the wire protocol or
+authorization generation. Permission loss, confirmed target loss, or owner
+mismatch stops capture and fails closed.
 
 ## Video contract
 
@@ -208,9 +228,12 @@ input before stopping or renegotiating the stream.
 - Backpressure: the media queue is bounded and must never grow without limit.
   When full it discards the incoming delta frame and then skips delta frames
   until the next keyframe, so a decoder never receives a delta frame whose
-  reference was dropped. A keyframe purges queued delta frames. `VideoConfig`
-  and keyframes are never discarded. A sender that observes a discard forces
-  its next frame to a keyframe.
+  reference was dropped. A newer independently decodable keyframe may replace
+  older queued keyframes and delta frames while preserving `VideoConfig` and
+  control messages. If required media fills the queue, the keyframe is rejected
+  with media backpressure; delta frames remain gated until a keyframe is
+  admitted. A sender that observes a discard forces its next frame to be a
+  keyframe.
 - Keyframe request (M8): when both endpoints negotiate the optional
   `keyframeRequest` capability and the Host authorizes it for the selected
   window, the Viewer sends `KeyframeRequest` on the control channel after an
@@ -259,13 +282,14 @@ event archive. It contains only the defined V1 event types:
 
 Coordinates are normalized to the current displayed remote-content rectangle,
 not the Viewer desktop. The Host maps them to the selected window's current
-geometry and clamps/rejects values outside the authorized content. The Host
-must reject events when the selected window is not foreground-eligible, the
-PostEvent permission is unavailable, the session is not authorized, or the
-event rate/sequence is invalid.
+geometry and clamps/rejects values outside the authorized content. Legacy
+input requires foreground eligibility; negotiated P6 input requires a safe,
+authorized process target instead. Both paths require PostEvent permission,
+session authorization, and valid event rate/sequence.
 
 V1 does not transfer arbitrary key logs, secure-input contents, password
-prompts, or events intended for background/unfocused applications.
+prompts, or events intended for unselected or unauthorized background
+applications.
 
 The concrete input bindings are recorded as decision records:
 

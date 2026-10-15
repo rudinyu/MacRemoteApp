@@ -35,6 +35,21 @@ failure during promotion restores it.
 Use `scripts/validate-notarized-release.sh` directly to validate an existing
 notarized release without rebuilding or replacing it.
 
+The M10 Debug diagnostic app packages use the separate
+`build/debug-diagnostic/` channel and filenames that include the channel and
+bundle build number. `scripts/package-debug-diagnostic-apps.sh` builds only
+SwiftPM Debug Host/Viewer targets in a fresh `.build/m10-debug-diagnostic/`
+generation; `scripts/audit-debug-diagnostic-apps.sh` audits the signed apps,
+versioned ZIPs, and DMGs before promotion to the debug-only output directory.
+Replacement preserves the prior debug channel until the new generation passes
+the audit and rolls back if final-path validation fails. M9 release packaging,
+notarization, promotion, release audit, and notarized-release validation reject
+this channel. The exact Debug notarization entry point is
+`scripts/notarize-debug-diagnostic-apps.sh`; it submits and staples only the
+Debug diagnostic artifacts and promotes them only into the debug channel.
+Those apps retain the production bundle IDs and executable names, so they
+replace the same installed role apps and reuse their TCC and Keychain identity.
+
 ## Threat-model review
 
 | Boundary | Required control | Evidence |

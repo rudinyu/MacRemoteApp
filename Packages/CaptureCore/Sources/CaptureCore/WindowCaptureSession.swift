@@ -11,12 +11,22 @@ public actor WindowCaptureSession {
 
     private var state: CaptureSessionState = .idle
     private var selectedWindow: CaptureWindow?
+    /// Descriptor used to size every engine in this capture generation. The
+    /// selected descriptor may receive refreshed geometry, while the wire
+    /// stream dimensions remain fixed until the Viewer selects a new window.
+    private var captureEngineWindow: CaptureWindow?
     private var outputDimensions: CaptureOutputDimensions?
     private var generation: UInt64 = 0
     private var permission: CapturePermissionState = .denied
     private var engine: (any WindowCaptureEngine)?
     private var relayTask: Task<Void, Never>?
     private var monitorTask: Task<Void, Never>?
+    private var recoveryTask: Task<Void, Never>?
+    private var consecutiveSelectionMisses = 0
+    private var captureRestartAttempts = 0
+    private static let maximumConsecutiveSelectionMisses = 3
+    private static let maximumCaptureRestartAttempts = 2
+    private static let captureRestartDelayNanoseconds: UInt64 = 250_000_000
 
     public init(
         windowProvider: any WindowDiscoveryProvider,
@@ -68,14 +78,7 @@ public actor WindowCaptureSession {
     }
 
     public func start(windowIdentifier: UInt64) async throws {
-        if case let .failed(failure) = state {
-            // A capture/provider failure invalidates the current selection,
-            // but it must not permanently close the shared frame stream. The
-            // Host reuses this actor after a permission recovery, window
-            // replacement, or reconnect, so a later start must be allowed to
-            // establish a fresh generation on the same stream.
-            state = .stopped(failure)
-        }
+        prepareForStart()
         permission = await windowProvider.permissionState()
         guard permission == .authorized else {
             throw CaptureCoreError.permissionDenied
@@ -91,6 +94,55 @@ public actor WindowCaptureSession {
             throw CaptureCoreError.invalidWindow
         }
 
+        try await startResolvedWindow(window)
+    }
+
+    /// Starts from the exact descriptor validated by Host's selection and
+    /// catalog generations. This rechecks the same owner through the full
+    /// ScreenCaptureKit catalog, even if the app became inactive after the
+    /// Viewer selected it.
+    public func start(window expectedWindow: CaptureWindow) async throws {
+        prepareForStart()
+        permission = await windowProvider.permissionState()
+        guard permission == .authorized else {
+            throw CaptureCoreError.permissionDenied
+        }
+        guard expectedWindow.eligible else {
+            throw CaptureCoreError.invalidWindow
+        }
+
+        let refresh: CaptureWindowRefreshResult
+        do {
+            refresh = try await windowProvider.resolveSelectedWindowForCapture(expectedWindow)
+        } catch {
+            if let captureError = error as? CaptureCoreError,
+               captureError == .permissionDenied {
+                permission = .denied
+                throw CaptureCoreError.permissionDenied
+            }
+            throw CaptureCoreError.providerFailed(String(describing: error))
+        }
+        guard case let .available(window) = refresh,
+              window.hasSameOwner(as: expectedWindow),
+              window.eligible else {
+            throw CaptureCoreError.windowUnavailable
+        }
+
+        try await startResolvedWindow(window)
+    }
+
+    private func prepareForStart() {
+        if case let .failed(failure) = state {
+            // A capture/provider failure invalidates the current selection,
+            // but it must not permanently close the shared frame stream. The
+            // Host reuses this actor after a permission recovery, window
+            // replacement, or reconnect, so a later start must be allowed to
+            // establish a fresh generation on the same stream.
+            state = .stopped(failure)
+        }
+    }
+
+    private func startResolvedWindow(_ window: CaptureWindow) async throws {
         await stop()
         generation &+= 1
         let sessionGeneration = generation
@@ -100,6 +152,9 @@ public actor WindowCaptureSession {
         let newEngine = engineFactory.makeEngine()
         let relayTermination = CaptureRelayTermination()
         selectedWindow = window
+        captureEngineWindow = window
+        consecutiveSelectionMisses = 0
+        captureRestartAttempts = 0
         // The engine sizes its stream from this same window value, so the
         // dimensions are pinned here for the whole generation.
         outputDimensions = configuration.outputDimensions(for: window)
@@ -140,8 +195,11 @@ public actor WindowCaptureSession {
     public func stop() async {
         let stoppingGeneration = generation
         frameGenerationGate.advance(to: generation &+ 1)
+        recoveryTask?.cancel()
+        recoveryTask = nil
         monitorTask?.cancel()
         monitorTask = nil
+        consecutiveSelectionMisses = 0
         relayTask?.cancel()
         relayTask = nil
         let activeEngine = engine
@@ -157,6 +215,7 @@ public actor WindowCaptureSession {
         await activeEngine?.stop()
         guard generation == stoppingGeneration else { return }
         selectedWindow = nil
+        captureEngineWindow = nil
         outputDimensions = nil
         state = .stopped(.cancelled)
     }
@@ -164,7 +223,19 @@ public actor WindowCaptureSession {
     /// Rechecks permission and the selected window. The Host can call this
     /// after a permission notification or from the bounded monitor task.
     public func refreshSelection() async {
-        guard case let .capturing(windowIdentifier, sessionGeneration) = state else {
+        let windowIdentifier: UInt64
+        let sessionGeneration: UInt64
+        let isRecovering: Bool
+        switch state {
+        case let .capturing(identifier, currentGeneration):
+            windowIdentifier = identifier
+            sessionGeneration = currentGeneration
+            isRecovering = false
+        case let .recovering(identifier, currentGeneration):
+            windowIdentifier = identifier
+            sessionGeneration = currentGeneration
+            isRecovering = true
+        default:
             return
         }
         permission = await windowProvider.permissionState()
@@ -173,27 +244,55 @@ public actor WindowCaptureSession {
             await fail(.permissionDenied)
             return
         }
+        // The dedicated restart lookup revalidates the previously authorized
+        // descriptor without requiring isActive. A normal liveness lookup can
+        // report false precisely because the stream has ended, so it must not
+        // consume the target-miss budget while recovery is in progress.
+        guard !isRecovering else { return }
         do {
-            let windows = try await windowProvider.discoverWindows()
-            guard isCapturing(generation: sessionGeneration) else { return }
             guard let activeWindow = selectedWindow,
                   activeWindow.identifier == windowIdentifier else {
                 return
             }
-            guard let selected = windows.first(where: {
-                $0.identifier == windowIdentifier &&
-                    $0.hasSameOwner(as: activeWindow) &&
-                    $0.eligible
-            }) else {
+            let result = try await windowProvider.refreshSelectedWindow(activeWindow)
+            guard isCapturing(generation: sessionGeneration) else { return }
+            switch result {
+            case let .available(selected):
+                guard selected.hasSameOwner(as: activeWindow), selected.eligible else {
+                    await fail(.windowUnavailable)
+                    return
+                }
+                consecutiveSelectionMisses = 0
+                selectedWindow = selected
+            case .ownerMismatch:
                 await fail(.windowUnavailable)
                 return
+            case .unavailable:
+                await recordSelectionMiss(.windowUnavailable, generation: sessionGeneration)
+                return
             }
-            selectedWindow = selected
-            guard generation == sessionGeneration else { return }
         } catch {
             guard isCapturing(generation: sessionGeneration) else { return }
-            await fail(.providerFailed(String(describing: error)))
+            if let captureError = error as? CaptureCoreError,
+               captureError == .permissionDenied {
+                permission = .denied
+                await fail(.permissionDenied)
+            } else {
+                await recordSelectionMiss(
+                    .providerFailed(String(describing: error)),
+                    generation: sessionGeneration
+                )
+            }
         }
+    }
+
+    private func recordSelectionMiss(_ failure: CaptureFailure, generation: UInt64) async {
+        guard isCapturing(generation: generation) else { return }
+        consecutiveSelectionMisses += 1
+        guard consecutiveSelectionMisses >= Self.maximumConsecutiveSelectionMisses else {
+            return
+        }
+        await fail(failure)
     }
 
     private func startRelay(
@@ -241,8 +340,12 @@ public actor WindowCaptureSession {
     }
 
     private func isCapturing(generation: UInt64) -> Bool {
-        guard case let .capturing(_, currentGeneration) = state else { return false }
-        return currentGeneration == generation
+        switch state {
+        case let .capturing(_, currentGeneration), let .recovering(_, currentGeneration):
+            return currentGeneration == generation
+        default:
+            return false
+        }
     }
 
     private func receive(_ frame: CapturedFrame, generation: UInt64) {
@@ -266,17 +369,13 @@ public actor WindowCaptureSession {
             await fail(startupFailure)
             return
         }
-        guard case let .capturing(_, currentGeneration) = state,
-              currentGeneration == generation else {
+        guard isCapturing(generation: generation) else {
             return
         }
-        engine = nil
-        relayTask = nil
-        monitorTask?.cancel()
-        monitorTask = nil
-        state = .stopped(nil)
-        selectedWindow = nil
-        outputDimensions = nil
+        await scheduleCaptureRestart(
+            .captureFailed("capture stream ended unexpectedly"),
+            generation: generation
+        )
     }
 
     private func relayFailed(
@@ -288,7 +387,142 @@ public actor WindowCaptureSession {
             await failedEngine.stop()
             return
         }
-        await fail(failure)
+        if case .starting = state {
+            await fail(failure)
+        } else {
+            await scheduleCaptureRestart(failure, generation: failedGeneration)
+        }
+    }
+
+    private func scheduleCaptureRestart(_ failure: CaptureFailure, generation failedGeneration: UInt64) async {
+        guard isCapturing(generation: failedGeneration),
+              generation == failedGeneration else {
+            return
+        }
+        guard captureRestartAttempts < Self.maximumCaptureRestartAttempts,
+              let selectedWindow else {
+            await fail(failure)
+            return
+        }
+
+        captureRestartAttempts += 1
+        let nextGeneration = failedGeneration &+ 1
+        generation = nextGeneration
+        frameGenerationGate.advance(to: nextGeneration)
+        state = .recovering(
+            windowIdentifier: selectedWindow.identifier,
+            generation: nextGeneration
+        )
+        let endedEngine = engine
+        engine = nil
+        relayTask = nil
+        frameChannel.replace()
+        monitorTask?.cancel()
+        startMonitor(generation: nextGeneration)
+
+        recoveryTask?.cancel()
+        recoveryTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: Self.captureRestartDelayNanoseconds)
+            } catch {
+                return
+            }
+            await self?.recoverCaptureEngine(generation: nextGeneration)
+        }
+        await endedEngine?.stop()
+    }
+
+    private func recoverCaptureEngine(generation recoveryGeneration: UInt64) async {
+        guard isRecovering(generation: recoveryGeneration),
+              let expectedWindow = selectedWindow else {
+            return
+        }
+        permission = await windowProvider.permissionState()
+        guard isRecovering(generation: recoveryGeneration) else { return }
+        guard permission == .authorized else {
+            await fail(.permissionDenied)
+            return
+        }
+
+        let refreshed: CaptureWindow
+        do {
+            switch try await windowProvider.resolveSelectedWindowForCapture(expectedWindow) {
+            case let .available(window):
+                guard window.hasSameOwner(as: expectedWindow), window.eligible else {
+                    await fail(.windowUnavailable)
+                    return
+                }
+                refreshed = window
+            case .ownerMismatch:
+                await fail(.windowUnavailable)
+                return
+            case .unavailable:
+                await scheduleCaptureRestart(.windowUnavailable, generation: recoveryGeneration)
+                return
+            }
+        } catch {
+            guard isRecovering(generation: recoveryGeneration) else { return }
+            if let captureError = error as? CaptureCoreError,
+               captureError == .permissionDenied {
+                permission = .denied
+                await fail(.permissionDenied)
+            } else {
+                await scheduleCaptureRestart(
+                    .providerFailed(String(describing: error)),
+                    generation: recoveryGeneration
+                )
+            }
+            return
+        }
+        guard isRecovering(generation: recoveryGeneration) else { return }
+        selectedWindow = refreshed
+        let engineWindow = captureEngineWindow ?? expectedWindow
+
+        let newEngine = engineFactory.makeEngine()
+        let relayTermination = CaptureRelayTermination()
+        engine = newEngine
+        startRelay(
+            for: newEngine,
+            generation: recoveryGeneration,
+            termination: relayTermination
+        )
+
+        do {
+            try await newEngine.start(window: engineWindow, generation: recoveryGeneration)
+        } catch {
+            guard isRecovering(generation: recoveryGeneration),
+                  let currentEngine = engine,
+                  currentEngine === newEngine else {
+                await newEngine.stop()
+                return
+            }
+            await scheduleCaptureRestart(
+                .captureFailed(String(describing: error)),
+                generation: recoveryGeneration
+            )
+            return
+        }
+        guard isRecovering(generation: recoveryGeneration),
+              let currentEngine = engine,
+              currentEngine === newEngine else {
+            await newEngine.stop()
+            return
+        }
+        if let startupFailure = relayTermination.completeStartup() {
+            await scheduleCaptureRestart(startupFailure, generation: recoveryGeneration)
+            return
+        }
+        state = .capturing(
+            windowIdentifier: refreshed.identifier,
+            generation: recoveryGeneration
+        )
+        recoveryTask = nil
+        startMonitor(generation: recoveryGeneration)
+    }
+
+    private func isRecovering(generation: UInt64) -> Bool {
+        guard case let .recovering(_, currentGeneration) = state else { return false }
+        return currentGeneration == generation
     }
 
     private func owns(
@@ -317,7 +551,9 @@ public actor WindowCaptureSession {
             return false
         }
         switch state {
-        case let .starting(_, currentGeneration), let .capturing(_, currentGeneration):
+        case let .starting(_, currentGeneration),
+             let .capturing(_, currentGeneration),
+             let .recovering(_, currentGeneration):
             return currentGeneration == candidateGeneration
         default:
             return false
@@ -327,6 +563,8 @@ public actor WindowCaptureSession {
     private func fail(_ failure: CaptureFailure) async {
         let failedGeneration = generation
         frameGenerationGate.advance(to: failedGeneration &+ 1)
+        recoveryTask?.cancel()
+        recoveryTask = nil
         monitorTask?.cancel()
         monitorTask = nil
         relayTask?.cancel()
@@ -337,6 +575,7 @@ public actor WindowCaptureSession {
         await activeEngine?.stop()
         guard generation == failedGeneration else { return }
         selectedWindow = nil
+        captureEngineWindow = nil
         outputDimensions = nil
         // End only this generation's stream so a waiting consumer observes
         // the failure instead of waiting forever. `frames` stays reusable:

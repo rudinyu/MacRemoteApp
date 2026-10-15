@@ -100,6 +100,15 @@ final class HostInputSessionLoop: @unchecked Sendable {
     }
 
     func run() async {
+#if DEBUG
+        let diagnosticConnectionSequence = M10HostDiagnosticFileLog.shared.connectionSequence(for: session)
+        defer {
+            M10HostInputDiagnostics.shared.finishConnection(
+                connectionSequence: diagnosticConnectionSequence
+            )
+            M10HostDiagnosticFileLog.shared.unbind(session)
+        }
+#endif
         var iterator = session.incomingMessages.makeAsyncIterator()
         let lifecycleTask = Task { [session, handler, admissionGate, onInputStatusChange] in
             var previous = await session.snapshot()
@@ -211,21 +220,72 @@ final class HostInputSessionLoop: @unchecked Sendable {
                     await onNonInputMessage(message)
                     continue
                 }
+#if DEBUG
+                M10HostInputDiagnostics.shared.recordReceived(
+                    connectionSequence: diagnosticConnectionSequence
+                )
+#endif
+                let receivedAtNanoseconds = now()
                 guard await admissionGate.beginInput() else {
                     // A selection replacement owns the admission barrier. The
                     // current event is consumed and rejected rather than
                     // allowing it to target either side of the transition.
+#if DEBUG
+                    M10HostInputDiagnostics.shared.recordRejected(
+                        .selectionTransition,
+                        connectionSequence: diagnosticConnectionSequence
+                    )
+#endif
                     continue
                 }
                 do {
                     let timestampNanoseconds = now()
                     _ = try await session.withIncomingInputAdmission(for: input) {
-                        try handler.handle(
-                            input,
-                            timestampNanoseconds: timestampNanoseconds
+                        let handlerStartedAt = now()
+#if DEBUG
+                        M10HostInputDiagnostics.shared.recordAdmitted(
+                            queueWaitNanoseconds: handlerStartedAt >= receivedAtNanoseconds
+                                ? handlerStartedAt - receivedAtNanoseconds
+                                : 0,
+                            connectionSequence: diagnosticConnectionSequence
                         )
+#endif
+                        do {
+                            let result = try handler.handle(
+                                input,
+                                timestampNanoseconds: timestampNanoseconds
+                            )
+#if DEBUG
+                            let handlerEndedAt = now()
+                            M10HostInputDiagnostics.shared.recordHandlerDuration(
+                                handlerEndedAt >= handlerStartedAt ? handlerEndedAt - handlerStartedAt : 0,
+                                connectionSequence: diagnosticConnectionSequence
+                            )
+#endif
+                            return result
+                        } catch {
+#if DEBUG
+                            let handlerEndedAt = now()
+                            M10HostInputDiagnostics.shared.recordHandlerDuration(
+                                handlerEndedAt >= handlerStartedAt ? handlerEndedAt - handlerStartedAt : 0,
+                                connectionSequence: diagnosticConnectionSequence
+                            )
+#endif
+                            throw error
+                        }
                     }
+#if DEBUG
+                    M10HostInputDiagnostics.shared.recordInjected(
+                        connectionSequence: diagnosticConnectionSequence
+                    )
+#endif
                 } catch {
+#if DEBUG
+                    M10HostInputDiagnostics.shared.recordRejected(
+                        Self.debugRejectionReason(after: error),
+                        connectionSequence: diagnosticConnectionSequence
+                    )
+#endif
                     if Self.requiresInputReset(after: error) {
                         let rejectedStatus = handler.status()
                         await session.discardPendingInputMessages()
@@ -382,6 +442,44 @@ final class HostInputSessionLoop: @unchecked Sendable {
         }
         return false
     }
+
+#if DEBUG
+    static func debugRejectionReason(
+        after error: Error
+    ) -> M10HostInputRejectionReason {
+        if let error = error as? HostInputError {
+            switch error {
+            case .sessionUnauthorized, .windowGenerationMismatch, .capabilityUnavailable:
+                return .authorization
+            case .permissionUnavailable:
+                return .permission
+            case .focusUnavailable:
+                return .focus
+            case .windowUnavailable, .invalidWindowGeometry:
+                return .target
+            case .inputStateCleanupPending:
+                return .cleanup
+            case .invalidEvent, .replayedEvent, .rateLimited, .invalidModifierMask,
+                 .unsupportedButton, .unmatchedStateRelease:
+                return .invalidEvent
+            }
+        }
+        if let error = error as? HostInputAdapterError {
+            switch error {
+            case .permissionUnavailable:
+                return .permission
+            case .targetUnavailable:
+                return .target
+            case .eventCreationFailed, .unsupportedButton:
+                return .other
+            }
+        }
+        if error is SessionError {
+            return .authorization
+        }
+        return .other
+    }
+#endif
 
     private static func wireStatus(
         for outcome: InputSourceSelectionOutcome

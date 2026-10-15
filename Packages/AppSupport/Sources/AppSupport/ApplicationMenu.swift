@@ -9,6 +9,7 @@ public final class ApplicationMenu: NSObject {
     private let onShowWindow: () -> Void
     private let onActivate: () -> Void
     private let onAboutClose: () -> Void
+    private let onOpenDebugLog: (() -> Void)?
     private var aboutWindow: SettingsWindowController?
 
     public var isAboutVisible: Bool {
@@ -21,7 +22,8 @@ public final class ApplicationMenu: NSObject {
         onSettings: @escaping () -> Void,
         onShowWindow: @escaping () -> Void,
         onActivate: @escaping () -> Void = {},
-        onAboutClose: @escaping () -> Void = {}
+        onAboutClose: @escaping () -> Void = {},
+        onOpenDebugLog: (() -> Void)? = nil
     ) {
         self.applicationName = applicationName
         self.metadata = metadata
@@ -29,6 +31,7 @@ public final class ApplicationMenu: NSObject {
         self.onShowWindow = onShowWindow
         self.onActivate = onActivate
         self.onAboutClose = onAboutClose
+        self.onOpenDebugLog = onOpenDebugLog
     }
 
     public func install() {
@@ -38,6 +41,12 @@ public final class ApplicationMenu: NSObject {
         add("About \(applicationName)", #selector(showAbout), to: appMenu, target: self)
         appMenu.addItem(.separator())
         add("Settings…", #selector(showSettings), key: ",", to: appMenu, target: self)
+#if DEBUG
+        if onOpenDebugLog != nil {
+            appMenu.addItem(.separator())
+            add("Open Debug Log…", #selector(openDebugLog), to: appMenu, target: self)
+        }
+#endif
         appMenu.addItem(.separator())
         let services = submenu("Services", in: appMenu)
         application.servicesMenu = services
@@ -79,6 +88,10 @@ public final class ApplicationMenu: NSObject {
 
     @objc public func showSettings() { onSettings() }
     @objc public func showMainWindow() { onShowWindow() }
+
+#if DEBUG
+    @objc private func openDebugLog() { onOpenDebugLog?() }
+#endif
 
     private func submenu(_ title: String, in parent: NSMenu) -> NSMenu {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")

@@ -20,6 +20,14 @@ public struct EnvelopeStream: AsyncSequence, Sendable {
         }
     }
 
+    struct ReceiptAwareAsyncIterator: AsyncIteratorProtocol {
+        fileprivate let storage: EnvelopeStreamStorage
+
+        mutating func next() async throws -> EnvelopeStreamElement? {
+            try await storage.nextStamped()
+        }
+    }
+
     fileprivate let storage: EnvelopeStreamStorage
 
     fileprivate init(storage: EnvelopeStreamStorage) {
@@ -29,6 +37,28 @@ public struct EnvelopeStream: AsyncSequence, Sendable {
     public func makeAsyncIterator() -> AsyncIterator {
         AsyncIterator(storage: storage)
     }
+
+    func makeReceiptAwareAsyncIterator() -> ReceiptAwareAsyncIterator {
+        ReceiptAwareAsyncIterator(storage: storage)
+    }
+
+    func installReceiptStampProvider(_ provider: @escaping @Sendable () -> EnvelopeReceiptStamp) {
+        storage.installReceiptStampProvider(provider)
+    }
+
+    func removeProtectedMessages() {
+        storage.removeProtectedMessages()
+    }
+}
+
+struct EnvelopeReceiptStamp: Sendable {
+    let epoch: UInt64
+    let transitionInFlight: Bool
+}
+
+struct EnvelopeStreamElement: Sendable {
+    let envelope: Envelope
+    let receiptStamp: EnvelopeReceiptStamp?
 }
 
 internal enum EnvelopeStreamYieldResult: Equatable, Sendable {
@@ -40,9 +70,10 @@ internal final class EnvelopeStreamStorage: @unchecked Sendable {
     private let lock = NSLock()
     private let maxControlFrames: Int
     private let maxMediaFrames: Int
-    private var queue: [Envelope] = []
+    private var queue: [EnvelopeStreamElement] = []
     private var mediaAdmission = KeyframeAwareMediaAdmission()
-    private var waiter: CheckedContinuation<Envelope?, Error>?
+    private var waiter: CheckedContinuation<EnvelopeStreamElement?, Error>?
+    private var receiptStampProvider: (@Sendable () -> EnvelopeReceiptStamp)?
     private var isFinished = false
     private var terminalError: Error?
 
@@ -55,8 +86,12 @@ internal final class EnvelopeStreamStorage: @unchecked Sendable {
     }
 
     func next() async throws -> Envelope? {
+        try await nextStamped()?.envelope
+    }
+
+    func nextStamped() async throws -> EnvelopeStreamElement? {
         try await withCheckedThrowingContinuation { continuation in
-            var result: Result<Envelope?, Error>?
+            var result: Result<EnvelopeStreamElement?, Error>?
 
             lock.lock()
             if !queue.isEmpty {
@@ -83,7 +118,7 @@ internal final class EnvelopeStreamStorage: @unchecked Sendable {
     }
 
     func yield(_ envelope: Envelope) throws -> EnvelopeStreamYieldResult {
-        var directWaiter: CheckedContinuation<Envelope?, Error>?
+        var directWaiter: CheckedContinuation<EnvelopeStreamElement?, Error>?
         let result: EnvelopeStreamYieldResult
 
         lock.lock()
@@ -106,8 +141,8 @@ internal final class EnvelopeStreamStorage: @unchecked Sendable {
                     envelope.mediaAdmissionKind,
                     into: &queue,
                     maxMediaCount: maxMediaFrames,
-                    isMedia: { $0.channel == .media },
-                    kindOf: \.mediaAdmissionKind
+                    isMedia: { $0.envelope.channel == .media },
+                    kindOf: { $0.envelope.mediaAdmissionKind }
                 )
             } catch {
                 lock.unlock()
@@ -120,20 +155,31 @@ internal final class EnvelopeStreamStorage: @unchecked Sendable {
             }
         }
 
+        let item = EnvelopeStreamElement(
+            envelope: envelope,
+            receiptStamp: receiptStampProvider?()
+        )
+
         if let waiter {
             self.waiter = nil
             directWaiter = waiter
         } else {
-            queue.append(envelope)
+            queue.append(item)
         }
         lock.unlock()
 
-        directWaiter?.resume(returning: envelope)
+        directWaiter?.resume(returning: item)
         return result
     }
 
+    func installReceiptStampProvider(_ provider: @escaping @Sendable () -> EnvelopeReceiptStamp) {
+        lock.withLock {
+            receiptStampProvider = provider
+        }
+    }
+
     func finish(throwing error: Error? = nil) {
-        var waiterToResume: CheckedContinuation<Envelope?, Error>?
+        var waiterToResume: CheckedContinuation<EnvelopeStreamElement?, Error>?
 
         lock.lock()
         guard !isFinished else {
@@ -166,10 +212,13 @@ internal final class EnvelopeStreamStorage: @unchecked Sendable {
             // sequence validation can continue without exposing its payload.
             // Protected media is best-effort and can be purged outright.
             let mediaCount = mediaCountLocked
-            queue = queue.map {
-                $0.authorizationInvalidationTombstone ?? $0
+            queue = queue.map { item in
+                EnvelopeStreamElement(
+                    envelope: item.envelope.authorizationInvalidationTombstone ?? item.envelope,
+                    receiptStamp: item.receiptStamp
+                )
             }.filter {
-                !$0.isProtectedSessionMessage || $0.channel == .control
+                !$0.envelope.isProtectedSessionMessage || $0.envelope.channel == .control
             }
             if mediaCountLocked != mediaCount {
                 mediaAdmission.noteMediaRemoved()
@@ -178,16 +227,16 @@ internal final class EnvelopeStreamStorage: @unchecked Sendable {
     }
 
     private var controlCountLocked: Int {
-        queue.reduce(into: 0) { count, envelope in
-            if envelope.channel == .control {
+        queue.reduce(into: 0) { count, item in
+            if item.envelope.channel == .control {
                 count += 1
             }
         }
     }
 
     private var mediaCountLocked: Int {
-        queue.reduce(into: 0) { count, envelope in
-            if envelope.channel == .media {
+        queue.reduce(into: 0) { count, item in
+            if item.envelope.channel == .media {
                 count += 1
             }
         }

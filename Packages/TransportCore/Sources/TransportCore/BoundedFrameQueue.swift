@@ -3,8 +3,9 @@ import RemoteProtocol
 public enum EnqueueResult: Equatable, Sendable {
     case queued
     /// Media was discarded and the queue now skips delta frames until the
-    /// next keyframe. The sender should produce a keyframe. A keyframe that
-    /// only purges superseded delta frames reports `.queued`.
+    /// next keyframe. The sender should produce a keyframe. A newer keyframe
+    /// that purges superseded queued keyframes and delta frames reports
+    /// `.queued`.
     case discardedMedia
 }
 

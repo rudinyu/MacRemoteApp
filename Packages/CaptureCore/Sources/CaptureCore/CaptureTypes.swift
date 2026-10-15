@@ -7,6 +7,49 @@ public enum CapturePermissionState: String, Equatable, Sendable {
     case denied
 }
 
+/// Fixed aggregate counts for the Debug Host's window-discovery diagnostics.
+/// This deliberately contains no window, application, or process identifiers.
+public struct ScreenRecordingWindowDiscoveryCounts: Equatable, Sendable {
+    public let candidates: UInt64
+    public let eligible: UInt64
+    public let offScreen: UInt64
+    public let nonBaseLayer: UInt64
+    public let missingApplication: UInt64
+    public let helperApplication: UInt64
+    public let invalidWindow: UInt64
+
+    public init(
+        candidates: UInt64,
+        eligible: UInt64,
+        offScreen: UInt64,
+        nonBaseLayer: UInt64,
+        missingApplication: UInt64,
+        helperApplication: UInt64,
+        invalidWindow: UInt64
+    ) {
+        self.candidates = candidates
+        self.eligible = eligible
+        self.offScreen = offScreen
+        self.nonBaseLayer = nonBaseLayer
+        self.missingApplication = missingApplication
+        self.helperApplication = helperApplication
+        self.invalidWindow = invalidWindow
+    }
+}
+
+#if DEBUG
+/// Shareable Host catalog result paired with privacy-safe candidate totals.
+public struct ScreenRecordingWindowDiscoveryResult: Equatable, Sendable {
+    public let windows: [CaptureWindow]
+    public let counts: ScreenRecordingWindowDiscoveryCounts
+
+    public init(windows: [CaptureWindow], counts: ScreenRecordingWindowDiscoveryCounts) {
+        self.windows = windows
+        self.counts = counts
+    }
+}
+#endif
+
 public struct WindowBounds: Equatable, Sendable {
     public let x: Double
     public let y: Double
@@ -136,6 +179,46 @@ public struct CaptureWindow: Equatable, Sendable {
     }
 }
 
+/// Result of rechecking the identity and availability of a selected window.
+/// An owner mismatch is security-significant because WindowServer can reuse
+/// numeric window IDs; an unavailable result may be a transient catalog gap.
+public enum CaptureWindowRefreshResult: Equatable, Sendable {
+    case available(CaptureWindow)
+    case unavailable
+    case ownerMismatch
+}
+
+enum SelectedWindowCaptureEligibility {
+    /// ScreenCaptureKit may keep a selected window stream active while the
+    /// window is offscreen. `isOnScreen` alone is therefore not a liveness
+    /// signal for an already selected target.
+    static func permitsCapture(isOnScreen: Bool, isActive: Bool) -> Bool {
+        isOnScreen || isActive
+    }
+}
+
+enum SelectedWindowCaptureTargetEligibility {
+    /// An authenticated selected descriptor is sufficient authority to resolve
+    /// the same target for initial capture or restart. Eligibility depends on
+    /// stable owner identity, base layer, and valid geometry; foreground or
+    /// streaming state is deliberately absent.
+    static func permits(
+        expectedWindow: CaptureWindow,
+        candidateWindow: CaptureWindow,
+        windowLayer: Int,
+        configuration: CaptureConfiguration
+    ) -> Bool {
+        let bounds = candidateWindow.bounds
+        return expectedWindow.hasSameOwner(as: candidateWindow) &&
+            candidateWindow.eligible &&
+            windowLayer == 0 &&
+            bounds.x.isFinite && bounds.y.isFinite &&
+            bounds.width.isFinite && bounds.height.isFinite &&
+            bounds.width > 0 && bounds.height > 0 &&
+            configuration.acceptsWindowSize(bounds)
+    }
+}
+
 public enum CaptureFailure: Error, Equatable, Sendable, CustomStringConvertible {
     case permissionDenied
     case windowUnavailable
@@ -184,6 +267,7 @@ public enum CaptureSessionState: Equatable, Sendable {
     case idle
     case starting(windowIdentifier: UInt64, generation: UInt64)
     case capturing(windowIdentifier: UInt64, generation: UInt64)
+    case recovering(windowIdentifier: UInt64, generation: UInt64)
     case stopping
     case stopped(CaptureFailure?)
     case failed(CaptureFailure)
@@ -401,6 +485,40 @@ public protocol WindowDiscoveryProvider: Sendable {
     func permissionState() async -> CapturePermissionState
     func requestPermission() async -> CapturePermissionState
     func discoverWindows() async throws -> [CaptureWindow]
+    func refreshSelectedWindow(_ expectedWindow: CaptureWindow) async throws -> CaptureWindowRefreshResult
+    func resolveSelectedWindowForCapture(
+        _ expectedWindow: CaptureWindow
+    ) async throws -> CaptureWindowRefreshResult
+}
+
+public extension WindowDiscoveryProvider {
+    /// Compatible fallback for providers whose catalog already contains only
+    /// capture-eligible windows. ScreenCaptureKit overrides this to inspect
+    /// offscreen windows and retain a currently streaming target.
+    func refreshSelectedWindow(_ expectedWindow: CaptureWindow) async throws -> CaptureWindowRefreshResult {
+        let windows = try await discoverWindows()
+        guard let candidate = windows.first(where: {
+            $0.identifier == expectedWindow.identifier
+        }) else {
+            return .unavailable
+        }
+        guard candidate.hasSameOwner(as: expectedWindow) else {
+            return .ownerMismatch
+        }
+        guard candidate.eligible else {
+            return .unavailable
+        }
+        return .available(candidate)
+    }
+
+    /// Compatible fallback for providers whose selected-target lookup already
+    /// verifies owner identity and eligibility. ScreenCaptureKit overrides it
+    /// to resolve an authorized target even when it is inactive and offscreen.
+    func resolveSelectedWindowForCapture(
+        _ expectedWindow: CaptureWindow
+    ) async throws -> CaptureWindowRefreshResult {
+        try await refreshSelectedWindow(expectedWindow)
+    }
 }
 
 public protocol WindowCaptureEngine: AnyObject, Sendable {

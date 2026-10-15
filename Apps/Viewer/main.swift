@@ -36,6 +36,10 @@ struct ViewerApp {
         }
 
 #if DEBUG
+        M10MainActorStallMonitor.shared.start(role: .viewer)
+#endif
+
+#if DEBUG
         if CommandLine.arguments.contains("--m5-input-surface") {
             let demo = ViewerInputDemo()
             demo.run()

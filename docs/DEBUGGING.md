@@ -1,168 +1,116 @@
 # MacRemoteApp How to Debug
 
-Use this guide for a local diagnosis. Start with the smallest check that can
-explain the symptom, and do not weaken macOS permission or pairing checks.
+Use the Debug Host and Debug Viewer for in-house reproduction. Both apps
+automatically create a local, bounded JSON Lines (JSONL) diagnostic file when
+they launch. No Terminal command, Console search, or separate log collector is
+needed. Logs stay on their Mac; the apps do not upload them.
 
-## Decide whether the issue is installation or runtime
+## Reproduce and collect
 
-For an installed notarized app, verify the bundle and signature first:
+1. Launch the Debug Host and Debug Viewer as signed app bundles on their
+   respective Macs. Confirm Host Screen Recording and PostEvent permissions;
+   P6 background input also needs Host Accessibility permission and an
+   accepted Host pairing for the Viewer. Start from a fresh launch when a separate run boundary is
+   useful.
+2. Reproduce the issue once and note the approximate UTC time and which
+   endpoint showed it. For connection, selection, blank-video, or input issues,
+   collect both endpoint files.
+3. Use Host's **Open Debug Log…** status-menu item or Viewer's
+   **Open Debug Log…** application-menu item. Finder reveals that app's current
+   log. If the app is unresponsive, use Finder's **Go to Folder**
+   (`Command-Shift-G`) and open the role-specific path below.
+4. Attach `m10-debug-host.log` and, if present, `m10-debug-host.previous.log` from Host,
+   and `m10-debug-viewer.log` plus `m10-debug-viewer.previous.log` from Viewer when present.
+   Say whether a copy was taken while the app was frozen.
 
-```sh
-app="$HOME/Applications/MacRemoteApp-Host.app"
-codesign --verify --deep --strict "$app"
-spctl --assess --type exec --verbose=4 "$app"
-```
+The Host writes to:
 
-`codesign --verify` prints nothing when it succeeds; the `accepted` or
-`rejected` line in this pair comes from `spctl`. Use `MacRemoteApp-Viewer.app`
-on the Viewer. A valid release app should be reported as accepted by
-Gatekeeper and should have a Developer ID signature. If `spctl` reports
-`rejected`, the installed bundle is normally an old ad-hoc/testing build or
-an app that was changed after signing. Reinstall from the latest notarized DMG
-using the DMG's per-user `Applications` drop target, or use its role-specific
-Install command and confirm the interactive replacement prompt. The DMG helper
-rejects an ad-hoc or non-Gatekeeper-approved bundle before it can replace the
-installed app. Stapled-ticket validation is performed by the release validation
-script, not by the target Mac installer.
+`~/Library/Logs/MacRemoteApp/Host/m10-debug-host.log`
 
-If the app does not launch, retry the role-specific Install command from the
-notarized DMG with the old app removed only through the uninstall command.
-Do not replace an app with an unsigned or modified bundle during a production
-test.
+The Viewer writes to:
 
-## Check permissions and network
+`~/Library/Logs/MacRemoteApp/Viewer/m10-debug-viewer.log`
 
-The production Host requests Screen Recording through the signed app bundle,
-then performs a short Bonjour readiness probe so macOS can request Local
-Network access before Keychain identity enrollment. This keeps a Keychain
-problem from hiding the Host's Local Network permission state. The Host then
-enrolls/reuses its local TLS identity and starts the authenticated listener.
-PostEvent input access is requested only after a Viewer negotiates input and
-the operator selects a window. Accessibility is optional for AX/secure-input
-inspection. The Viewer enrolls/reuses
-its local identity before its Bonjour browser starts.
-Launch the bundles themselves:
+Each file is capped at 1 MiB. Host retains `m10-debug-host.previous.log`; Viewer retains
+`m10-debug-viewer.previous.log`. Rotation replaces the older previous file, so
+the oldest records eventually rotate out. Copy both files soon after reproduction.
+If Finder cannot copy a file while it is being written, retry after the app responds.
 
-```sh
-open "$HOME/Applications/MacRemoteApp-Host.app"
-open "$HOME/Applications/MacRemoteApp-Viewer.app"
-```
+## Reading the evidence
 
-Do not launch `Contents/MacOS/MacRemoteApp-Host` or `Contents/MacOS/MacRemoteApp-Viewer`
-when testing app permissions; that associates TCC decisions with a different
-process context on some macOS versions.
+Both roles use the same versioned JSONL envelope. Each record has a UTC
+timestamp, a process-relative monotonic time, a random process `run_id`, a
+per-run record sequence, and a local connection sequence. The run identifier
+changes on each process launch; monotonic time and record sequence restart
+within that run. UTC timestamps are the cross-Mac correlation point. There are
+no shared wire identifiers in the logs.
 
-On the Host, verify:
+Events connect Host Screen Recording permission and fixed candidate-filter
+counts to catalog publication, then Viewer catalog count and selection request
+to Host acceptance or rejection. Session authorization, capabilities, and
+input readiness use fixed states. Five-second aggregates report Host video
+capture/encode/send outcomes and Viewer receive/decode/presentation counts. A
+Viewer `received` count with `presented: 0` is blank-display evidence. Host
+input totals separate received, admitted, queued, injected, and rejected
+events, with fixed rejection categories and bounded queue/handler timings.
+Viewer input windows separately count send attempts, locally accepted sends,
+and send failures, without identifying input type or value.
+MainActor scheduling gaps and AppKit main-run-loop stalls are recorded
+separately, with durations and fixed run-loop phases only.
 
-- Screen Recording is enabled for `MacRemoteApp-Host`.
-- PostEvent access is enabled for `MacRemoteApp-Host` when input is tested;
-  Accessibility is optional for AX/secure-input inspection.
-- Local Network access is allowed.
+Host authorization records use the fixed `source` values
+`connection_establishment`, `window_selection`, `input_authorization`, and
+`clipboard_fallback`. `authorization_attempt` includes `succeeded`, requested
+window generation when present, requested capability count and fixed
+capability flags. A successful record also contains the exact
+`authorization_generation_before` and `authorization_generation_after`, plus
+`reconnect_generation`, `receive_generation`, and
+`authorized_window_generation`. Failed attempts do not claim a generation
+transition. These values are numeric metadata; no peer, window, or capability
+name is included.
 
-On the Viewer, verify Local Network access. Confirm both Macs are on the same
-trusted LAN and that the Host is running before the Viewer starts discovery.
-If a permission was just changed, quit and relaunch the affected app.
-If a previous denial must be tested again, follow
-[UI Review and Post-test Cleanup](TESTING_CLEANUP.md) for an app-specific
-permission reset. Its scoped reset covers all approvals for the exact Host and
-Viewer bundle identifiers, including PostEvent; do not assume the broader
-legacy `--clean-testing` helper clears every current role-specific setting.
+When Host video authorization is denied, `video_authorization_denied.reason`
+distinguishes `authorization_changed` from `reconnect_required` and also
+records captured and observed authorization, reconnect, and receive
+generations. Host `input_window` aggregates are attributed by the
+`connection_sequence` captured when that input loop starts. A delayed flush
+keeps the originating connection sequence after a reconnect.
 
-If the Host icon is still pinned in the Dock, quit it before choosing Options >
-Remove from Dock. The new Host bundle is an accessory app and does not
-intentionally require a persistent Dock icon.
+Viewer `input_window` contains effective `failure_categories` and the
+underlying fixed `underlying_failure_categories`, so an
+`authorization_not_ready` failure remains visible if held-state cleanup
+escalates its effective result to `held_state_release_failure`. The
+`failure_boundaries` values are `before_transport_invocation`,
+`transport_send_started`, and `unknown`; the
+`underlying_failure_categories_by_boundary` object preserves the count for
+each category at each boundary. Unknown is used when the available observation
+cannot prove whether transport was invoked. All are aggregate counts, not
+per-input-event records.
 
-## Check pairing
+For a disconnect, compare `session_failure.category`,
+`transport_termination.class`, and `peer_terminal.state` across both files.
+`session_failure` identifies the local coordinator's fixed failure category;
+`transport_termination` distinguishes `end_of_stream` from `failure`, and
+`peer_terminal` records a received `close`, `session_stopping`, or
+`session_failed` signal. These fields help identify which endpoint declared
+failure first without recording the underlying transport error text. Older
+builds do not emit these fields.
 
-- Use the normal production flow without `MACREMOTEAPP_PEER_CERT`.
-- A normal production install does not require `host.p12`, `viewer.p12`, or
-  manual Keychain import. If identity setup fails, inspect the app's Keychain
-  access and relaunch; do not substitute a Developer ID signing certificate.
-- Open the Host status-menu item and confirm that `Pairing code: 000000`
-  (a six-digit value) is visible; compare it with the value displayed in the
-  Viewer prompt. A Host with an existing trust
-  record may skip the Allow/Deny dialog, but it must still expose the code in
-  the status menu while the Viewer decides. Select Allow on the Host and Accept
-  on the Viewer only after verifying that the values match.
-- If one side has stale trust or the peer identity changed, use `Forget saved
-  pairings…` on the Host status menu and on the Viewer, then select the Host
-  again and complete a fresh explicit pairing flow. This removes only peer
-  trust records; it does not delete the local TLS identity or permissions. Do
-  not delete unrelated Keychain records.
-- If a complete reset is required, double-click the role-specific
-  `Uninstall-MacRemoteApp-*.command` in the notarized DMG. It moves the selected
-  installed app to the Trash, clears each installed role's own trust/generated
-  identity through its signed app, and clears both roles' exact app-data paths.
-  It intentionally does not reset macOS TCC grants; remove the exact
-  entries in System Settings when a fresh privacy decision is required.
-  Reinstalling either role after this reset requires fresh pairing.
-- To change the discovery name, choose `Rename Host…` from the Host status
-  menu. The name is local-network metadata, not a certificate identity; the
-  listener briefly restarts after it is saved.
+Records are emitted on state changes or low-frequency aggregate windows; they
+do not include per-frame or per-input-event payloads. The file writer runs on a
+utility queue. If it cannot write, it reports the fixed diagnostic code
+`DIAG_FILE_WRITE_FAILED` through Unified Logging; do not collect a full system
+log unless a developer specifically requests a narrowly scoped item.
 
-The debug physical smoke uses a different, explicitly provisioned PKCS#12 and
-certificate flow. Follow the repository's M2 physical smoke runbook for that
-path and never copy a `.p12` file to the other Mac.
+## Privacy and scope
 
-## Check window selection and input
+The schema is fixed and privacy-whitelisted. It records only fixed event names
+and enum values, counts, timings, booleans, app version/build, UTC time, and
+local process/connection sequence values. It does not record hostnames, peer
+identity, IP addresses, process or window IDs, app/window names, coordinates,
+key/button/scroll values, clipboard content, credentials, frame data, or raw
+errors and UI status text. Review the files before attaching them and do not
+include unrelated logs or screenshots by default.
 
-- Keep the target app visible, foreground, and unlocked on the Host.
-- Select one eligible window in the Viewer picker.
-- If the window closes, changes identity, loses focus, or the Host permission
-  is revoked, select it again after the Host returns to a ready state.
-- If pointer or keyboard input is unavailable, check PostEvent permission and
-  ensure the selected window is still the authorized generation. Accessibility
-  may be enabled for the optional AX/secure-input enhancement.
-- Clipboard is text-only and opt-in; confirm it is enabled on both endpoints
-  and do not use it as a binary/file-transfer channel.
-
-### Check input-source synchronization
-
-- Click the remote surface before switching Chinese/English. Local Viewer
-  settings and other apps do not drive Host source changes.
-- A pending source waits for the matching Host acknowledgement before sending
-  keyboard events. If it times out, check the existing connection, selected
-  Host foreground window, PostEvent permission, console, and secure-input
-  state; use `Retry source sync` or return to the remote surface after
-  correcting the cause.
-- An unavailable Chinese source requires the same enabled input method/mode
-  on both Macs. Enable it locally on Host; the app never installs/enables a
-  source or substitutes Pinyin for Zhuyin automatically.
-- EN on an already-English Host is deliberately a no-op. Source following is
-  state synchronization, not forwarding the switch shortcut a second time.
-- A peer without the optional `inputSourceSync` capability uses manual Host
-  source selection. Third-party IME internal mode changes that are not exposed
-  as macOS source changes are not claimed supported.
-- For unsupported layouts or input methods, turn off `Follow Viewer input
-  source` in Viewer Settings and select the Host source manually.
-- Reports may include the sanitized synchronization state and release/build,
-  not raw keys, input-source identifiers/names, or arbitrary platform errors.
-
-## Debug-only commands
-
-Release binaries intentionally reject or omit these diagnostics. Run them from
-the repository with a debug build only:
-
-```sh
-cd "/absolute/path/to/MacRemoteApp" # Replace with your repository path.
-
-# Host window discovery and Screen Recording permission
-swift run --configuration debug Host --m3-list-windows
-
-# Authenticated M2 pairing/session smoke (requires the documented test env)
-bash scripts/run-m10-acceptance.sh host
-bash scripts/run-m10-acceptance.sh viewer
-```
-
-The M2 commands require the role's local PKCS#12 path, peer certificate path,
-and `MACREMOTEAPP_P12_PASSWORD` in the environment. Never paste that password
-or a private-key path into a support ticket.
-
-For the deterministic repository gate, use:
-
-```sh
-bash scripts/run-m10-acceptance.sh deterministic
-```
-
-This does not prove a two-Mac physical connection. Record that limitation in
-the acceptance report.
+This workflow is for in-house Debug testing. Customer collection from Release
+apps is a separate future opt-in workflow and is not enabled by these changes.

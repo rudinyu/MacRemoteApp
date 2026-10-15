@@ -81,7 +81,8 @@ let package = Package(
             name: "ViewerRuntimeTests",
             dependencies: [
                 "Viewer",
-                .product(name: "InputCore", package: "InputCore")
+                .product(name: "InputCore", package: "InputCore"),
+                .product(name: "TransportCore", package: "TransportCore")
             ],
             path: "Tests/ViewerRuntimeTests",
             swiftSettings: [.swiftLanguageMode(.v6)]

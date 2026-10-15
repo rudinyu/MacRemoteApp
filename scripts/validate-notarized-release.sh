@@ -22,6 +22,7 @@ if [[ -L "${release_root}" || ! -d "${release_root}" ]]; then
 fi
 release_root="$(cd -P -- "${release_root}" && pwd -P)"
 artifact_channel="$(macremoteapp_resolve_artifact_channel "${repo_root}" "${release_root}")" || exit 2
+macremoteapp_require_release_channel "${artifact_channel}" || exit 2
 release_identity="$(macremoteapp_release_identity \
     "${release_root}/MacRemoteApp-Host.app/Contents/Info.plist" \
     "${release_root}/MacRemoteApp-Viewer.app/Contents/Info.plist")" || exit 2

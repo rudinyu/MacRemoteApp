@@ -28,19 +28,56 @@ enum ViewerProcessControlReadiness {
 
 enum ViewerInputStatusPresentation {
     static let hostFocusUnavailableStatus =
-        "Connected — click or reactivate MacRemoteApp Host, then select the window again"
+        "Connected — the selected app is not active on the Host. Click or reactivate MacRemoteApp Host, then select the window again"
+    static let backgroundControlReadyStatus =
+        "Connected — background control ready; selected app is not active on the Host"
+    static let backgroundControlReadySummary =
+        "Background control ready — selected app is not active on the Host"
 
     static func readyStatus(
         focusEligible: Bool,
-        processTargetEligible: Bool?
+        backgroundControlActive: Bool = false
     ) -> String {
         if focusEligible {
             return "Connected — input ready"
         }
-        if processTargetEligible == true {
-            return "Connected — Background control ready — app not active"
+        if backgroundControlActive {
+            return backgroundControlReadyStatus
         }
-        return "Connected — the selected app is not active on the Host"
+        return hostFocusUnavailableStatus
+    }
+
+    static func readyInputSummary(backgroundControlActive: Bool) -> String {
+        backgroundControlActive ? backgroundControlReadySummary : "Ready"
+    }
+}
+
+enum ViewerVideoRecoveryStatusPolicy {
+    static let receivingStatus = "Receiving video"
+    static let recoveringStatus = "Restoring video — waiting for Host capture"
+    static let recoveryDelaySeconds: TimeInterval = 1.5
+
+    static func shouldShowRecovering(
+        currentStatus: String,
+        hasSelectedWindow: Bool,
+        hasSelectedGeneration: Bool,
+        lastVideoActivity: TimeInterval?,
+        now: TimeInterval
+    ) -> Bool {
+        guard currentStatus == receivingStatus,
+              hasSelectedWindow,
+              hasSelectedGeneration,
+              let lastVideoActivity,
+              lastVideoActivity.isFinite,
+              now.isFinite,
+              now >= lastVideoActivity else {
+            return false
+        }
+        return now - lastVideoActivity >= recoveryDelaySeconds
+    }
+
+    static func shouldRestoreReceiving(currentStatus: String) -> Bool {
+        currentStatus == recoveringStatus
     }
 }
 
@@ -88,7 +125,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let capabilities: Set<Capability>
     }
 
-    private static let capabilities: Set<Capability> = [
+    static let capabilities: Set<Capability> = [
         .pingPong,
         .windowSelection,
         .h264Video,
@@ -149,8 +186,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         didSet { refreshSettings() }
     }
     private var localIdentity: ProvisionedIdentity?
-    private lazy var inputSendQueue = ViewerInputSendQueue { [weak self] scope in
-        self?.handleInputQueueFailure(scope)
+    private lazy var inputSendQueue = ViewerInputSendQueue { [weak self] scope, category in
+        self?.handleInputQueueFailure(scope, category: category)
     }
     private var activeInputSendScope: ViewerInputSendScope?
     private let presentationLifetime = ViewerPresentationLifetime()
@@ -164,6 +201,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var presentedFrameCount = 0
     private var presentedFrameTimes: [TimeInterval] = []
     private var lastPresentedFrameTime: TimeInterval?
+    private var lastPresentedFrameUptime: TimeInterval?
+    private var videoStreamExpectedSince: TimeInterval?
     private var presentedFPSIsIdle = false
     private var reportedVideoFailureGeneration: UInt64?
     private var performanceCollector = BoundedPresentationSampleCollector()
@@ -189,6 +228,10 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var inputSourceSyncCapabilityAvailable = false
     private var remoteSurfaceFocused = false
     private var inputSourceSyncStatus = "Waiting for remote keyboard"
+#if DEBUG
+    private var debugVideoWindow = M10ViewerVideoWindowAccumulator()
+    private var debugEligibleWindowCount: UInt64 = 0
+#endif
 
     private static let inputSourceSyncTimeoutNanoseconds: UInt64 = 3_000_000_000
 
@@ -202,11 +245,17 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         application.setActivationPolicy(.regular)
         application.delegate = self
         makeWindow()
+#if DEBUG
+        let openDebugLog: (() -> Void)? = { [weak self] in self?.openDebugLog() }
+#else
+        let openDebugLog: (() -> Void)? = nil
+#endif
         let menu = ApplicationMenu(
             applicationName: "MacRemoteApp Viewer",
             metadata: viewerApplicationMetadata,
             onSettings: { [weak self] in self?.showSettings() },
-            onShowWindow: { [weak self] in self?.showViewerWindow() }
+            onShowWindow: { [weak self] in self?.showViewerWindow() },
+            onOpenDebugLog: openDebugLog
         )
         applicationMenu = menu
         menu.install()
@@ -556,6 +605,13 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
               !isShuttingDown else { return .superseded }
         let attemptID = UUID()
         connectionAttemptID = attemptID
+#if DEBUG
+        let diagnosticUptime = DispatchTime.now().uptimeNanoseconds
+        flushDebugVideoWindowForTransition(atUptimeNanoseconds: diagnosticUptime)
+        M10ViewerDiagnosticRecorder.shared.recordConnectionStarted(
+            atUptimeNanoseconds: diagnosticUptime
+        )
+#endif
         defer {
             if connectionAttemptID == attemptID {
                 connectionAttemptID = nil
@@ -613,6 +669,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             attemptSession = candidateSession
             self.session = candidateSession
+#if DEBUG
+            recordDebugSessionState(await candidateSession.snapshot())
+#endif
             let candidateSessionID = UUID()
             sessionLifetimeID = candidateSessionID
             if let reconnectID {
@@ -657,6 +716,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             contentView?.setConnectionState(.connected)
             setStatus("Connected; waiting for a selected window")
             contentView?.setPairingRetryVisible(false)
+#if DEBUG
+            M10ViewerDiagnosticRecorder.shared.recordConnectionOutcome(.connected)
+#endif
             await refreshInputSurface(for: candidateSession)
             guard self.session === candidateSession else { return .superseded }
             return .connected
@@ -665,11 +727,20 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if let attemptSession { await attemptSession.stop(reason: .normal) }
                 return .superseded
             }
+#if DEBUG
+            recordDebugSessionFailure(error)
+#endif
             if error == .pairingDenied {
+#if DEBUG
+                M10ViewerDiagnosticRecorder.shared.recordConnectionOutcome(.pairingDenied)
+#endif
                 pairingRetryRequired = true
                 setStatus("Pairing was denied; click Retry pairing to try again")
                 contentView?.setPairingRetryVisible(true)
             } else {
+#if DEBUG
+                M10ViewerDiagnosticRecorder.shared.recordConnectionOutcome(.sessionFailure)
+#endif
                 setStatus("Connection unavailable; check trusted identities and Local Network permission")
                 contentView?.setPairingRetryVisible(false)
             }
@@ -685,6 +756,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if let attemptSession { await attemptSession.stop(reason: .normal) }
                 return .superseded
             }
+#if DEBUG
+            M10ViewerDiagnosticRecorder.shared.recordConnectionOutcome(.connectionFailure)
+#endif
             setStatus("Connection unavailable; check trusted identities and Local Network permission")
             contentView?.setPairingRetryVisible(false)
             if let attemptSession {
@@ -701,8 +775,130 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         connectionAttemptID == attemptID
     }
 
+#if DEBUG
+    private func recordDebugSessionFailure(_ error: SessionError?) {
+        guard let error else { return }
+        M10ViewerDiagnosticRecorder.shared.record(.sessionFailure(error.failureCategory))
+        if let terminationClass = error.transportTerminationClass {
+            M10ViewerDiagnosticRecorder.shared.record(.transportTermination(terminationClass))
+        }
+    }
+
+    private func recordDebugSessionState(_ snapshot: SessionSnapshot) {
+        let state: M10ViewerSessionState
+        switch snapshot.state {
+        case .discovered: state = .discovered
+        case .connecting: state = .connecting
+        case .authenticated: state = .authenticated
+        case .pairingRequired: state = .pairingRequired
+        case .trusted: state = .trusted
+        case .capabilitiesNegotiated: state = .capabilitiesNegotiated
+        case .windowSelectionAuthorized: state = .windowSelectionAuthorized
+        case .streaming: state = .streaming
+        case .stopping: state = .stopping
+        case .reconnecting: state = .reconnecting
+        case .failed: state = .failed
+        }
+        M10ViewerDiagnosticRecorder.shared.recordSessionState(
+            M10ViewerSessionDiagnosticSnapshot(
+                state: state,
+                authorized: snapshot.authorized,
+                windowAuthorized: snapshot.authorizedWindowGeneration != nil,
+                videoCapability: snapshot.authorizedCapabilities.contains(.h264Video),
+                mouseCapability: snapshot.authorizedCapabilities.contains(.mouseInput),
+                keyboardCapability: snapshot.authorizedCapabilities.contains(.keyboardInput),
+                windowSelectionCapability: snapshot.authorizedCapabilities.contains(.windowSelection),
+                clipboardCapability: snapshot.authorizedCapabilities.contains(.textClipboard),
+                backgroundControlCapability: snapshot.authorizedCapabilities.contains(.backgroundControl)
+            )
+        )
+    }
+
+    private func recordDebugInputReadiness(
+        _ readiness: InputReadiness,
+        keyboardAvailable: Bool
+    ) {
+        let diagnosticReadiness: M10ViewerInputReadiness
+        let reason: M10ViewerInputReason
+        switch readiness {
+        case .awaitingAuthentication:
+            diagnosticReadiness = .awaitingAuthentication
+            reason = .awaitingAuthentication
+        case .awaitingAuthorization:
+            diagnosticReadiness = .awaitingAuthorization
+            reason = selectedWindowIdentifier == nil ? .windowNotSelected : .authorizationRequired
+        case .surfaceUnavailable:
+            diagnosticReadiness = .surfaceUnavailable
+            reason = .surfaceUnavailable
+        case .hostPermissionUnavailable:
+            diagnosticReadiness = .hostPermissionUnavailable
+            reason = .hostPermission
+        case .hostFocusUnavailable:
+            diagnosticReadiness = .hostFocusUnavailable
+            reason = .hostFocus
+        case .hostStateUnavailable:
+            diagnosticReadiness = .hostStateUnavailable
+            reason = .hostInputState
+        case .hostControlNegotiating:
+            diagnosticReadiness = .hostControlNegotiating
+            reason = .controlSetupPending
+        case .hostControlUnavailable:
+            diagnosticReadiness = .hostControlUnavailable
+            switch hostControlState {
+            case .requiresConsent: reason = .controlConsentRequired
+            case .paused: reason = .controlPaused
+            case .revoked: reason = .controlRevoked
+            case .persistenceFailure: reason = .controlPersistenceFailure
+            case .unsupported: reason = .controlUnsupported
+            case .active, .negotiating, .none: reason = .capabilityUnavailable
+            }
+        case .hostProcessTargetUnavailable:
+            diagnosticReadiness = .hostProcessTargetUnavailable
+            reason = .unsafeProcessTarget
+        case .ready:
+            diagnosticReadiness = .ready
+            reason = keyboardAvailable ? .ready : .keyboardCapabilityUnavailable
+        }
+        M10ViewerDiagnosticRecorder.shared.recordInputReadiness(
+            diagnosticReadiness,
+            reason: reason,
+            keyboardAvailable: keyboardAvailable
+        )
+    }
+
+    private func beginDebugVideoWindow(at uptime: TimeInterval) {
+        let nanoseconds = UInt64(max(0, uptime) * 1_000_000_000)
+        flushDebugVideoWindowForTransition(atUptimeNanoseconds: nanoseconds)
+        debugVideoWindow.begin(at: nanoseconds)
+    }
+
+    private func flushDebugVideoWindowIfDue(at uptime: TimeInterval) {
+        guard let summary = debugVideoWindow.takeSummaryIfDue(
+            at: UInt64(max(0, uptime) * 1_000_000_000)
+        ) else { return }
+        M10ViewerDiagnosticRecorder.shared.recordVideoWindowSummary(summary)
+    }
+
+    private func flushDebugVideoWindowForTransition(atUptimeNanoseconds nanoseconds: UInt64) {
+        guard let summary = debugVideoWindow.takePendingSummary(at: nanoseconds) else { return }
+        M10ViewerDiagnosticRecorder.shared.recordVideoWindowSummary(summary)
+    }
+
+    private func openDebugLog() {
+        let url = M10ViewerDiagnosticFileLog.logFileURL
+        if FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            NSWorkspace.shared.open(url.deletingLastPathComponent())
+        }
+    }
+#endif
+
     private func monitorSession(_ observedSession: SessionCoordinator) async {
         var previous = await observedSession.snapshot()
+#if DEBUG
+        recordDebugSessionState(previous)
+#endif
         while !Task.isCancelled {
             do {
                 try await Task.sleep(nanoseconds: 100_000_000)
@@ -712,6 +908,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard session === observedSession else { return }
             let current = await observedSession.snapshot()
             guard session === observedSession else { return }
+#if DEBUG
+            recordDebugSessionState(current)
+#endif
             let clockSyncEstimate = await observedSession.clockSyncEstimate()
             guard session === observedSession else { return }
             guard synchronizeAuthorization(for: observedSession, snapshot: current) else { continue }
@@ -722,6 +921,10 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 clockSync: latestClockSyncEstimate
             )
             logStageBudgetIfDue()
+#if DEBUG
+            flushDebugVideoWindowIfDue(at: ProcessInfo.processInfo.systemUptime)
+            M10ViewerDiagnosticRecorder.shared.flushInputWindowIfDue()
+#endif
             if current.authorizationGeneration != previous.authorizationGeneration ||
                 current.authorized != previous.authorized ||
                 current.authorizedWindowGeneration != previous.authorizedWindowGeneration ||
@@ -736,6 +939,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // This task owns the failure transition, so resetSession must not
             // cancel and join this task recursively.
             sessionMonitorTask = nil
+#if DEBUG
+            recordDebugSessionFailure(await observedSession.failureReason())
+#endif
             await resetSession(expectedSession: observedSession, cancelMonitor: false)
             scheduleReconnect()
             return
@@ -817,6 +1023,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let snapshot = await session.snapshot()
             guard ownsConnectionAttempt(attemptID), self.session === session,
                   !isShuttingDown else { throw CancellationError() }
+#if DEBUG
+            recordDebugSessionState(snapshot)
+#endif
             switch snapshot.state {
             case .trusted, .capabilitiesNegotiated, .windowSelectionAuthorized, .streaming:
                 return
@@ -915,6 +1124,14 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard session === sourceSession else { return }
         switch message {
         case let .windowList(windowList):
+#if DEBUG
+            let receivedEligibleCount = UInt64(windowList.windows.filter(\.eligible).count)
+            debugEligibleWindowCount = receivedEligibleCount
+            M10ViewerDiagnosticRecorder.shared.recordWindowCatalog(
+                eligibleCount: receivedEligibleCount,
+                selected: selectedWindowIdentifier != nil && pendingWindowSelection == nil
+            )
+#endif
             let snapshot = await sourceSession.snapshot()
             guard session === sourceSession else { return }
             guard synchronizeAuthorization(for: sourceSession, snapshot: snapshot) else { return }
@@ -926,11 +1143,17 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 $0.catalogGeneration != windowList.catalogGeneration
             } ?? false
             if selectionWasRejected {
+#if DEBUG
+                M10ViewerDiagnosticRecorder.shared.recordWindowSelection(.hostRejected)
+#endif
                 pendingWindowSelection = nil
                 selectedWindowIdentifier = nil
                 contentView?.setWindowSelectionEnabled(true)
             }
             let eligibleWindows = windowList.windows.filter(\.eligible)
+#if DEBUG
+            debugEligibleWindowCount = UInt64(eligibleWindows.count)
+#endif
             contentView?.setWindowOptions(
                 eligibleWindows,
                 generation: generation,
@@ -964,11 +1187,24 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 return
             }
             selectedGeneration = config.generation
+#if DEBUG
+            if pendingWindowSelection != nil {
+                M10ViewerDiagnosticRecorder.shared.recordWindowSelection(.hostAcknowledged)
+                M10ViewerDiagnosticRecorder.shared.recordWindowCatalog(
+                    eligibleCount: debugEligibleWindowCount,
+                    selected: true
+                )
+            }
+#endif
             pendingWindowSelection = nil
             streamGenerationGate.advance(to: config.generation)
             streamDimensions = CGSize(width: CGFloat(config.width), height: CGFloat(config.height))
             reportedVideoFailureGeneration = nil
             resetPresentedFPS()
+            videoStreamExpectedSince = ProcessInfo.processInfo.systemUptime
+#if DEBUG
+            beginDebugVideoWindow(at: ProcessInfo.processInfo.systemUptime)
+#endif
             performanceCollector.reset()
             latestPerformanceSnapshot = nil
             receiveToPresentCollector.reset()
@@ -1006,6 +1242,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                   snapshot.authorizedWindowGeneration == frame.generation,
                   frame.generation == selectedGeneration,
                   streamGenerationGate.accepts(frame.generation) else { return }
+#if DEBUG
+            debugVideoWindow.recordReceived()
+#endif
             notePendingFrameReceipt(captureTimestamp: frame.captureTimestamp)
             do {
                 let encoded = try EncodedH264Frame(
@@ -1049,15 +1288,28 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 // be dropped; ask for the next keyframe instead of waiting for
                 // the periodic one.
                 if error == .missingDecoderConfiguration {
+#if DEBUG
+                    debugVideoWindow.recordDecodeFailure()
+#endif
                     requestRecoveryKeyframe()
                 } else if error != .cancelled {
                     reportVideoDecodeFailure(error)
                 }
             } catch {
+#if DEBUG
+                debugVideoWindow.recordDecodeFailure()
+#endif
                 setStatus("Video frame could not be decoded")
             }
 
         case let .sessionState(message):
+            if message.state == .failed || message.state == .stopping {
+#if DEBUG
+                M10ViewerDiagnosticRecorder.shared.record(.peerTerminal(
+                    message.state == .failed ? .sessionFailed : .sessionStopping
+                ))
+#endif
+            }
             let snapshot = await sourceSession.snapshot()
             guard session === sourceSession else { return }
             guard synchronizeAuthorization(for: sourceSession, snapshot: snapshot) else { return }
@@ -1107,13 +1359,16 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 setStatus("Connected — waiting for Host input status")
             } else if !snapshot.negotiatedCapabilities.contains(.backgroundControl),
                       !hostInputFocusEligible {
-                setStatus("Connected — the selected app must be foreground on the Host")
+                setStatus(ViewerInputStatusPresentation.hostFocusUnavailableStatus)
             }
 
         case let .inputSourceAcknowledgement(acknowledgement):
             await handleInputSourceAcknowledgement(acknowledgement, from: sourceSession)
 
         case .close:
+#if DEBUG
+            M10ViewerDiagnosticRecorder.shared.record(.peerTerminal(.close))
+#endif
             // The callback is running inside ViewerSessionMessageLoop. Defer
             // teardown until the callback returns so stop() never waits on
             // the message-loop task itself. A peer close is recoverable; only
@@ -1142,18 +1397,30 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard self.session === session else { return }
             guard synchronizeAuthorization(for: session, snapshot: snapshot) else { return }
             guard snapshot.authorizedWindowGeneration == generation else {
+#if DEBUG
+                M10ViewerDiagnosticRecorder.shared.recordWindowSelection(.rejectedLocally)
+#endif
                 setStatus("Window list expired; waiting for Host")
                 return
             }
             guard contentView?.windowSelectionCatalogGeneration == catalogGeneration else {
+#if DEBUG
+                M10ViewerDiagnosticRecorder.shared.recordWindowSelection(.rejectedLocally)
+#endif
                 setStatus("Window catalog expired; waiting for Host")
                 return
             }
             guard windowOptionsContain(windowIdentifier) else {
+#if DEBUG
+                M10ViewerDiagnosticRecorder.shared.recordWindowSelection(.rejectedLocally)
+#endif
                 setStatus("Window is no longer available")
                 return
             }
             windowSelectionInFlight = true
+#if DEBUG
+            M10ViewerDiagnosticRecorder.shared.recordWindowSelection(.requested)
+#endif
             resetPresentedFPS()
             selectedGeneration = nil
             streamGenerationGate.revoke()
@@ -1178,6 +1445,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     )
                 )
                 guard self.session === session else { return }
+#if DEBUG
+                M10ViewerDiagnosticRecorder.shared.recordWindowSelection(.sent)
+#endif
                 selectedWindowIdentifier = windowIdentifier
                 contentView?.setSelectedWindowIdentifier(windowIdentifier)
                 pendingWindowSelection = (windowIdentifier, catalogGeneration)
@@ -1186,6 +1456,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 guard self.session === session else { return }
             } catch {
                 guard self.session === session else { return }
+#if DEBUG
+                M10ViewerDiagnosticRecorder.shared.recordWindowSelection(.sendFailed)
+#endif
                 pendingWindowSelection = nil
                 selectedWindowIdentifier = nil
                 contentView?.setWindowSelectionEnabled(true)
@@ -1233,6 +1506,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func reportVideoDecodeFailure(_ error: CodecError) {
+#if DEBUG
+        debugVideoWindow.recordDecodeFailure()
+#endif
         requestRecoveryKeyframe()
         guard let generation = selectedGeneration,
               reportedVideoFailureGeneration != generation else { return }
@@ -1258,6 +1534,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         presentationUptime: TimeInterval
     ) {
         presentedFrameCount += 1
+#if DEBUG
+        debugVideoWindow.recordPresented()
+#endif
         let receivedAt = pendingFrameReceiptNanoseconds.removeValue(forKey: captureTimestamp)
         if let presentedTimestamp, let receivedAt {
             receiveToPresentCollector.append(
@@ -1311,6 +1590,12 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func recordPresentedFrame(at uptime: TimeInterval) {
         guard uptime.isFinite, uptime > 0 else { return }
+        lastPresentedFrameUptime = max(lastPresentedFrameUptime ?? uptime, uptime)
+        if ViewerVideoRecoveryStatusPolicy.shouldRestoreReceiving(
+            currentStatus: contentView?.status ?? ""
+        ) {
+            setStatus(ViewerVideoRecoveryStatusPolicy.receivingStatus)
+        }
         presentedFPSIsIdle = false
         presentedFrameTimes.append(uptime)
         presentedFrameTimes.sort()
@@ -1319,6 +1604,16 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func refreshPresentedFPS(now: TimeInterval) {
+        let lastVideoActivity = lastPresentedFrameUptime ?? videoStreamExpectedSince
+        if ViewerVideoRecoveryStatusPolicy.shouldShowRecovering(
+            currentStatus: contentView?.status ?? "",
+            hasSelectedWindow: selectedWindowIdentifier != nil,
+            hasSelectedGeneration: selectedGeneration != nil,
+            lastVideoActivity: lastVideoActivity,
+            now: now
+        ) {
+            setStatus(ViewerVideoRecoveryStatusPolicy.recoveringStatus)
+        }
         guard let lastPresentedFrameTime else {
             contentView?.updatePresentedFPS(presentedFPSIsIdle ? "FPS: idle" : "FPS: —")
             return
@@ -1347,6 +1642,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func resetPresentedFPS() {
         presentedFrameTimes.removeAll(keepingCapacity: true)
         lastPresentedFrameTime = nil
+        lastPresentedFrameUptime = nil
+        videoStreamExpectedSince = nil
         presentedFPSIsIdle = false
         contentView?.updatePresentedFPS("FPS: —")
     }
@@ -1386,14 +1683,14 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         keyboardDeliveryToken: UUID? = nil
     ) {
         _ = inputSendQueue.enqueue(record, in: scope) { [weak self] event, authorizationGeneration in
-            guard let self else { return }
+            guard let self else { return .discarded }
             if let keyboardDeliveryToken,
                !self.inputSourceSyncGate.allowsQueuedKeyboardSend(
                    event,
                    in: scope,
                    deliveryToken: keyboardDeliveryToken
                ) {
-                return
+                return .discarded
             }
             try await transport.send(
                 event,
@@ -1403,6 +1700,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if keyboardDeliveryToken != nil {
                 self.inputSourceSyncGate.noteDelivered(event, in: scope)
             }
+            return .sent
         }
     }
 
@@ -1433,8 +1731,12 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         in scope: ViewerInputSendScope,
         transport: ViewerInputTransport
     ) {
-        _ = inputSendQueue.enqueueOperation(in: scope) { [weak self] queuedScope in
-            guard let self else { return }
+        _ = inputSendQueue.enqueueStatefulOperation(
+            in: scope,
+            mayEndHeldInputState: true
+        ) { [weak self] queuedScope in
+            guard let self else { return [] }
+            var deliveredTransitions: [InputStateTransition] = []
 
             // This operation is behind every previously admitted input event.
             // Releases are derived from the transport-confirmed held-key set,
@@ -1447,9 +1749,12 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     expectedAuthorizationGeneration: queuedScope.authorizationGeneration
                 )
                 self.inputSourceSyncGate.noteDelivered(release, in: queuedScope)
+                if let keyCode = release.keyCode {
+                    deliveredTransitions.append(.ended(.key(keyCode)))
+                }
             }
 
-            guard self.inputSourceSyncGate.isCurrent(request) else { return }
+            guard self.inputSourceSyncGate.isCurrent(request) else { return deliveredTransitions }
             do {
                 try await transport.sendInputSourceSelection(request) { [weak self] in
                     guard let self,
@@ -1468,6 +1773,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 // outbound mutex. The current lifecycle callback will either
                 // start a fresh request or leave keyboard input in manual mode.
             }
+            return deliveredTransitions
         }
     }
 
@@ -1793,6 +2099,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let readiness = InputReadiness.awaitingAuthentication
             contentView?.updateStream(size: streamDimensions, readiness: readiness)
             contentView?.updateClipboard(status: nil, available: false)
+#if DEBUG
+            recordDebugInputReadiness(readiness, keyboardAvailable: false)
+#endif
             return
         }
         let snapshot = await session.snapshot()
@@ -1841,6 +2150,12 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 )
             }
         }
+        let backgroundControlReady = snapshot.negotiatedCapabilities.contains(.backgroundControl) &&
+            hostControlState == .active &&
+            hostInputPermission == .granted &&
+            hostInputFocusEligible == false &&
+            hostProcessTargetEligible == true &&
+            hostControlGeneration != nil
         if case let .ready(windowGeneration) = readiness,
            let sessionLifetimeID {
             updateInputSendScope(
@@ -1856,10 +2171,17 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } else {
             updateInputSendScope(nil)
         }
+#if DEBUG
+        recordDebugInputReadiness(
+            readiness,
+            keyboardAvailable: inputCapabilities.keyboardInputEnabled
+        )
+#endif
         contentView?.updateStream(
             size: streamDimensions,
             readiness: readiness,
-            capabilities: inputCapabilities
+            capabilities: inputCapabilities,
+            backgroundControlReady: backgroundControlReady
         )
         updateInputSourceSyncAvailability(
             for: snapshot,
@@ -1871,7 +2193,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             setStatus(
                 ViewerInputStatusPresentation.readyStatus(
                     focusEligible: hostInputFocusEligible,
-                    processTargetEligible: hostProcessTargetEligible
+                    backgroundControlActive: backgroundControlReady
                 )
             )
         case .hostPermissionUnavailable:
@@ -1954,7 +2276,13 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         pendingFrameReceiptNanoseconds.removeAll(keepingCapacity: true)
     }
 
-    private func handleInputQueueFailure(_ scope: ViewerInputSendScope) {
+    private func handleInputQueueFailure(
+        _ scope: ViewerInputSendScope,
+        category: ViewerInputFailureCategory
+    ) {
+#if DEBUG
+        M10ViewerDiagnosticRecorder.shared.recordViewerInputFailureCategory(category)
+#endif
         if activeInputSendScope == scope {
             activeInputSendScope = nil
         }
@@ -1971,6 +2299,13 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard snapshot.authorizationGeneration == scope.authorizationGeneration,
                   snapshot.authorized,
                   snapshot.authorizedWindowGeneration == scope.windowGeneration else {
+                await self.refreshInputSurface(for: observedSession)
+                return
+            }
+            guard category.disposition.requiresSessionReset else {
+                // The queue already invalidated its old scope. Recompute the
+                // current readiness and install a fresh scope only if the
+                // authenticated session still authorizes input.
                 await self.refreshInputSurface(for: observedSession)
                 return
             }
@@ -2088,6 +2423,11 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if retryCleanupOwnership != nil {
             guard !isShuttingDown, !pairingRetryRequired else { return }
         }
+#if DEBUG
+        flushDebugVideoWindowForTransition(
+            atUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds
+        )
+#endif
         if cancelMonitor {
             sessionMonitorTask?.cancel()
             sessionMonitorTask = nil
@@ -2102,6 +2442,11 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         authorizationFingerprint = nil
         updateInputSendScope(nil)
         selectedGeneration = nil
+#if DEBUG
+        if selectedWindowIdentifier != nil {
+            M10ViewerDiagnosticRecorder.shared.recordWindowSelection(.cleared)
+        }
+#endif
         selectedWindowIdentifier = nil
         pendingWindowSelection = nil
         windowSelectionInFlight = false
@@ -2254,6 +2599,7 @@ private final class ViewerContentView: NSView {
     private var streamSize: CGSize = .zero
     private var readiness: InputReadiness = .awaitingAuthentication
     private var inputCapabilities: ViewerInputCapabilities = .none
+    private var backgroundControlReady = false
     private var inputSourceSyncStatus = "Waiting for remote keyboard"
     private(set) var inputSourceRetryAvailable = false
 
@@ -2371,11 +2717,13 @@ private final class ViewerContentView: NSView {
     func updateStream(
         size: CGSize,
         readiness: InputReadiness,
-        capabilities: ViewerInputCapabilities = .none
+        capabilities: ViewerInputCapabilities = .none,
+        backgroundControlReady: Bool = false
     ) {
         streamSize = size
         self.readiness = readiness
         inputCapabilities = capabilities
+        self.backgroundControlReady = readiness.isReady && backgroundControlReady
         updateConnectionDetails()
         needsLayout = true
     }
@@ -2544,7 +2892,9 @@ private final class ViewerContentView: NSView {
         case .hostProcessTargetUnavailable:
             return "Host target unavailable"
         case .ready:
-            return "Ready"
+            return ViewerInputStatusPresentation.readyInputSummary(
+                backgroundControlActive: backgroundControlReady
+            )
         }
     }
 
@@ -2629,7 +2979,9 @@ private final class ViewerContentView: NSView {
 
     func markFramePresented() {
         if readiness.isReady {
-            statusLabel.stringValue = "Connected — input ready"
+            statusLabel.stringValue = backgroundControlReady
+                ? ViewerInputStatusPresentation.backgroundControlReadyStatus
+                : "Connected — input ready"
         }
     }
 

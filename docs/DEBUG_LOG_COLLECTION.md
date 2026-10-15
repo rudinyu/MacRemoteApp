@@ -1,152 +1,98 @@
-# MacRemoteApp How to Collect Debug Logs
+# M10 Debug log collection
 
-Collect logs only after reproducing the problem once. Use a new directory for
-each incident and keep it outside the repository.
+This is the in-house Debug workflow. Debug Host and Debug Viewer each create a
+shareable local JSONL file automatically at app launch. They do not upload
+logs, and Viewer collection does not require Console.
 
-## 1. Create a support directory
+1. Launch the signed Debug Host and Viewer app bundles on their respective
+   Macs, then reproduce the issue once. Note its approximate UTC time and
+   whether it appeared on Host, Viewer, or both.
+2. For connection, authorization, selection, input, or blank-video failures,
+   collect both endpoint logs. For an endpoint-only UI stall, collect that
+   endpoint's log and the other one if it was connected.
+3. Use the app's own Debug action when responsive: Host's **Open Debug Log…**
+   status-menu item, or Viewer's **Open Debug Log…** application-menu item.
+   Finder reveals the current file.
+4. If an app is stuck and its menu cannot open, in Finder press
+   **Command-Shift-G** and open the path for that role below. Copy the current
+   log and its previous file if present. If the current file is busy, retry
+   after the app responds.
+5. Attach the role-specific current and previous files for each relevant endpoint.
+   Mention whether the copy was taken while an app was still frozen.
 
-```sh
-stamp="$(date +%Y%m%d-%H%M%S)"
-support_dir="$HOME/Desktop/MacRemoteApp-Debug-${stamp}"
-mkdir -p "$support_dir"
-```
+The exact paths are:
 
-## 2. Capture the production startup log
+- Host: `~/Library/Logs/MacRemoteApp/Host/m10-debug-host.log`
+- Viewer: `~/Library/Logs/MacRemoteApp/Viewer/m10-debug-viewer.log`
 
-Quit the app first. Start the unified-log stream in one Terminal window, then
-launch the signed app bundle itself from a second Terminal window. Stop the
-stream with Control-C after reproducing the issue. These files contain the
-macOS unified startup log, not the app process's stdout/stderr:
+The Host previous file is `m10-debug-host.previous.log`; the Viewer previous file
+is `m10-debug-viewer.previous.log`. Each file is capped at 1 MiB; one previous
+file is retained per role. Rotation replaces that role's older previous file,
+so the oldest records eventually rotate out. Collect the files soon after reproduction.
 
-```sh
-log stream --style compact \
-  --predicate 'subsystem == "com.rudinyu.MacRemoteApp" AND category == "startup"' \
-  2>&1 | tee "$support_dir/host-startup.log"
-```
+## What is recorded
 
-In the second Terminal window, launch the Host:
+Both apps write the same versioned JSONL envelope. Records include UTC time, a
+random per-process `run_id`, process-relative monotonic time, a per-run record
+sequence, a local connection sequence, and app version/build. A new app launch
+starts a new `run_id`; record sequence and monotonic time begin again within
+that process. UTC time is used to correlate the two Macs. There are no shared
+wire identifiers.
 
-```sh
-open -n "$HOME/Applications/MacRemoteApp-Host.app"
-```
+Fixed events and bounded aggregates record discovery permission and candidate
+filter counts, catalog publication and Viewer eligible-window count, Viewer
+selection sent and Host selection accepted/rejected, session authorization
+and capabilities, input readiness, Host input totals and bounded queue/handler
+timings, Host capture/encode/send totals, and Viewer receive/decode/presentation
+totals. Host video authorization denial uses a fixed reason and whether the
+pipeline recovered or stopped. MainActor scheduling gaps and AppKit run-loop
+stalls are separate events. Five-second Viewer input windows distinguish send
+attempts, local acceptance, and send failures without identifying input type
+or value. Events are emitted on transitions or low-frequency windows, never
+for every frame or input event.
 
-Use the Viewer app bundle for Viewer-side evidence:
+Host `authorization_attempt.source` is one of
+`connection_establishment`, `window_selection`, `input_authorization`, or
+`clipboard_fallback`. The event includes success, requested window generation
+when supplied, requested capability count, and fixed capability flags. On
+success it also records the exact authorization generations before and after
+the transition, plus reconnect, receive, and authorized-window generations.
+Failed attempts have no transition fields. Host video denial records a fixed
+reason; stale `authorization_changed` and `reconnect_required` are distinct,
+with captured and observed authorization, reconnect, and receive generations.
+Host input aggregates use the `connection_sequence` captured by the input
+loop, including when a partial window flushes after a reconnect.
 
-```sh
-log stream --style compact \
-  --predicate 'subsystem == "com.rudinyu.MacRemoteApp" AND category == "startup"' \
-  2>&1 | tee "$support_dir/viewer-startup.log"
-```
+Viewer `input_window.failure_categories` records the effective category, while
+`underlying_failure_categories` retains the original fixed category when
+held-state cleanup escalates an otherwise recoverable failure to
+`held_state_release_failure`. The aggregate also includes
+`failure_boundaries` (`before_transport_invocation`, `transport_send_started`,
+or `unknown`) and `underlying_failure_categories_by_boundary`, a complete
+category-by-boundary count matrix. Categories are `local_preflight`,
+`capability_unavailable`, `authorization_not_ready`, `delivery_uncertain`,
+`queue_overflow`, `held_state_release_failure`, and `unexpected`. The unknown
+boundary is used when the available observation cannot prove whether
+transport was invoked. These are counts only; there is no per-event payload,
+raw error, coordinate, or key data.
 
-In the second Terminal window, launch the Viewer:
+When investigating a disconnect, compare `session_failure.category`,
+`transport_termination.class`, and `peer_terminal.state` in the Host and Viewer
+files. The first records the local coordinator's fixed failure category; the
+second distinguishes `end_of_stream` from `failure`; the third records a peer
+`close`, `session_stopping`, or `session_failed` signal. Together they show
+which endpoint declared failure first while omitting raw transport error text.
+These fields are available in Debug diagnostic builds starting with Build
+1019.
 
-```sh
-open -n "$HOME/Applications/MacRemoteApp-Viewer.app"
-```
+The schema does not contain hostnames, peer identity, IP addresses, process or
+window IDs, app/window names, coordinates, key/button/scroll values, clipboard
+content, credentials, frame data, raw errors, or raw UI status text. If the
+writer cannot append to the file, the app emits the fixed code
+`DIAG_FILE_WRITE_FAILED`. The directory is private to the current user and the
+file is created with restrictive permissions where supported.
 
-For M8 latency-budget and bitrate-adaptation evidence (`M8 stage …` and the
-Host's `M8 bitrate bps=… reason=…` lines), stream the per-stage aggregate lines on each
-Mac during a session of at least 30 seconds. The Host writes them under
-category `host-runtime` and the Viewer under `startup`; they contain timing
-aggregates only:
-
-```sh
-log stream --style compact \
-  --predicate 'subsystem == "com.rudinyu.MacRemoteApp" AND eventMessage BEGINSWITH "M8 "' \
-  2>&1 | tee "$support_dir/m8-stage-budget.log"
-```
-
-Do not launch `Contents/MacOS/...` for permission validation: that can attach
-macOS TCC decisions to the Terminal process instead of the signed app bundle.
-The direct executable is reserved for a separately documented debug build and
-must not be used as evidence for the production app's permission state. The
-production startup error path is mirrored to unified logging specifically so
-Keychain enrollment and permission failures are captured as bounded error codes
-even when the app is opened with Finder; private filesystem paths and
-underlying error descriptions are not written to the public startup stream.
-
-For a debug repository run, capture the same way without recording the
-password or private-key material:
-
-Run the Host command on the Intel Host Mac. It is a blocking smoke test and
-must remain running while the Viewer connects:
-
-```sh
-cd "/absolute/path/to/MacRemoteApp" # Replace with your repository path.
-bash scripts/run-m10-acceptance.sh host 2>&1 | tee "$support_dir/host-smoke.log"
-```
-
-Run the Viewer command on the Apple Silicon Viewer Mac (or in a separate
-Terminal on a machine prepared for the Viewer role):
-
-```sh
-cd "/absolute/path/to/MacRemoteApp" # Replace with your repository path.
-bash scripts/run-m10-acceptance.sh viewer 2>&1 | tee "$support_dir/viewer-smoke.log"
-```
-
-These commands are intentionally not a sequential same-shell recipe: each
-physical smoke process waits for the other endpoint.
-
-## 3. Optional debug stdout/stderr
-
-Only use this section for a debug build when the terminal output itself is
-needed. It is separate from the production permission evidence above:
-
-```sh
-<repository-root>/.build/debug/Host 2>&1 | tee "$support_dir/host-stdio.log"
-```
-
-Run the corresponding Viewer command on the Viewer Mac or in another Terminal:
-
-```sh
-<repository-root>/.build/debug/Viewer 2>&1 | tee "$support_dir/viewer-stdio.log"
-```
-
-Do not use the direct executable for TCC permission validation, and do not
-record passwords, private-key material, clipboard text, or raw input values.
-
-## 4. Capture recent macOS unified logs
-
-Run this soon after reproducing the issue:
-
-```sh
-log show --last 15m --style compact \
-  --predicate 'process == "MacRemoteApp-Host" OR process == "MacRemoteApp-Viewer"' \
-  > "$support_dir/unified-log.txt"
-```
-
-If the process name is unavailable, collect the last few minutes and filter
-locally before sharing. Do not collect the entire system log by default.
-
-## 5. Record non-secret environment metadata
-
-```sh
-sw_vers > "$support_dir/system.txt"
-printf 'architecture: %s\n' "$(uname -m)" >> "$support_dir/system.txt"
-codesign --display --verbose=4 \
-  "$HOME/Applications/MacRemoteApp-Host.app" \
-  > "$support_dir/host-signature.txt" 2>&1
-```
-
-Collect the corresponding Viewer signature on the Viewer Mac. The commands
-above intentionally collect only the OS version/build, architecture, and app
-signature metadata. Do not include the output of `env`, shell history, Keychain exports, hardware serial numbers,
-Hardware UUIDs, Provisioning UDIDs, or private certificate files.
-
-## 6. Redact and package
-
-Before sharing, remove or redact pairing codes, passwords,
-`MACREMOTEAPP_P12_PASSWORD`, private-key paths, home-directory details, IP
-addresses if not needed, hardware serial numbers, Hardware UUIDs,
-Provisioning UDIDs, full window titles, clipboard text, screenshots, and
-unrelated application logs. Never include `.p12`, `.key`, or private `.pem`
-files.
-
-After review, package only the sanitized text files:
-
-```sh
-ditto -c -k --keepParent "$support_dir" "${support_dir}.zip"
-```
-
-Keep the original directory until the issue is closed, then remove both the
-directory and archive if they are no longer needed.
+Review the files before attaching them. Do not attach screenshots, clipboard
+data, credentials, unrelated system logs, or a full Unified Logging export by
+default. Release customer diagnostics are a separate future opt-in workflow;
+this in-house Debug feature does not enable customer collection.

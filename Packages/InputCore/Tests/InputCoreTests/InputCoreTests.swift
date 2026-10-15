@@ -44,6 +44,86 @@ final class InputCoreTests: XCTestCase {
         )
     }
 
+    func testAccessibilityProbeBudgetIsSharedAndExpires() {
+        let deadline = AccessibilityMessagingDeadline(
+            deadlineUptimeNanoseconds: 1_100_000_000
+        )
+
+        XCTAssertEqual(
+            deadline.remainingTimeoutSeconds(nowUptimeNanoseconds: 1_000_000_000)!,
+            0.1,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            deadline.remainingTimeoutSeconds(nowUptimeNanoseconds: 1_070_000_000)!,
+            0.03,
+            accuracy: 0.000_001
+        )
+        XCTAssertNil(deadline.remainingTimeoutSeconds(nowUptimeNanoseconds: 1_100_000_000))
+    }
+
+    func testSystemWideMessagingTimeoutResetsBeforeFocusedElementProbe() {
+        var appliedTimeout: Float?
+        var operations: [String] = []
+
+        let focusedElementQuery = withTemporarySystemWideMessagingTimeout(
+            timeoutSeconds: 0.1,
+            setTimeout: { timeout in
+                operations.append(timeout == 0 ? "reset" : "set")
+                appliedTimeout = timeout == 0 ? nil : timeout
+                return .success
+            },
+            operation: {
+                XCTAssertEqual(appliedTimeout, 0.1)
+                operations.append("focused-element-query")
+                return true
+            }
+        )
+
+        XCTAssertEqual(focusedElementQuery, true)
+        XCTAssertNil(appliedTimeout)
+        operations.append("focused-element-probe")
+        XCTAssertEqual(
+            operations,
+            ["set", "focused-element-query", "reset", "focused-element-probe"]
+        )
+    }
+
+    func testTimedOutSecureInputProbesCannotAuthorizeBackgroundInput() {
+        // A timeout reading the focused element or its subrole is represented
+        // as unknown. Both global and target uncertainty must deny P6 input.
+        let targetAfterTimeout = CoreGraphicsAccessibilityContextProvider.classifyTargetSecureInputState(
+            expectedProcessIdentifier: 42,
+            focusedElementProcessIdentifier: nil,
+            role: nil,
+            subrole: nil
+        )
+        let targetSubroleAfterTimeout = CoreGraphicsAccessibilityContextProvider.classifyTargetSecureInputState(
+            expectedProcessIdentifier: 42,
+            focusedElementProcessIdentifier: 42,
+            role: "AXTextField",
+            subrole: nil,
+            subroleInspectionFailed: true
+        )
+
+        XCTAssertEqual(targetAfterTimeout, HostInputSecureInputState.unknown)
+        XCTAssertEqual(targetSubroleAfterTimeout, HostInputSecureInputState.unknown)
+        XCTAssertEqual(
+            CoreGraphicsAccessibilityContextProvider.classifyBackgroundSecureInput(
+                global: .unknown,
+                target: targetAfterTimeout
+            ),
+            .unknown
+        )
+        XCTAssertEqual(
+            CoreGraphicsAccessibilityContextProvider.classifyBackgroundSecureInput(
+                global: .inactive,
+                target: targetSubroleAfterTimeout
+            ),
+            .unknown
+        )
+    }
+
     func testTargetSecureInputInspectionFailsClosedOnMissingOrMismatchedAXOwnership() {
         XCTAssertEqual(
             CoreGraphicsAccessibilityContextProvider.classifyTargetSecureInputState(

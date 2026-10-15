@@ -10,21 +10,46 @@ Host; this is deliberately not a full remote-desktop product.
 Milestone state and open evidence gaps are tracked in one place:
 [`docs/STATUS.md`](docs/STATUS.md).
 
-The current signed and notarized test release is `0.2.1011` (Version `0.2`,
-Build `1011`) in `build/rc/`, including the current foreground-control
-reliability fixes, P6 control, the full-cleanup uninstaller in both DMGs,
-Viewer-led input-source following, and the earlier capture, input, reconnect,
-and presentation reliability fixes.
-Apple submission IDs and verification evidence are recorded in
-[`docs/STATUS.md`](docs/STATUS.md#021011-notarized-rc).
-Passing local tests does not replace the pending two-Mac acceptance run.
+The last public signed and notarized test release is `0.2.1011` (Version
+`0.2`, Build `1011`) in `build/rc/`; it includes P6 background control. Build
+`1018` is a historical in-house Debug diagnostic pair; Build `1024` is the
+latest signed and notarized in-house Debug pair. Build `1025` is the current
+source candidate: its local `.codex/ci.sh` gate passed, but its Debug
+diagnostic apps have not been packaged and it has not had a physical retest.
+See `docs/STATUS.md` for artifact records and validation state. Debug Host and
+Viewer builds append
+to their own bounded diagnostic logs automatically. These are internal test
+builds, not a public release. On the negotiated P6 path, Host acceptance of
+the authenticated Viewer pairing establishes durable input trust and enables
+negotiated Host clipboard capability across reconnect without a second Host
+prompt. The Viewer still controls clipboard sharing through its own
+session-local opt-in. With negotiated P6, the Viewer can keep viewing and
+control the selected app while it is inactive. Peers without P6 retain
+foreground-only input.
+The 1011 RC also includes the full-cleanup uninstaller in both DMGs, Viewer-led
+input-source following, and the earlier capture, input, reconnect, and
+presentation reliability fixes.
+Apple submission IDs and verification evidence for Build `1024` are recorded
+in [`docs/STATUS.md`](docs/STATUS.md#021024-in-house-debug-diagnostic-artifacts);
+the public RC evidence is in [`docs/STATUS.md`](docs/STATUS.md#021011-notarized-rc).
+Build `1022` keeps the selected-window stream alive without foreground
+activation, with bounded same-owner recovery for transient capture gaps. Build
+`1023` recovers from input failures proven to occur before delivery while
+keeping video connected; ambiguous delivery still ends the session so Host
+held-input cleanup runs. Passing local tests does not replace the pending
+two-Mac acceptance run.
 
-The current source tree also contains the user-authorized P6 extension,
-[Host-controlled Viewer input](docs/P6_BACKGROUND_CONTROL.md). It adds a
-separate local, saved control grant and optional process-targeted background
-input. It is included in the `0.2.1011` RC artifacts and does not
-complete the pending V1 physical acceptance. The V1 baseline described below
-continues to apply to peers without the P6 capability.
+P6 remains an explicit extension to foreground-only input; secure-input,
+system-authentication-dialog, lock, session, target, permission, and generation
+checks still apply. A selected window keeps streaming when its app becomes
+inactive or the window is occluded, without activating the app; brief catalog
+omissions and unexpected stream endings are recovered against the same window
+ID, bundle ID, and PID. Confirmed target loss or permission loss still fails
+closed. Host pairing trust can be paused for the active session or revoked by
+unpairing the Viewer; negotiated Host clipboard authorization follows accepted
+pairing, while text transfer retains its separate Viewer-local opt-in. Physical
+background-stream, input, and clipboard acceptance is still pending. See the
+[P6 contract](docs/P6_BACKGROUND_CONTROL.md).
 
 This build adds Viewer-led Chinese/English input-source
 following. The Host sets the requested state instead of replaying a toggle:
@@ -301,11 +326,15 @@ capabilities are recorded in
 
 The Host discovers shareable applications/windows, lets the local user select
 one window, captures it with ScreenCaptureKit, encodes H.264 with VideoToolbox,
-and streams it over an authenticated LAN session. The Viewer discovers and
+and streams it over an authenticated LAN session. The selected stream remains
+active when the owning app loses foreground, while input continues to follow
+the separate foreground or P6 process-target safety policy. The Viewer discovers and
 connects to the Host, renders the stream with Metal, and sends mouse and
-keyboard events back to the selected foreground app. Both sides may exchange
-text clipboard content according to the consent and privacy rules. The initial
-target is 1080p at up to 60 fps with low measured latency.
+keyboard events to the selected app under the negotiated foreground or P6
+process-target policy. Host acceptance of pairing authorizes negotiated text
+clipboard capability without another Host dialog; the Viewer must still opt in
+locally before text flows. The initial target is 1080p at up to 60 fps with low
+measured latency.
 
 ## Technology baseline
 
@@ -318,8 +347,10 @@ target is 1080p at up to 60 fps with low measured latency.
 - Keychain-backed trust records through `SecurityCore`.
 
 V1 does not include Internet NAT traversal, WebRTC, audio, file transfer, iPad
-support, simultaneous multi-window control, background control, or
-locked-screen control.
+support, simultaneous multi-window control, or locked-screen control. The
+separately specified P6 extension provides Host-authorized process-target
+control for an inactive selected app; it does not add locked-screen, login-
+window, secure-input, or system-authentication-dialog control.
 
 ## Documents and authority
 

@@ -3,6 +3,49 @@
 import AppKit
 import Foundation
 
+/// A single wall-clock budget shared by all AX messages used to inspect secure
+/// input during one Host input-context snapshot. AX request errors, including
+/// timeout, are handled as unknown by the caller.
+struct AccessibilityMessagingDeadline: Sendable {
+    let deadlineUptimeNanoseconds: UInt64
+
+    func remainingTimeoutSeconds(nowUptimeNanoseconds: UInt64) -> Float? {
+        guard nowUptimeNanoseconds < deadlineUptimeNanoseconds else { return nil }
+        let remainingNanoseconds = deadlineUptimeNanoseconds - nowUptimeNanoseconds
+        return Float(Double(remainingNanoseconds) / 1_000_000_000)
+    }
+
+    func setMessagingTimeout(
+        on element: AXUIElement,
+        nowUptimeNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) -> Bool {
+        guard let remainingTimeout = remainingTimeoutSeconds(
+            nowUptimeNanoseconds: nowUptimeNanoseconds
+        ) else {
+            return false
+        }
+        return AXUIElementSetMessagingTimeout(element, remainingTimeout) == .success
+    }
+}
+
+/// Applies a temporary timeout through the system-wide AX element, then
+/// immediately restores the process-wide default before returning. Passing
+/// zero to AXUIElementSetMessagingTimeout resets the system-wide timeout.
+func withTemporarySystemWideMessagingTimeout<Result>(
+    timeoutSeconds: Float,
+    setTimeout: (Float) -> AXError,
+    operation: () -> Result
+) -> Result? {
+    guard setTimeout(timeoutSeconds) == .success else {
+        _ = setTimeout(0)
+        return nil
+    }
+
+    let result = operation()
+    guard setTimeout(0) == .success else { return nil }
+    return result
+}
+
 /// The real macOS context source. It checks the PostEvent permission required
 /// for Quartz event posting, the current on-screen window identity, foreground
 /// ordering, and the console/lock state for every snapshot. Accessibility is
@@ -17,8 +60,9 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
 
     private let sessionStateProvider: SessionStateProvider
     private let selectionProvider: SelectionProvider
-    private let secureInputStateProvider: SecureInputStateProvider
-    private let targetSecureInputStateProvider: TargetSecureInputStateProvider
+    private let secureInputStateProvider: SecureInputStateProvider?
+    private let targetSecureInputStateProvider: TargetSecureInputStateProvider?
+    private static let secureInputProbeBudgetNanoseconds: UInt64 = 100_000_000
 
     /// The public macOS API does not expose a general secure-input status
     /// query. The default is therefore `.unknown`. A Host UI/adapter may
@@ -28,8 +72,8 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
     public init(
         sessionStateProvider: @escaping SessionStateProvider,
         selectionProvider: @escaping SelectionProvider,
-        secureInputStateProvider: @escaping SecureInputStateProvider = Self.detectSecureInputState,
-        targetSecureInputStateProvider: @escaping TargetSecureInputStateProvider = Self.detectTargetSecureInputState
+        secureInputStateProvider: SecureInputStateProvider? = nil,
+        targetSecureInputStateProvider: TargetSecureInputStateProvider? = nil
     ) {
         self.sessionStateProvider = sessionStateProvider
         self.selectionProvider = selectionProvider
@@ -47,7 +91,11 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         guard AXIsProcessTrusted() else { return .unknown }
 
         let system = AXUIElementCreateSystemWide()
-        return focusedSecureInputState(in: system, expectedProcessIdentifier: nil)
+        return focusedSecureInputState(
+            in: system,
+            expectedProcessIdentifier: nil,
+            deadline: makeSecureInputProbeDeadline()
+        )
     }
 
     /// Inspects the selected process itself instead of inferring its safety
@@ -61,7 +109,8 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         let application = AXUIElementCreateApplication(pid_t(processIdentifier))
         return focusedSecureInputState(
             in: application,
-            expectedProcessIdentifier: processIdentifier
+            expectedProcessIdentifier: processIdentifier,
+            deadline: makeSecureInputProbeDeadline()
         )
     }
 
@@ -104,30 +153,57 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
 
     private static func focusedSecureInputState(
         in root: AXUIElement,
-        expectedProcessIdentifier: Int32?
+        expectedProcessIdentifier: Int32?,
+        deadline: AccessibilityMessagingDeadline
     ) -> HostInputSecureInputState {
         var focusedValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            root,
-            kAXFocusedUIElementAttribute as CFString,
-            &focusedValue
-        ) == .success,
-        let focusedValue,
-        CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
+        let focusedElementQueryStatus: AXError
+        if expectedProcessIdentifier == nil {
+            guard let timeout = deadline.remainingTimeoutSeconds(
+                nowUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds
+            ),
+            let queryStatus = withTemporarySystemWideMessagingTimeout(
+                timeoutSeconds: timeout,
+                setTimeout: { AXUIElementSetMessagingTimeout(root, $0) },
+                operation: {
+                    AXUIElementCopyAttributeValue(
+                        root,
+                        kAXFocusedUIElementAttribute as CFString,
+                        &focusedValue
+                    )
+                }
+            ) else {
+                return .unknown
+            }
+            focusedElementQueryStatus = queryStatus
+        } else {
+            guard deadline.setMessagingTimeout(on: root) else { return .unknown }
+            focusedElementQueryStatus = AXUIElementCopyAttributeValue(
+                root,
+                kAXFocusedUIElementAttribute as CFString,
+                &focusedValue
+            )
+        }
+
+        guard focusedElementQueryStatus == .success,
+              let focusedValue,
+              CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
             return .unknown
         }
         let focused = unsafeDowncast(focusedValue, to: AXUIElement.self)
 
         if let expectedProcessIdentifier {
             var focusedProcessIdentifier: pid_t = 0
-            guard AXUIElementGetPid(focused, &focusedProcessIdentifier) == .success,
+            guard deadline.setMessagingTimeout(on: focused),
+                  AXUIElementGetPid(focused, &focusedProcessIdentifier) == .success,
                   Int32(focusedProcessIdentifier) == expectedProcessIdentifier else {
                 return .unknown
             }
         }
 
         var roleValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
+        guard deadline.setMessagingTimeout(on: focused),
+              AXUIElementCopyAttributeValue(
             focused,
             kAXRoleAttribute as CFString,
             &roleValue
@@ -139,6 +215,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         var subroleValue: CFTypeRef?
         let subrole: String?
         let subroleInspectionFailed: Bool
+        guard deadline.setMessagingTimeout(on: focused) else { return .unknown }
         let subroleStatus = AXUIElementCopyAttributeValue(
             focused,
             kAXSubroleAttribute as CFString,
@@ -281,7 +358,10 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         windows: [OnScreenWindow],
         allowsBackgroundTargeting: Bool = false
     ) -> HostInputFocusState {
-        let globalSecureInputState = secureInputStateProvider()
+        let deadline = Self.makeSecureInputProbeDeadline()
+        let globalSecureInputState = secureInputStateProvider?() ?? Self.detectSecureInputState(
+            deadline: deadline
+        )
         switch globalSecureInputState {
         case .active:
             return .secureInput
@@ -303,7 +383,11 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             frontmostProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier
         )
         if allowsBackgroundTargeting {
-            let targetSecureInputState = targetSecureInputStateProvider(selection.processIdentifier)
+            let targetSecureInputState = targetSecureInputStateProvider?(selection.processIdentifier) ??
+                Self.detectTargetSecureInputState(
+                    processIdentifier: selection.processIdentifier,
+                    deadline: deadline
+                )
             if focus == .notForeground {
                 // Background P6 requires both a known global safe signal and
                 // a target-specific safe AX result. Foreground legacy control
@@ -318,6 +402,37 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             }
         }
         return focus
+    }
+
+    private static func makeSecureInputProbeDeadline() -> AccessibilityMessagingDeadline {
+        let now = DispatchTime.now().uptimeNanoseconds
+        return AccessibilityMessagingDeadline(
+            deadlineUptimeNanoseconds: now &+ secureInputProbeBudgetNanoseconds
+        )
+    }
+
+    private static func detectSecureInputState(
+        deadline: AccessibilityMessagingDeadline
+    ) -> HostInputSecureInputState {
+        guard AXIsProcessTrusted() else { return .unknown }
+        return focusedSecureInputState(
+            in: AXUIElementCreateSystemWide(),
+            expectedProcessIdentifier: nil,
+            deadline: deadline
+        )
+    }
+
+    private static func detectTargetSecureInputState(
+        processIdentifier: Int32,
+        deadline: AccessibilityMessagingDeadline
+    ) -> HostInputSecureInputState {
+        guard processIdentifier > 0,
+              AXIsProcessTrusted() else { return .unknown }
+        return focusedSecureInputState(
+            in: AXUIElementCreateApplication(pid_t(processIdentifier)),
+            expectedProcessIdentifier: processIdentifier,
+            deadline: deadline
+        )
     }
 
     static func liveTarget(

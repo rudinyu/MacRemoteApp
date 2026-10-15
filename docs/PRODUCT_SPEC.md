@@ -7,15 +7,14 @@ acceptance boundaries; implementation details belong in the architecture and
 protocol documents. Current milestone state and open evidence gaps are
 tracked in [the status page](STATUS.md).
 
-The separately authorized [P6 extension](P6_BACKGROUND_CONTROL.md) changes
-input eligibility only when both peers negotiate `backgroundControl` and the
-Host has granted that authenticated Viewer local control consent. V1
-foreground-only statements below describe the baseline for legacy peers.
-P6 retains one captured window but delivers input to its owning process;
-exact-window delivery in a multi-window application is not guaranteed.
-Pairing alone grants no P6 input control. The Host exposes current control
-state and local allow, pause/resume, and revoke actions while video sharing
-continues. No locked-screen control or other post-V1 feature is authorized.
+The [P6 extension](P6_BACKGROUND_CONTROL.md) adds opt-in process-targeted
+input for a Host-selected app while it is inactive. P6 requires negotiated
+capability support and Host-local authorization for the authenticated Viewer;
+the Host continues to capture the selected window independently of the app's
+foreground state. Peers without P6 use the foreground-only input path and may
+request cooperative activation after explicit selection. P6 never permits
+locked-screen, login-window, secure-input, or system authentication-dialog
+control.
 
 ## Product goal
 
@@ -77,8 +76,8 @@ available on every macOS version.
 2. The Host requests Screen Recording at startup before waiting for Bonjour
    readiness, then starts its listener so macOS can request Local Network
    access. PostEvent permission is requested only when the corresponding input
-   capability is needed; Accessibility is an optional AX/secure-input
-   enhancement.
+   capability is needed; Accessibility is optional for legacy foreground
+   input, while P6 requires it for known-safe background process checks.
 3. The Host advertises a non-sensitive LAN discovery record after its Local
    Network path is ready.
 4. The Viewer finds the Host and requests a connection.
@@ -102,12 +101,17 @@ available on every macOS version.
    status.
 5. The Operator may stop the session or explicitly change the selected window;
    the Viewer can request an eligible app switch in the same session. The Host
-   may foreground that explicitly selected regular application, but input stays
-   disabled until focus and permission checks pass. While a Viewer is
-   authorized for a window, the Host menu-bar icon is tinted and the status
-   menu names the shared app and whether the Viewer brought it to the front.
-   There is never simultaneous
-   multi-window control.
+   may foreground that explicitly selected regular application for peers
+   without P6. With P6, an authorized process target may remain inactive while
+   the Viewer displays and controls the selected app. Losing foreground or
+   being occluded does not require reactivation or stop the selected-window
+   stream. A short missing catalog snapshot does not revoke the active
+   selection; if ScreenCaptureKit ends the stream, CaptureCore makes bounded
+   restart attempts only after checking the same window ID, bundle ID, PID,
+   layer, and geometry. Confirmed target loss or Screen Recording permission
+   loss stops the stream and fails closed. The Host menu-bar icon is tinted and
+   the status menu names the shared app and its capture state. There is never
+   simultaneous multi-window control.
 
 ### Interact with the selected window
 
@@ -115,11 +119,13 @@ available on every macOS version.
    surface.
 2. The Viewer sends normalized coordinates, key data, modifiers, and ordering
    metadata through the authenticated session.
-3. The Host accepts events only for the authorized selected window while it is
-   eligible for foreground control.
+3. The Host accepts events only for the authorized selected target. Legacy
+   peers require foreground eligibility; negotiated P6 uses the Host-authorized
+   process-target checks while the selected app may remain inactive.
 4. The Host maps and injects events using the authorized CoreGraphics/PostEvent
-   path; on explicit window selection, Accessibility may optionally raise the
-   uniquely matched selected window and inspect secure-input state.
+   path; on explicit legacy window selection, Accessibility may optionally
+   raise the uniquely matched selected window. P6 background input requires
+   Accessibility to confirm a known-safe secure-input state.
 5. If permissions, focus, authorization, or session health are lost, input is
    disabled and the Viewer shows a clear state.
 
@@ -145,12 +151,16 @@ available on every macOS version.
 
 ### Exchange text clipboard content
 
-1. Clipboard synchronization is opt-in per session and visibly indicated.
-2. Only text is synchronized in V1; images, files, URLs as file promises, and
+1. Host acceptance of pairing is the durable local trust grant for input and
+   negotiated text clipboard. There is no separate Host clipboard consent
+   dialog. The Viewer must opt in locally for each session before text flows.
+2. Clipboard synchronization is visibly indicated while enabled.
+3. Only text is synchronized in V1; images, files, URLs as file promises, and
    arbitrary pasteboard types are out of scope.
-3. Each side avoids echoing content that it just received from the other side.
-4. Disconnecting disables synchronization and clears transient transport
-   buffers.
+4. Each side avoids echoing content that it just received from the other side.
+5. Disconnecting clears transient transport buffers and disables the Viewer
+   opt-in; saved Host pairing trust is reused on reconnect but does not opt the
+   Viewer in.
 
 ### Settings and standard macOS controls
 
@@ -299,14 +309,20 @@ marked verified.
 
 - Screen Recording permission is required for Host window capture.
 - PostEvent permission is required only for Host-side authorized input
-  injection. Accessibility is optional for secure-input inspection and
-  best-effort exact-window raising after explicit selection.
+  injection. Accessibility is optional for the legacy foreground path and
+  best-effort exact-window raising; P6 background input requires a known-safe
+  secure-input inspection.
 - Pairing is explicit and user-confirmed; LAN discovery alone never grants
-  access.
+  access. Host acceptance of pairing also provides durable Host-local input
+  trust for that Viewer; a separate Host control-consent prompt is not shown.
+  Unpairing removes that trust and ends the active session. The Viewer retains
+  a separate local opt-in for text clipboard synchronization.
 - Input is disabled until the session is authenticated, paired, authorized for
-  the selected window, and in a valid focus state.
+  the selected target, and passes either the foreground policy or the stricter
+  negotiated P6 process-target checks.
 - Clipboard synchronization is disabled by default unless the Operator enables
-  it for the session.
+  it locally in Viewer Settings for that session. Host pairing trust enables
+  the negotiated Host-side bridge without a separate Host prompt.
 
 ## Explicitly out of scope for V1
 
@@ -317,7 +333,6 @@ marked verified.
   pasteboard types.
 - iPadOS or iOS Viewer support.
 - Simultaneous multi-window or multi-Viewer sessions.
-- Background control of an unfocused application.
 - Locked-screen, login-window, secure-input, or system authentication-dialog
   control.
 - Remote privilege escalation, credential collection, or bypass of macOS
@@ -340,8 +355,9 @@ documented compatibility matrix:
   a stable frame rate.
 - Pointer, keyboard, and modifier input reaches only the authorized selected
   foreground window when permissions and focus are valid.
-- Text clipboard synchronization works only when enabled and does not echo
-  indefinitely or transfer non-text content.
+- Text clipboard synchronization requires accepted Host pairing, negotiated
+  capability, and the Viewer-local opt-in; it does not echo indefinitely or
+  transfer non-text content.
 - Permission loss, disconnect, stale authorization, malformed messages, and
   unsupported capabilities fail closed with actionable UI.
 - M8 performance targets are measured and reported, and any missed target is

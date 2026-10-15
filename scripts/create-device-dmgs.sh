@@ -24,7 +24,7 @@ if [[ -d "${release_root}" ]]; then
     release_root="$(cd -- "${release_root}" && pwd -P)"
 fi
 case "${release_root}" in
-    "${repo_root}/build/testing"|"${repo_root}/build/MacRemoteApp-"*.staging.*|"${repo_root}/.build/"*)
+    "${repo_root}/build/testing"|"${repo_root}/build/debug-diagnostic"|"${repo_root}/build/MacRemoteApp-"*.staging.*|"${repo_root}/.build/"*)
         ;;
     "${repo_root}/build/beta"|"${repo_root}/build/rc"|"${repo_root}/build/release")
         echo "Refusing to write a formal channel directly; use scripts/release-notarized.sh for replacement-safe notarized promotion: ${release_root}" >&2
@@ -53,6 +53,25 @@ fi
     exit 1
 }
 artifact_channel="$(macremoteapp_resolve_artifact_channel "${repo_root}" "${release_root}")" || exit 2
+
+select_diagnostic_guide_sources() {
+    case "$1" in
+        debug-diagnostic)
+            debug_guide="${repo_root}/docs/DEBUGGING.md"
+            log_guide="${repo_root}/docs/DEBUG_LOG_COLLECTION.md"
+            ;;
+        testing|beta|rc|release)
+            debug_guide="${repo_root}/docs/RELEASE_DEBUGGING.md"
+            log_guide="${repo_root}/docs/RELEASE_DEBUG_LOG_COLLECTION.md"
+            ;;
+        *)
+            echo "No diagnostic guides are configured for this artifact channel" >&2
+            return 2
+            ;;
+    esac
+}
+
+select_diagnostic_guide_sources "${artifact_channel}" || exit 2
 release_identity="$(macremoteapp_release_identity \
     "${release_root}/MacRemoteApp-Host.app/Contents/Info.plist" \
     "${release_root}/MacRemoteApp-Viewer.app/Contents/Info.plist")" || exit 2
@@ -62,8 +81,6 @@ install_script="${script_dir}/dmg-install.sh"
 uninstall_script="${script_dir}/dmg-uninstall.sh"
 standalone_uninstall_script="${script_dir}/Uninstall-MacRemoteApp.command"
 user_guide="${repo_root}/docs/USER_GUIDE.md"
-debug_guide="${repo_root}/docs/DEBUGGING.md"
-log_guide="${repo_root}/docs/DEBUG_LOG_COLLECTION.md"
 test -x "${install_script}"
 test -x "${uninstall_script}"
 test -x "${standalone_uninstall_script}"

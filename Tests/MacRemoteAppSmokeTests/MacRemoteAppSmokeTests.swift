@@ -370,9 +370,14 @@ final class MacRemoteAppSmokeTests: XCTestCase {
         XCTAssertTrue(hostRuntimeSource.contains("func updateServiceName(_ serviceName: String) throws"))
         XCTAssertTrue(hostRuntimeSource.contains("defaultIdentityLabel = \"MacRemoteApp.host\""))
         XCTAssertTrue(hostRuntimeSource.contains("defaultTrustStoreService = \"com.rudinyu.MacRemoteApp.Host.trust\""))
-        XCTAssertTrue(hostRuntimeSource.contains("KeychainTrustStore(service: Configuration.defaultTrustStoreService)"))
+        XCTAssertTrue(hostRuntimeSource.contains("service: Configuration.defaultTrustStoreService"))
+        XCTAssertTrue(hostRuntimeSource.contains("resolvePairingTrust(for: controlSessionID)"))
+        XCTAssertTrue(hostRuntimeSource.contains("HostRuntimeClipboardAuthorizationPolicy.permits"))
+        XCTAssertFalse(hostRuntimeSource.contains("HostControlPrompt.requestConsent"))
+        XCTAssertFalse(hostRuntimeSource.contains("HostClipboardPrompt.requestConsent"))
         XCTAssertTrue(hostAppSource.contains("Rename Host…"))
         XCTAssertTrue(hostAppSource.contains("Forget saved pairings…"))
+        XCTAssertTrue(hostAppSource.contains("Unpair this Viewer?"))
         XCTAssertTrue(hostAppSource.contains("runtime.forgetAllPairings()"))
         XCTAssertTrue(viewerSource.contains("onForgetPairings"))
         XCTAssertTrue(viewerSource.contains("Forget saved pairings…"))
@@ -434,7 +439,8 @@ final class MacRemoteAppSmokeTests: XCTestCase {
         XCTAssertTrue(viewerRuntime.contains("connectHostButton.isEnabled = isDisconnected"))
         XCTAssertTrue(hostRuntime.contains("videoConfigSentAuthorizationGeneration"))
         XCTAssertTrue(hostRuntime.contains("expectedAuthorizationGeneration: authorizationGeneration"))
-        XCTAssertTrue(hostRuntime.contains("case .authorizationChanged, .reconnectRequired"))
+        XCTAssertTrue(hostRuntime.contains("case .authorizationChanged:"))
+        XCTAssertTrue(hostRuntime.contains("case .reconnectRequired:"))
     }
 
     func testM10WindowSwitchKeepsInputClipboardAndVideoLifecycleInSync() throws {

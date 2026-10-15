@@ -14,8 +14,8 @@ M7 keeps the existing package boundaries explicit:
 | --- | --- |
 | `RemoteProtocol` | Bounded `ClipboardOffer`, `ClipboardText`, and `ClipboardAcknowledgement` schemas, UTF-8 validation, and the optional status-only `hasText` field |
 | `TransportCore` | `ClipboardSyncCoordinator` state machine, transient-buffer clearing, Offer/ACK admission policy, and redacted `SessionUXProjection` |
-| `Apps/Host` | Host-side `NSPasteboard` string read/write bridge and Host session UI composition |
-| `Apps/Viewer` | Viewer-side `NSPasteboard` string read/write bridge, opt-in consent UI composition, and Viewer session UI composition |
+| `Apps/Host` | Host-side `NSPasteboard` string bridge, enabled only for a trusted paired peer with the negotiated capability |
+| `Apps/Viewer` | Viewer-side `NSPasteboard` string bridge and the operator's session-local opt-in UI |
 
 The AppKit bridges never write directly to the transport. They call
 `SessionCoordinator.send`, so TLS/authentication, capability negotiation, and
@@ -25,7 +25,11 @@ arbitrary pasteboard types are not transferred.
 
 ## Clipboard policy
 
-- Synchronization starts disabled. Each endpoint must opt in for the session.
+- The Host enables its local bridge automatically after authenticated pairing
+  trust and text-clipboard capability negotiation. The Viewer remains
+  default-off and requires its operator's explicit session-local opt-in before
+  it reads or writes clipboard text. There is no separate Host clipboard
+  prompt.
 - Enabling or disabling uses a status-only `ClipboardOffer` with
   `hasText = false`; an empty string remains a valid text transfer because it
   uses `hasText = true` and is followed by `ClipboardText`.
@@ -55,8 +59,9 @@ arbitrary pasteboard types are not transferred.
   suppressed. No clipboard text, hash, or full diagnostic is logged.
 - Stop, authorization loss, transport failure, and reconnect call `reset()`.
   That clears pending text, pending offers, echo markers, and local/remote
-  enablement; input and clipboard UI must then remain disabled until the next
-  authorized session explicitly opts in again.
+  enablement. On a new authorized session, the Host reuses pairing trust to
+  enable its bridge after capability negotiation; the Viewer must opt in again
+  for that session.
 
 ## Session UX projection
 
@@ -69,19 +74,21 @@ clipboard-enabled, degraded, reconnecting, stopping, or failed.
 
 Input-ready requires authorization, granted permission, and no degraded state.
 Clipboard-enabled requires authorization, the negotiated text-clipboard
-capability, both local and peer opt-in, and no degraded state. Missing or
-revoked permission therefore remains visibly degraded and removes both ready
-indicators without pretending that the session is disconnected.
+capability, Host pairing trust, Viewer-local opt-in, and no degraded state.
+Missing or revoked permission therefore remains visibly degraded and removes
+both ready indicators without pretending that the session is disconnected.
 
 ## M10 app-shell integration
 
-The M7 projection and clipboard policy remain unchanged. In the production
-Viewer, the remote view and Settings are two pages of one main window.
+In the production Viewer, the remote view and Settings are two pages of one
+main window. The Host reuses accepted pairing trust to enable its local
+clipboard bridge on reconnect when the capability is negotiated; only the
+Viewer retains a per-session clipboard opt-in.
 Connection/input/clipboard values feed both from the same app-owned state;
 Settings does not establish another session or persist a second clipboard
 preference. Its clipboard checkbox calls the existing session opt-in action
 and is unavailable when the current session cannot offer the capability.
-Both endpoints still need consent, and disconnect/reconnect resets opt-in.
+Disconnect/reconnect clears transient clipboard state and Viewer opt-in.
 
 Settings is reached through the local native menu (Command-,). Back,
 Command-0, or Close on Settings restores the remote view and input surface.
@@ -95,7 +102,8 @@ granting authorization. Full navigation and ownership are specified in the
 
 The deterministic tests cover:
 
-- default-off and per-session opt-in;
+- Host trusted-pairing authorization without a Host prompt and Viewer
+  default-off per-session opt-in;
 - status-only enablement, Offer/ACK/Text ordering, UTF-8 byte limits, and
   malformed acknowledgement reason combinations;
 - origin/generation matching, echo suppression, replay/conflict handling, and
@@ -118,30 +126,22 @@ it is not claimed by the deterministic package tests.
 ## Manual walkthrough when the two Macs are available
 
 1. Build the signed Host and Viewer bundles using
-   `scripts/package-device-apps.sh` and install one on each target Mac. Build
-   the debug smoke targets from the same checkout for the explicit M7 opt-in
-   command path; release bundles intentionally omit diagnostic flags.
-2. Establish the existing authenticated, authorized M2 session and verify the
-   session UI shows paired/authenticated/authorized before enabling clipboard.
-   The supported physical diagnostic path is:
-   `bash scripts/run-m10-acceptance.sh host-clipboard` on Intel and
-   `bash scripts/run-m10-acceptance.sh viewer-clipboard` on Apple Silicon.
-   Both operators must intentionally launch the clipboard command; it prints
-   only the redacted `authorized, clipboard=enabled` UX state and then waits
-   for the operators to copy text. Press Return in either diagnostic to stop;
-   type `disable` or `off` to exercise the explicit opt-out before stopping.
-3. Leave clipboard disabled and change text on either Mac; no Offer should be
-   accepted and no text should arrive.
-4. Enable text clipboard on both sides. Copy a short Unicode string in either
-   direction and verify one update arrives without bouncing back.
+   `scripts/package-device-apps.sh` and install one on each target Mac.
+2. Pair the Viewer with the Host, accept pairing on both peers, and confirm
+   that negotiated Host clipboard capability is available without a second
+   Host prompt.
+3. Leave the Viewer clipboard toggle disabled and change text on either Mac;
+   no clipboard text should flow.
+4. Enable clipboard only in Viewer Settings. Copy a short Unicode string in
+   either direction and verify one update arrives without bouncing back.
 5. Try a non-text pasteboard item and a text value above the negotiated bound;
    both must be rejected without exposing their contents in logs.
 6. Change text on both sides close together and verify the documented arrival-
-   order policy, then disconnect/reconnect and confirm clipboard/input are
-   disabled until explicit re-authorization and opt-in.
+   order policy. Disconnect/reconnect and confirm the Host reuses pairing trust
+   without a prompt while the Viewer toggle returns to off.
 7. In the production GUI, toggle clipboard sharing from Viewer Settings and
-   return to the remote view. Confirm both pages report the same opt-in state
-   and navigation alone neither resets nor enables sharing. Run the connected
+   return to the remote view. Confirm both pages report the same state and
+   navigation alone neither resets nor enables sharing. Run the connected
    navigation/input-release checks in [M10 acceptance](M10_ACCEPTANCE.md).
 8. After collecting sanitized evidence, follow
    [UI Review and Post-test Cleanup](TESTING_CLEANUP.md). A local Settings

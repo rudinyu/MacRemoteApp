@@ -5,11 +5,14 @@ MacRemoteApp is a LAN-first remote view and control tool for two Macs:
 - The Intel Mac runs `MacRemoteApp-Host`.
 - The Apple Silicon Mac runs `MacRemoteApp-Viewer`.
 
-The Viewer controls one eligible foreground application window selected from the
-Host. The V1 protocol is intentionally limited to one local-LAN session, mouse,
-keyboard, scroll, and bounded opt-in text clipboard synchronization. The
-production Viewer exposes the clipboard toggle only after the Host authorizes
-the capability for the current paired session.
+The Viewer controls one selected Host application window. With negotiated P6
+and Host-approved pairing trust, the selected app can remain inactive; peers
+without P6 require foreground eligibility. The V1 protocol is intentionally
+limited to one local-LAN session, mouse, keyboard, scroll, and bounded opt-in
+text clipboard synchronization. The
+production Viewer exposes the clipboard toggle only after Host pairing trust
+and text-capability negotiation make the path available. The Viewer operator
+still opts in locally before clipboard text is synchronized.
 
 ## Install from a notarized DMG
 
@@ -86,8 +89,12 @@ fresh pairing once. The old Keychain items are left untouched by the upgrade.
    **Allow**; select **Accept** on the Viewer only when the codes match.
    Otherwise select **Deny** on either Mac.
 5. Each endpoint saves the peer trust record in its role-specific macOS
-   Keychain service only after both operators consent. A permission grant
-   alone never creates a pairing.
+   Keychain service only after both operators consent. On the Host, accepting
+   this pairing also authorizes this Viewer for input and for the negotiated
+   Host clipboard capability; there is no later per-session Host consent
+   dialog. PostEvent, Accessibility/process-safety, focus, selected-window,
+   secure-input, lock, and console checks still apply. The Viewer retains a
+   separate local clipboard toggle.
 
 The Host status menu provides `Rename Host…` for changing the name shown in
 Viewer discovery. The name is visible to devices on the local network and is
@@ -98,8 +105,9 @@ If a previous pairing is stale or only one endpoint still has its trust record,
 use `Forget saved pairings…` on the Host status menu and on the Viewer before
 trying again. The action stops the active session, clears the current Viewer
 Host selection, and removes that app role's saved peer trust records. On a P6
-Host it also removes saved Viewer control grants. It
-does not delete the local TLS identity, permissions, or Host name. The Host
+Host it removes the Viewer trust record that authorizes future input; there is
+no separate control grant. It does not delete the local TLS identity,
+permissions, or Host name. The Host
 continues to be discoverable, but it must be explicitly selected again before
 the next connection can show and confirm a new pairing code.
 
@@ -110,9 +118,11 @@ paths.
 ## Select and control a window
 
 1. Use the Viewer window picker to select exactly one eligible Host window.
-2. Keep the Host unlocked. Legacy peers require the selected application to
-   remain foreground. With the P6 control grant below, a safe selected process
-   can receive input without being brought to the front.
+2. Keep the Host unlocked. When both peers support P6 and the Host has
+   accepted this Viewer’s pairing, the selected app may stay in the background: the
+   Viewer continues showing its window and reports background control ready.
+   Without P6, the selected app must be active; explicit selection may briefly
+   activate Host and yield to the selected app before input becomes available.
 3. Use the Viewer surface for pointer movement, button events, scrolling,
    keyboard input, and supported modifiers.
    If the session authorizes only mouse or only keyboard input, the Viewer
@@ -122,47 +132,47 @@ paths.
 Very small macOS helper/service surfaces are intentionally omitted from the
 window picker. If an application's main window is not listed, bring that
 window on screen on the Host and refresh the session.
-4. When the Host authorizes text clipboard, use the Viewer’s `Enable text
-   clipboard` button to opt in for the current session. The button becomes
-   unavailable when the Host has not granted the capability or the session
-   ends. The protocol path is text-only, bounded, and opt-in; clipboard text
-   is not written to diagnostics.
+4. After Host pairing trust and text-capability negotiation make clipboard
+   available, use the Viewer’s `Enable text clipboard` button to opt in for the
+   current session. The Host enables the negotiated capability automatically;
+   the Viewer’s local opt-in remains required. The button is unavailable when
+   the capability is not negotiated or the session ends. The protocol path is
+   text-only and bounded, and clipboard text is not written to diagnostics.
 
-Screen Recording or PostEvent revocation, unsafe target state, window replacement,
-disconnect, or failed reauthorization stops the affected operation. Optional
-Accessibility loss only removes the AX/secure-input enhancement. Recheck the
-Host permission and select the window again before reconnecting.
-For P6 background control, unavailable secure-input inspection also blocks
-control; enable Host Accessibility and recheck the safe target state.
+Screen Recording or PostEvent revocation, unsafe target state, window
+replacement, disconnect, or failed reauthorization stops the affected
+operation. Accessibility loss removes only the optional AX enhancement from
+legacy foreground control, but blocks P6 background input because its
+known-safe process check cannot complete. Recheck the Host permission and
+select the window again before reconnecting. Accessibility checks do not
+replace foreground checks for legacy input. If P6 is unavailable and the
+Viewer reports that the selected app is not active, bring MacRemoteApp Host
+forward and retry selection.
 
-### Host-controlled process input (P6)
+### P6 background control
 
-The current `0.2.1011` RC adds P6; the earlier `0.2.1009` RC did not include it.
-Both endpoints must support the new capability. After pairing, the Host asks
-locally before granting mouse and keyboard control to this Viewer. Denying
-the request keeps the session view-only. Approval is saved for the Viewer's
-authenticated identity and can be reused on reconnect; a display-name change
-does not grant a new device control.
+Both endpoints must support P6. The Host’s local acceptance of the pairing is
+the durable trust decision for mouse and keyboard input; no separate control
+prompt appears on this or later sessions. Denying pairing leaves the Viewer
+untrusted. Accepted pairing trust is reused on reconnect; a device-name
+change does not grant control. The Host menu can pause/resume the current
+session or unpair the Viewer. Unpairing removes the saved trust and ends the
+active authenticated session; the Viewer must pair again before reconnecting.
+Keychain errors block control. If unpairing cannot be saved, retry before
+relying on revocation after a Host restart.
 
-The Host menu shows control state and offers allow, pause/resume, and revoke.
-Pause stops control for the current session while video continues. Revoke
-removes the saved grant; the Viewer needs another local approval to control
-again. A Keychain error blocks control and is shown as a failure. If revocation
-cannot be saved, retry before relying on it across a Host restart.
-
-P6 sends events to the selected window's owning process without activating it.
-An app with several windows may route events to another window in that process;
+P6 sends events to the selected app process without activating it. An app with
+several windows may route events to another window in that process, so
 exact-window delivery is not guaranteed. Keep a disposable test app available
-until physical behavior has been verified. The Host must remain unlocked with
-the required input permission and a live safe selected target. Secure-input
-and unsafe-target checks still block input. Viewer Settings and unfocused
-Viewer windows do not send remote input.
-
-Background control does not automatically change the Host's global input
-source. Match the intended source manually on the Host. Chinese composition
-and candidate panels remain Host-side; verify their behavior with the actual
-target app. Input-source following can resume when the selected target is
-foreground, under the existing acknowledgement rules below.
+until physical behavior is verified. The Host must stay unlocked and retain
+PostEvent permission, a live safe target, and successful secure-input checks.
+Background P6 input also requires Host Accessibility permission to verify the
+selected process is safe; input remains blocked if that inspection is
+unavailable.
+Viewer Settings or an unfocused Viewer window does not send remote input.
+Background control does not change the Host's global input source; match it
+manually on the Host. Chinese composition and candidate panels remain Host-side.
+Input-source following can resume when the selected target is foreground.
 
 ### Chinese/English input-source following
 
@@ -326,8 +336,8 @@ Older `0.2.1008` DMGs do not contain this full-cleanup helper.
 
 ## Product boundaries
 
-V1 does not provide Internet relay, WebRTC, audio, file transfer, simultaneous
-multi-window control, background control, or locked-screen control.
-The separately authorized P6 source extension provides consented
-process-targeted background input with the limits above. It adds none of the
-other capabilities and does not imply physical two-Mac acceptance.
+The product does not provide Internet relay, WebRTC, audio, file transfer,
+simultaneous multi-window control, or locked-screen control. P6
+background control is process-targeted and does not guarantee which window of
+an app with multiple windows receives an event. Physical two-Mac acceptance
+remains pending.

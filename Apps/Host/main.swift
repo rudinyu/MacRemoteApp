@@ -78,6 +78,10 @@ struct HostApp {
         }
 
 #if DEBUG
+        M10MainActorStallMonitor.shared.start(role: .host)
+#endif
+
+#if DEBUG
         if CommandLine.arguments.contains("--m3-list-windows") {
             await MainActor.run {
                 _ = NSApplication.shared
@@ -160,9 +164,8 @@ struct HostApp {
 }
 
 private func removeAllLocalData() async throws {
-    // Remove control grants before trust records. If Keychain refuses to clear
-    // grants, retain the authenticated peer records so the Host can surface a
-    // durable-control cleanup failure instead of silently forgetting it.
+    // Clean up these legacy control-grant records before removing pairing
+    // trust. They have no current authorization role.
     _ = try await KeychainControlGrantStore().removeAll()
     try await KeychainTrustStore(
         service: HostRuntime.Configuration.defaultTrustStoreService
@@ -344,7 +347,7 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(controlStatus)
         controlStatusMenuItem = controlStatus
         let controlToggle = NSMenuItem(
-            title: "Grant Viewer Control…",
+            title: "Viewer Control Unavailable",
             action: #selector(toggleViewerControl),
             keyEquivalent: ""
         )
@@ -353,7 +356,7 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(controlToggle)
         controlToggleMenuItem = controlToggle
         let controlRevoke = NSMenuItem(
-            title: "Revoke Viewer Control",
+            title: "Unpair Viewer…",
             action: #selector(revokeViewerControl),
             keyEquivalent: ""
         )
@@ -371,6 +374,17 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(retry)
         retryItem = retry
         menu.addItem(.separator())
+
+#if DEBUG
+        let debugLog = NSMenuItem(
+            title: "Open Debug Log…",
+            action: #selector(openDebugLog),
+            keyEquivalent: ""
+        )
+        debugLog.target = self
+        menu.addItem(debugLog)
+        menu.addItem(.separator())
+#endif
 
         let stopItem = NSMenuItem(
             title: "Quit MacRemoteApp Host",
@@ -396,13 +410,15 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
         switch status {
         case .needsScreenRecording, .needsLocalNetwork, .listenerFailed, .failed:
             canRetry = true
-        case .starting, .connected, .sharing, .pairing, .listening, .stopped:
+        case .starting, .connected, .sharing, .recovering, .pairing, .listening, .stopped:
             canRetry = false
         }
         retryItem?.isEnabled = canRetry
         // Remote viewing/control is visible in the menu bar without opening
         // the menu, alongside macOS's own screen-recording indicator.
         if case .sharing = status {
+            statusItem?.button?.contentTintColor = .systemOrange
+        } else if case .recovering = status {
             statusItem?.button?.contentTintColor = .systemOrange
         } else {
             statusItem?.button?.contentTintColor = nil
@@ -424,23 +440,32 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
             controlToggleMenuItem?.isEnabled = true
             controlRevokeMenuItem?.isEnabled = true
         case .requiresConsent:
-            controlToggleMenuItem?.title = "Grant Viewer Control…"
-            controlToggleMenuItem?.isEnabled = true
+            controlToggleMenuItem?.title = "Pair Viewer to Enable Control"
+            controlToggleMenuItem?.isEnabled = false
             controlRevokeMenuItem?.isEnabled = false
         case .persistenceFailure:
-            controlToggleMenuItem?.title = "Retry Viewer Control Setup…"
-            controlToggleMenuItem?.isEnabled = true
+            controlToggleMenuItem?.title = "Viewer Unpair Failed"
+            controlToggleMenuItem?.isEnabled = false
+            controlRevokeMenuItem?.title = "Retry Viewer Unpair…"
             controlRevokeMenuItem?.isEnabled = true
         case .negotiating:
-            controlToggleMenuItem?.title = "Viewer Control Setup Pending…"
+            controlToggleMenuItem?.title = "Checking Paired Viewer…"
             controlToggleMenuItem?.isEnabled = false
             controlRevokeMenuItem?.isEnabled = false
         case .unavailable, .unsupported, .revoked:
-            controlToggleMenuItem?.title = controlStatus == .revoked
-                ? "Grant Viewer Control Again…"
-                : "Grant Viewer Control…"
-            controlToggleMenuItem?.isEnabled = controlStatus == .revoked
-            controlRevokeMenuItem?.isEnabled = controlStatus == .revoked
+            switch controlStatus {
+            case .unavailable:
+                controlToggleMenuItem?.title = "Viewer Control Unavailable"
+            case .unsupported:
+                controlToggleMenuItem?.title = "Viewer Does Not Support P6"
+            case .revoked:
+                controlToggleMenuItem?.title = "Viewer Pairing Revoked"
+            default:
+                break
+            }
+            controlToggleMenuItem?.isEnabled = false
+            controlRevokeMenuItem?.title = "Unpair Viewer…"
+            controlRevokeMenuItem?.isEnabled = false
         }
         refreshSettings()
     }
@@ -452,9 +477,9 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
     @objc private func revokeViewerControl() {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Revoke Viewer control?"
-        alert.informativeText = "Control stops immediately and the saved grant for this authenticated Viewer is removed. Video sharing remains available."
-        alert.addButton(withTitle: "Revoke Control")
+        alert.messageText = "Unpair this Viewer?"
+        alert.informativeText = "This removes the Viewer’s saved pairing and ends its active session. The Viewer must be paired again before reconnecting."
+        alert.addButton(withTitle: "Unpair Viewer")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         Task { await runtime.revokeViewerControl() }
@@ -613,6 +638,17 @@ private final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
     @objc private func stopSessionAndQuit() {
         NSApplication.shared.terminate(nil)
     }
+
+#if DEBUG
+    @objc private func openDebugLog() {
+        let url = M10HostDiagnosticFileLog.logFileURL
+        if FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            NSWorkspace.shared.open(url.deletingLastPathComponent())
+        }
+    }
+#endif
 
     private func showHostSettingsError(_ message: String) {
         let alert = NSAlert()

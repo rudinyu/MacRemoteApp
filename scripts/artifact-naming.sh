@@ -5,7 +5,7 @@
 
 macremoteapp_validate_artifact_channel() {
     case "${1:-}" in
-        testing|beta|rc|release)
+        testing|debug-diagnostic|beta|rc|release)
             return 0
             ;;
         *)
@@ -22,13 +22,19 @@ macremoteapp_resolve_artifact_channel() {
     local canonical_channel=""
     local is_staging_root=0
     local is_build_scratch=0
+    local is_debug_diagnostic_scratch=0
 
     case "${release_root}" in
         "${repo_root}/build/testing") canonical_channel="testing" ;;
+        "${repo_root}/build/debug-diagnostic") canonical_channel="debug-diagnostic" ;;
         "${repo_root}/build/beta") canonical_channel="beta" ;;
         "${repo_root}/build/rc") canonical_channel="rc" ;;
         "${repo_root}/build/release") canonical_channel="release" ;;
         "${repo_root}/build/MacRemoteApp-"*.staging.*) is_staging_root=1 ;;
+        "${repo_root}/.build/m10-debug-diagnostic"|"${repo_root}/.build/m10-debug-diagnostic/"*)
+            canonical_channel="debug-diagnostic"
+            is_debug_diagnostic_scratch=1
+            ;;
         "${repo_root}/.build"|"${repo_root}/.build/"*)
             canonical_channel="testing"
             is_build_scratch=1
@@ -47,6 +53,10 @@ macremoteapp_resolve_artifact_channel() {
             return 1
         fi
     else
+        if (( is_debug_diagnostic_scratch )); then
+            echo "M10 Debug diagnostic staging outputs require an explicit artifact channel" >&2
+            return 1
+        fi
         if (( is_staging_root )); then
             echo "Controlled staging outputs require an explicit artifact channel" >&2
             return 1
@@ -56,6 +66,22 @@ macremoteapp_resolve_artifact_channel() {
 
     macremoteapp_validate_artifact_channel "${artifact_channel}" || return 1
     printf '%s\n' "${artifact_channel}"
+}
+
+macremoteapp_require_release_channel() {
+    case "${1:-}" in
+        testing|beta|rc|release)
+            return 0
+            ;;
+        debug-diagnostic)
+            echo "The M10 Debug diagnostic channel is not eligible for M9 release validation or promotion" >&2
+            return 1
+            ;;
+        *)
+            echo "Invalid MacRemoteApp release channel" >&2
+            return 1
+            ;;
+    esac
 }
 
 macremoteapp_read_plist_string() {
@@ -182,6 +208,8 @@ macremoteapp_expected_distribution_name() {
 
     if [[ "${artifact_channel}" == "release" ]]; then
         printf '%s.%s\n' "${app_name}" "${extension}"
+    elif [[ "${artifact_channel}" == "debug-diagnostic" ]]; then
+        printf '%s-debug-diagnostic-%s.%s\n' "${app_name}" "${release_identity}" "${extension}"
     else
         printf '%s-%s.%s\n' "${app_name}" "${release_identity}" "${extension}"
     fi

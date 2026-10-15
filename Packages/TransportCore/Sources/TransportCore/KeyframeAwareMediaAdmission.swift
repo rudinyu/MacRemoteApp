@@ -6,10 +6,12 @@ import RemoteProtocol
 /// corrupts every later delta frame until the next keyframe. When the media
 /// capacity is reached the policy therefore discards the incoming delta
 /// frame, never an already queued one, and then discards every later delta
-/// frame until a keyframe is admitted. A keyframe supersedes all queued delta
-/// frames, so they are purged to make room for it and to prefer the newest
-/// decodable picture. Required media such as `VideoConfig` is never dropped;
-/// it may purge queued delta frames, which also starts a keyframe wait.
+/// frame until a keyframe is admitted. A newer keyframe supersedes queued
+/// keyframes and delta frames, so older pictures are purged to prefer the
+/// newest decodable picture. Required media such as `VideoConfig` and control
+/// messages are preserved; if required media alone leaves no room, the
+/// incoming keyframe is rejected and delta frames remain gated until a later
+/// keyframe is admitted.
 ///
 /// The policy owns no storage. Callers hold their own lock or actor isolation
 /// and apply it to their queue.
@@ -24,10 +26,10 @@ struct KeyframeAwareMediaAdmission: Sendable {
     struct Decision: Equatable, Sendable {
         /// Whether the incoming element should be appended or delivered.
         let admitIncoming: Bool
-        /// Whether delta frames are now being skipped until a keyframe. A
-        /// keyframe purging superseded delta frames does not set this: the
-        /// keyframe itself restores decodability, so asking for another one
-        /// would only add a bitrate spike under congestion.
+        /// Whether delta frames are now being skipped until a keyframe. An
+        /// admitted keyframe purging superseded queued frames does not set
+        /// this: the keyframe itself restores decodability, so asking for
+        /// another one would only add a bitrate spike under congestion.
         let awaitingKeyframe: Bool
     }
 
@@ -52,6 +54,13 @@ struct KeyframeAwareMediaAdmission: Sendable {
             queue.removeAll { kindOf($0) == .deltaFrame }
             return queue.count != before
         }
+        func purgeSupersededFrames() {
+            queue.removeAll { element in
+                guard isMedia(element) else { return false }
+                let kind = kindOf(element)
+                return kind == .deltaFrame || kind == .keyframe
+            }
+        }
 
         switch kind {
         case .control:
@@ -63,9 +72,10 @@ struct KeyframeAwareMediaAdmission: Sendable {
             }
             return Decision(admitIncoming: true, awaitingKeyframe: false)
         case .keyframe:
-            _ = purgeDeltaFrames()
+            purgeSupersededFrames()
             guard mediaCount() < maxMediaCount else {
-                // Later delta frames reference the rejected keyframe.
+                // Required media is not discardable. Later delta frames
+                // reference this rejected keyframe, so keep waiting for one.
                 isAwaitingKeyframe = true
                 throw TransportError.mediaBackpressure
             }

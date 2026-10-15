@@ -70,6 +70,7 @@ case "${repo_root}" in
         ;;
 esac
 artifact_channel="$(macremoteapp_resolve_artifact_channel "${repo_root}" "${release_root}")" || exit 2
+macremoteapp_require_release_channel "${artifact_channel}" || exit 2
 if [[ -d "${release_root}" && -n "$(find "${release_root}" -mindepth 1 -print -quit)" ]]; then
     echo "MACREMOTEAPP_RELEASE_ROOT must be absent or empty for the low-level notarization step; use scripts/release-notarized.sh for replacement-safe releases." >&2
     exit 2

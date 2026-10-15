@@ -1,19 +1,44 @@
 # MacRemoteApp Security and Privacy Design
 
-## Authorized P6 extension
+## Foreground and P6 process-target input policy
 
-The V1 foreground-only model below remains the legacy-peer baseline.
-[P6](P6_BACKGROUND_CONTROL.md) adds process-targeted input only after
-authentication, pairing, selection authorization, negotiated capability,
-and an independent local Host grant for the authenticated Viewer identity.
-Display names never select a grant. Grants live in the Host-owned Keychain
-service `com.rudinyu.MacRemoteApp.Host.control-grants` and are removed by
-explicit grant revocation, trust reset, and Host-owned data cleanup.
+The default input path requires the selected app PID to equal
+`NSWorkspace.frontmostApplication.processIdentifier`, plus a safe regular
+layer-0 window from that app at the event location. Peers without the negotiated
+`backgroundControl` capability continue to use this foreground-only path.
+After explicit legacy window selection, Host may activate itself and
+cooperatively yield activation to the selected app; this request alone never
+authorizes input.
 
-For P6, normal input requires current local admission, a live matching target
+P6 is the explicit exception that allows control of a selected app while it is
+inactive. P6 input requires an authenticated Viewer whose pairing was accepted
+locally on the Host, a current selection and control generation,
+matching target process identity, valid geometry, PostEvent permission, a safe
+console/lock state, and successful secure-input checks. Host does not activate
+the selected app for P6. Viewer reports background-control readiness
+separately from foreground status. Capability negotiation and pairing trust
+never bypass per-event checks. Locked-screen, login-window, secure-input, and
+system authentication-dialog control remain prohibited.
+
+Window capture continuity is independent of input readiness. After selection,
+the Host resolves the exact layer-0 window from ScreenCaptureKit's full window
+catalog, including active windows that are offscreen. `isOnScreen` describes
+WindowServer visibility; ScreenCaptureKit's `isActive` describes whether a
+window is currently streaming, including offscreen windows. A transiently
+missing catalog entry does not immediately clear the selection or authenticated
+session. CaptureCore requires three consecutive liveness misses before
+declaring the selected target unavailable and makes at most two delayed
+stream restarts after an unexpected end. Each restart checks
+the same window ID, bundle ID, PID, layer, and valid geometry; it does not use
+the stream's `isActive` state as its own prerequisite. Confirmed owner change,
+target loss, or Screen Recording permission loss still fails closed. None of
+these capture rules relaxes input authorization or the secure-input, lock,
+console-session, system-authentication-dialog, or PostEvent checks.
+
+P6 input requires current local admission, a live matching target
 and generation, valid geometry, PostEvent permission, a safe console/lock
 state, and the existing secure-input checks. The foreground signal remains
-truthful but does not by itself veto an explicitly granted safe process target.
+truthful but does not by itself veto a paired, otherwise safe process target.
 Foreground eligibility also requires the selected PID to match
 `NSWorkspace.frontmostApplication.processIdentifier`. The exact selected
 target must still exist as a valid layer-0 window owned by the selected PID
@@ -29,17 +54,19 @@ activation is unavailable, input stays fail-closed and the Viewer tells the
 Host user to click or reactivate MacRemoteApp Host. The request does not
 authorize input, and P6 process targeting never activates its selected app.
 Process posting cannot guarantee which window within the app receives an
-event; that limit is disclosed before grant.
-Pausing/revoking closes input admission and invalidates queued work without
-revoking video. A separate control generation is echoed on every negotiated
+event; that limit is disclosed before pairing.
+Pausing closes input admission and invalidates queued work while video remains
+active. Unpairing removes the trusted peer record, closes clipboard/input
+authorization, and stops the authenticated session. A separate control
+generation is echoed on every negotiated
 P6 input/source request; missing or stale generations are rejected even if
 the bytes arrive only after a quick resume. Known inactive global and
 target-process AX inspection are required for background eligibility;
 unavailable or mismatched target inspection is not consent.
 Only safe target-bound releases of already admitted pressed
-state may follow the stop. Delayed consent or storage completion must never
-restore a revoked or replaced session. Storage errors block control; failed
-revocation is not durable until the Keychain operation succeeds.
+state may follow the stop. Delayed pairing or storage completion must never
+restore an unpaired or replaced session. Storage errors block control; failed
+unpairing is not durable until the Keychain operation succeeds.
 
 ## M9 shared notarization adapter
 
@@ -105,8 +132,8 @@ Those assumptions must be stated rather than implied.
 | Message tampering/replay | Attacker changes input or replays old events | Authenticated transport, sequence numbers, session freshness, and state validation |
 | Malformed peer | Oversized or adversarial frames | Incremental bounded parsing, rate limits, safe teardown, no unbounded allocation |
 | Stale input after reconnect | Buffered events reach a new session/window | Stop input on disconnect; bind events to session/window generation and reauthorize |
-| Clipboard leakage | Text is logged or synced without consent | Opt-in state, bounded text-only contract, redacted diagnostics, explicit teardown |
-| Permission abuse | App injects input while not authorized | Check PostEvent permission, focus/foreground eligibility, and session authorization at use time |
+| Clipboard leakage | Text is logged or synced without local user choice | Host pairing trust plus Viewer-local clipboard opt-in, bounded text-only contract, redacted diagnostics, explicit teardown |
+| Permission abuse | App injects input while not authorized | Check PostEvent permission, foreground eligibility or P6 process-target safety, and session authorization at use time |
 | UI confusion | Operator thinks input is disabled when it is active | Visible states for pairing, authorization, focus, permissions, and input readiness |
 | Local process compromise | Another local process reads app memory | Document as out of V1 protection scope; minimize retention and avoid unnecessary copies |
 
@@ -144,8 +171,11 @@ the authenticated pairing flow.
    remote consent states are complete. Reject, expiry, disconnect, or a
    mismatched identity must clear pending state without creating one-sided
    permanent trust.
-7. The session remains separately authorized for the selected window and
-   enabled capabilities.
+7. Host acceptance of the pairing establishes durable Host-local trust for
+   future input sessions. Each session still requires capability negotiation,
+   selected-window authorization, current OS permission, and all runtime
+   safety checks. The Viewer retains a separate local toggle for text
+   clipboard synchronization.
 
 The confirmation value is not a password and must not be used as a long-term
 secret. The normal M10 path accepts the presented TLS identity only for the
@@ -195,11 +225,12 @@ Authorization is the intersection of all of the following:
 ```text
 authenticated transport
   AND trusted peer
+  AND Host-local pairing acceptance authorizes input
   AND current session authorization
   AND selected-window generation matches
   AND required macOS permission is present
-  AND Host focus/foreground eligibility is valid
-  AND capability is explicitly enabled
+  AND (foreground eligibility OR negotiated, Host-authorized P6 target safety)
+  AND capability is negotiated and authorized for this session
 ```
 
 The Host must evaluate this before sending protected content and before each
@@ -207,27 +238,26 @@ input injection operation or bounded batch. The Viewer must disable its input
 surface when the state is not ready. A UI label such as "connected" must not
 be treated as equivalent to "authorized to control".
 
-An explicit Viewer selection may activate an eligible regular application
-and, when the Host already has Accessibility trust, request the public
-Accessibility raise action for the exact selected window. The AX window must
-match the selected window's global point geometry and, when known, its local
-title; a title also disambiguates otherwise identical geometry. Ambiguity or a
-known-title mismatch fails closed. This
-is not background control: Host-side input remains rejected unless WindowServer
-confirms the selected target is foreground-eligible, authorized, and permitted
-at the time of each event. AXRaise is only a best-effort local focus action;
-it neither grants input authority nor replaces the per-event focus check.
-Because a remote selection changes the Host's frontmost app, the Host shows
-it locally: the menu-bar icon is tinted while a window is shared, and the
-status menu names the app and states when the Viewer brought it to the front.
-The app name is local UI only; it is not logged or sent to the Viewer.
+On the legacy input path, an explicit Viewer selection may activate an
+eligible regular application and, when the Host already has Accessibility
+trust, request the public Accessibility raise action for the exact selected
+window. The AX window must match the selected window's global point geometry
+and, when known, its local title; ambiguity or a known-title mismatch fails
+closed. Negotiated P6 instead targets the authorized selected process without
+activating it. P6 process posting cannot guarantee which window within an app
+receives an event. Neither AXRaise nor P6 negotiation grants input authority;
+the applicable per-event predicate above must pass. The Host menu-bar icon
+shows an active shared session, while its status menu reports the app's
+foreground state locally; the app name is not logged or sent to the Viewer.
 
 ## macOS permission boundaries
 
 The user-approved M10 input-source extension is another protected keyboard
 operation, not an exception to the input-safety predicate above. It requires
 both `keyboardInput` and `inputSourceSync`, the selected generation, and a
-fresh foreground/target/permission/console/secure-input check immediately
+fresh foreground eligibility check (P6 does not authorize Host-wide input-
+source changes while the target is background), permission, console, and
+secure-input checks immediately
 before changing the Host's selected source. Host source selection must run
 inside the synchronous session-admission fence and the window-replacement
 barrier; an intervening revocation cannot admit queued old work.
@@ -246,9 +276,10 @@ can complete. There is no background restoration of the Host's prior source. See
 
 - Screen Recording is required for Host-side ScreenCaptureKit capture.
 - PostEvent permission is required for Host-side Quartz keyboard, pointer, and
-  scroll injection. Accessibility is optional for secure-input inspection and
-  best-effort exact-window raising, and is never treated as a substitute for
-  PostEvent permission.
+  scroll injection. Accessibility is optional for legacy secure-input
+  inspection and best-effort exact-window raising. P6 background targeting
+  requires a known safe AX state for the selected process; Accessibility never
+  substitutes for PostEvent permission.
 - Permission prompts are initiated by the owning app at a user-understandable
   point; a remote peer cannot approve them.
 - The implementation must detect permission revocation and stop the affected
@@ -283,8 +314,9 @@ can complete. There is no background restoration of the Host's prior source. See
 - Validate event type, coordinate range, modifier state, sequence, rate, and
   selected-window generation.
 - Disable or reject input if the Host loses PostEvent permission, the
-  selected window closes/changes, the window is no longer foreground-eligible,
-  or the session state becomes uncertain.
+  selected window closes/changes, the legacy foreground path loses focus, P6
+  process-target safety becomes unknown/unsafe, or the session state becomes
+  uncertain.
 - Never send or log passwords, secure-input contents, or authentication-dialog
   interaction as a V1 feature.
 - A malformed input event must fail closed without partially applying a
@@ -296,16 +328,18 @@ M6 enforcement is split explicitly:
   current session and selected-window facts, and
   `InputCore.HostInputController` performs the final per-event check.
 - `CoreGraphicsAccessibilityContextProvider` rechecks PostEvent permission,
-  optional AX secure-input state, current bounds, on-screen window identity,
-  foreground ordering, and lock state.
+  current bounds, on-screen window identity, foreground ordering, and lock
+  state. AX secure-input inspection is optional for the legacy path; P6
+  background eligibility requires known-safe global and target-process state.
 - Each typed command carries the target window, owning application
   identifier, process, and generation.
   `CoreGraphicsAccessibilityInputAdapter` repeats the complete
   target/focus/permission check immediately before posting and never
   activates a background window.
-- A known secure-input field is rejected. When the optional Accessibility
-  signal is unavailable, the independent foreground/window checks still
-  protect the base PostEvent path. No private API or bypass is used.
+- A known secure-input field is rejected. When the optional legacy
+  Accessibility signal is unavailable, independent foreground/window checks
+  still protect the base PostEvent path; P6 background input fails closed on
+  unknown inspection. No private API or bypass is used.
 
 Held-input cleanup (release-before-clear, target-bound release after
 revocation, selection-change ordering, permission-loss pending cleanup,
@@ -315,7 +349,10 @@ fence) is specified as a state diagram with numbered invariants in
 
 ## Clipboard privacy
 
-- Clipboard synchronization is disabled by default and visibly opt-in.
+- The Host exposes clipboard capability after trusted pairing and negotiation;
+  the Viewer sends no clipboard text until its operator uses the session-local
+  opt-in. The Host does not present a second per-session clipboard consent
+  dialog; revoking pairing removes the capability and ends the session.
 - Only bounded text is accepted; all other pasteboard types are rejected.
 - Do not log clipboard contents, hashes that could be used as identifiers, or
   full error payloads containing text.
@@ -334,6 +371,18 @@ fence) is specified as a state diagram with numbered invariants in
 - Use structured event codes and redacted metadata.
 - Safe fields may include protocol state, capability names, bounded dimensions,
   frame counts, error categories, and timing aggregates.
+- M10 Debug diagnostics report only a fixed Host/Viewer role, main-actor stall
+  duration, and five-second aggregate Host input counts with fixed rejection
+  categories. They do not record event payloads or app/window names.
+- Debug Host and Viewer builds automatically append a startup marker and their
+  redacted events to `~/Library/Logs/MacRemoteApp/Host/m10-debug-host.log` and
+  `~/Library/Logs/MacRemoteApp/Viewer/m10-debug-viewer.log`, respectively. Every
+  process launch gets a new `run_id`; the record sequence restarts within that
+  run. Each role retains at most a 1 MiB current file and one 1 MiB prior file.
+  The role directories are mode `0700` and files are mode `0600` where
+  supported. Records contain fixed event/state labels, booleans, and bounded
+  timing/count fields. Release Host and Viewer builds do not create or append
+  these diagnostic files.
 - Sensitive fields that must be excluded include raw pixels, clipboard text,
   key values, private keys, pairing secrets, full window titles when policy
   marks them sensitive, and arbitrary underlying error strings.

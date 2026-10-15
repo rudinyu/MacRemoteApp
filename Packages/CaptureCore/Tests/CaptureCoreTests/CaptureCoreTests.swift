@@ -1,10 +1,82 @@
-import CaptureCore
+@testable import CaptureCore
 import AppKit
 import CoreVideo
 import Foundation
 import XCTest
 
 final class CaptureCoreTests: XCTestCase {
+    func testSelectedCaptureCanRemainActiveOffscreenAndInactiveTargetsAreNotNewSelections() {
+        XCTAssertTrue(SelectedWindowCaptureEligibility.permitsCapture(isOnScreen: true, isActive: false))
+        XCTAssertTrue(SelectedWindowCaptureEligibility.permitsCapture(isOnScreen: false, isActive: true))
+        XCTAssertFalse(SelectedWindowCaptureEligibility.permitsCapture(isOnScreen: false, isActive: false))
+    }
+
+    func testCaptureRestartRevalidatesOwnerLayerAndGeometryWithoutForegroundState() {
+        let selected = makeWindow(identifier: 16)
+        XCTAssertTrue(SelectedWindowCaptureTargetEligibility.permits(
+            expectedWindow: selected,
+            candidateWindow: selected,
+            windowLayer: 0,
+            configuration: .default
+        ))
+
+        let reusedOwner = CaptureWindow(
+            identifier: selected.identifier,
+            applicationIdentifier: "com.example.reused",
+            bounds: selected.bounds,
+            processIdentifier: selected.processIdentifier + 1,
+            eligible: true
+        )
+        XCTAssertFalse(SelectedWindowCaptureTargetEligibility.permits(
+            expectedWindow: selected,
+            candidateWindow: reusedOwner,
+            windowLayer: 0,
+            configuration: .default
+        ))
+        XCTAssertFalse(SelectedWindowCaptureTargetEligibility.permits(
+            expectedWindow: selected,
+            candidateWindow: selected,
+            windowLayer: 1,
+            configuration: .default
+        ))
+        let invalidGeometry = CaptureWindow(
+            identifier: selected.identifier,
+            applicationIdentifier: selected.applicationIdentifier,
+            bounds: WindowBounds(x: .infinity, y: 0, width: 640, height: 480),
+            processIdentifier: selected.processIdentifier,
+            eligible: true
+        )
+        XCTAssertFalse(SelectedWindowCaptureTargetEligibility.permits(
+            expectedWindow: selected,
+            candidateWindow: invalidGeometry,
+            windowLayer: 0,
+            configuration: .default
+        ))
+    }
+
+    func testDebugDiscoveryCandidateCountsAccountForEveryFixedFilterReason() {
+        var counts = ScreenRecordingWindowDiscoveryCountAccumulator()
+        counts.record(nil)
+        counts.record(.offScreen)
+        counts.record(.nonBaseLayer)
+        counts.record(.missingApplication)
+        counts.record(.helperApplication)
+        counts.record(.invalidWindow)
+
+        let result = counts.snapshot(candidateCount: 6)
+        XCTAssertEqual(result.candidates, 6)
+        XCTAssertEqual(result.eligible, 1)
+        XCTAssertEqual(result.offScreen, 1)
+        XCTAssertEqual(result.nonBaseLayer, 1)
+        XCTAssertEqual(result.missingApplication, 1)
+        XCTAssertEqual(result.helperApplication, 1)
+        XCTAssertEqual(result.invalidWindow, 1)
+        XCTAssertEqual(
+            result.candidates,
+            result.eligible + result.offScreen + result.nonBaseLayer + result.missingApplication + result.helperApplication + result.invalidWindow
+        )
+    }
+
     func testM0FoundationMarker() {
         XCTAssertEqual(CaptureCoreModule.name, "CaptureCore")
     }
@@ -364,6 +436,22 @@ final class CaptureCoreTests: XCTestCase {
 
         await provider.setWindows([])
         await session.refreshSelection()
+        let firstMissingSnapshot = await session.snapshot()
+        XCTAssertEqual(
+            firstMissingSnapshot.state,
+            .capturing(windowIdentifier: window.identifier, generation: 1),
+            "one transient catalog miss must not stop the selected stream"
+        )
+        XCTAssertEqual(engine.stopCount(), 0)
+
+        await session.refreshSelection()
+        let secondMissingSnapshot = await session.snapshot()
+        XCTAssertEqual(
+            secondMissingSnapshot.state,
+            .capturing(windowIdentifier: window.identifier, generation: 1)
+        )
+
+        await session.refreshSelection()
         let snapshot = await session.snapshot()
         XCTAssertEqual(snapshot.state, .failed(.windowUnavailable))
         let stopCount = engine.stopCount()
@@ -410,6 +498,8 @@ final class CaptureCoreTests: XCTestCase {
         try await session.start(windowIdentifier: window.identifier)
         await provider.setWindows([])
         await session.refreshSelection()
+        await session.refreshSelection()
+        await session.refreshSelection()
         let failedSnapshot = await session.snapshot()
         XCTAssertEqual(failedSnapshot.state, .failed(.windowUnavailable))
 
@@ -429,6 +519,205 @@ final class CaptureCoreTests: XCTestCase {
         let received = await receiveTask.value
         XCTAssertEqual(received?.generation, 2)
         XCTAssertEqual(received?.windowIdentifier, window.identifier)
+    }
+
+    func testTransientDiscoveryGapKeepsSelectedCaptureAndFrameDelivery() async throws {
+        let window = makeWindow(identifier: 12)
+        let provider = FakeWindowProvider(windows: [window], permission: .authorized)
+        let engine = FakeCaptureEngine()
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: FakeCaptureEngineFactory(engine: engine),
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 0)
+        )
+        try await session.start(windowIdentifier: window.identifier)
+
+        await provider.setWindows([])
+        await session.refreshSelection()
+        let gapSnapshot = await session.snapshot()
+        XCTAssertEqual(
+            gapSnapshot.state,
+            .capturing(windowIdentifier: window.identifier, generation: 1)
+        )
+        XCTAssertEqual(engine.stopCount(), 0)
+
+        let receiveTask = Task { () -> CapturedFrame? in
+            var iterator = session.frames.makeAsyncIterator()
+            return try? await iterator.next()
+        }
+        engine.emit(try makeFrame(windowIdentifier: window.identifier, generation: 1))
+        let received = await receiveTask.value
+        XCTAssertEqual(received?.windowIdentifier, window.identifier)
+        XCTAssertEqual(received?.generation, 1)
+
+        await provider.setWindows([window])
+        await session.refreshSelection()
+        let restoredSnapshot = await session.snapshot()
+        XCTAssertEqual(restoredSnapshot.state, .capturing(windowIdentifier: window.identifier, generation: 1))
+    }
+
+    func testAuthorizedSelectionStartsWhenNormalLivenessLookupReportsInactiveOffscreen() async throws {
+        let window = makeWindow(identifier: 17)
+        let provider = FakeWindowProvider(windows: [window], permission: .authorized)
+        await provider.setRefreshOverride(.unavailable)
+        await provider.setRestartWindows([window])
+        let engine = FakeCaptureEngine()
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: FakeCaptureEngineFactory(engine: engine),
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 0)
+        )
+
+        try await session.start(window: window)
+        let snapshot = await session.snapshot()
+
+        XCTAssertEqual(
+            snapshot.state,
+            .capturing(windowIdentifier: window.identifier, generation: 1)
+        )
+        XCTAssertEqual(engine.startedWindow(), window)
+    }
+
+    func testUnexpectedNormalStreamEndRestartsBoundedlyAndKeepsFrameIterator() async throws {
+        let window = makeWindow(identifier: 13)
+        let provider = FakeWindowProvider(windows: [window], permission: .authorized)
+        let firstEngine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        let secondEngine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: SequencedCaptureEngineFactory(engines: [firstEngine, secondEngine]),
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 0)
+        )
+        try await session.start(windowIdentifier: window.identifier)
+
+        let receiveTask = Task { () throws -> CapturedFrame? in
+            var iterator = session.frames.makeAsyncIterator()
+            return try await iterator.next()
+        }
+        firstEngine.finishFrames()
+        let recovering = await waitForState(
+            .recovering(windowIdentifier: window.identifier, generation: 2),
+            in: session
+        )
+        XCTAssertNotNil(recovering, "normal stream completion should enter visible recovery")
+
+        let restarted = await waitForState(
+            .capturing(windowIdentifier: window.identifier, generation: 2),
+            in: session
+        )
+        XCTAssertNotNil(restarted, "the same selected target should restart in the next generation")
+        secondEngine.emit(try makeFrame(windowIdentifier: window.identifier, generation: 2))
+        let received = try await receiveTask.value
+        XCTAssertEqual(received?.generation, 2)
+        XCTAssertEqual(received?.windowIdentifier, window.identifier)
+    }
+
+    func testRecoveryIgnoresInactiveLivenessMissAndKeepsGenerationDimensions() async throws {
+        let window = makeWindow(identifier: 18)
+        let movedWindow = CaptureWindow(
+            identifier: window.identifier,
+            applicationIdentifier: window.applicationIdentifier,
+            applicationName: window.applicationName,
+            title: window.title,
+            bounds: WindowBounds(x: 200, y: 100, width: 1024, height: 768),
+            backingScaleFactor: 2,
+            processIdentifier: window.processIdentifier,
+            eligible: true
+        )
+        let provider = FakeWindowProvider(windows: [window], permission: .authorized)
+        let firstEngine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        let secondEngine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: SequencedCaptureEngineFactory(engines: [firstEngine, secondEngine]),
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 5_000_000)
+        )
+        try await session.start(windowIdentifier: window.identifier)
+        let originalDimensions = await session.snapshot().outputDimensions
+
+        await provider.setRefreshOverride(.unavailable)
+        await provider.setRestartWindows([movedWindow])
+        firstEngine.finishFrames()
+
+        let recovered = await waitForState(
+            .capturing(windowIdentifier: window.identifier, generation: 2),
+            in: session
+        )
+        XCTAssertNotNil(
+            recovered,
+            "inactive normal-liveness snapshots must not consume restart attempts"
+        )
+        XCTAssertEqual(secondEngine.startedWindow(), window)
+        let snapshot = await session.snapshot()
+        XCTAssertEqual(snapshot.selectedWindow, movedWindow)
+        XCTAssertEqual(snapshot.outputDimensions, originalDimensions)
+    }
+
+    func testCaptureRestartStopsAfterBoundedAttempts() async throws {
+        let window = makeWindow(identifier: 14)
+        let provider = FakeWindowProvider(windows: [window], permission: .authorized)
+        let engines = (0 ..< 3).map { _ in
+            GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        }
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: SequencedCaptureEngineFactory(engines: engines),
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 0)
+        )
+        try await session.start(windowIdentifier: window.identifier)
+
+        engines[0].finishFrames()
+        let secondGeneration = await waitForState(
+            .capturing(windowIdentifier: window.identifier, generation: 2),
+            in: session
+        )
+        XCTAssertNotNil(secondGeneration)
+        engines[1].finishFrames()
+        let thirdGeneration = await waitForState(
+            .capturing(windowIdentifier: window.identifier, generation: 3),
+            in: session
+        )
+        XCTAssertNotNil(thirdGeneration)
+        engines[2].finishFrames()
+        let exhausted = await waitForState(
+            .failed(.captureFailed("capture stream ended unexpectedly")),
+            in: session
+        )
+        XCTAssertNotNil(exhausted, "recovery must stop after the configured retry budget")
+    }
+
+    func testCaptureRestartFailsClosedWhenWindowIDHasAReusedOwner() async throws {
+        let window = makeWindow(identifier: 15)
+        let provider = FakeWindowProvider(windows: [window], permission: .authorized)
+        let firstEngine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        let secondEngine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: SequencedCaptureEngineFactory(engines: [firstEngine, secondEngine]),
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 0)
+        )
+        try await session.start(windowIdentifier: window.identifier)
+        firstEngine.finishFrames()
+
+        let recovering = await waitForState(
+            .recovering(windowIdentifier: window.identifier, generation: 2),
+            in: session
+        )
+        XCTAssertNotNil(recovering)
+        let reusedWindow = CaptureWindow(
+            identifier: window.identifier,
+            applicationIdentifier: "com.example.reused",
+            applicationName: window.applicationName,
+            title: window.title,
+            bounds: window.bounds,
+            processIdentifier: window.processIdentifier + 1,
+            eligible: true
+        )
+        await provider.setWindows([reusedWindow])
+
+        let failed = await waitForState(.failed(.windowUnavailable), in: session)
+        XCTAssertNotNil(failed)
+        XCTAssertEqual(secondEngine.startCount(), 0)
     }
 
     func testInvalidWindowNeverStartsCapture() async throws {
@@ -726,6 +1015,21 @@ final class CaptureCoreTests: XCTestCase {
         )
     }
 
+    private func waitForState(
+        _ expectedState: CaptureSessionState,
+        in session: WindowCaptureSession
+    ) async -> CaptureSessionSnapshot? {
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ 4_000_000_000
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            let snapshot = await session.snapshot()
+            if snapshot.state == expectedState {
+                return snapshot
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return await session.snapshot()
+    }
+
     private func makeFrame(windowIdentifier: UInt64, generation: UInt64) throws -> CapturedFrame {
         var pixelBuffer: CVPixelBuffer?
         let status = CVPixelBufferCreate(
@@ -754,6 +1058,8 @@ final class CaptureCoreTests: XCTestCase {
 private actor FakeWindowProvider: WindowDiscoveryProvider {
     private var currentWindows: [CaptureWindow]
     private var currentPermission: CapturePermissionState
+    private var refreshOverride: CaptureWindowRefreshResult?
+    private var restartWindows: [CaptureWindow]?
 
     init(windows: [CaptureWindow], permission: CapturePermissionState) {
         self.currentWindows = windows
@@ -775,12 +1081,52 @@ private actor FakeWindowProvider: WindowDiscoveryProvider {
         return currentWindows
     }
 
+    func refreshSelectedWindow(
+        _ expectedWindow: CaptureWindow
+    ) async throws -> CaptureWindowRefreshResult {
+        guard currentPermission == .authorized else {
+            throw CaptureCoreError.permissionDenied
+        }
+        if let refreshOverride { return refreshOverride }
+        return Self.resolve(expectedWindow, from: currentWindows)
+    }
+
+    func resolveSelectedWindowForCapture(
+        _ expectedWindow: CaptureWindow
+    ) async throws -> CaptureWindowRefreshResult {
+        guard currentPermission == .authorized else {
+            throw CaptureCoreError.permissionDenied
+        }
+        return Self.resolve(expectedWindow, from: restartWindows ?? currentWindows)
+    }
+
     func setPermission(_ permission: CapturePermissionState) {
         currentPermission = permission
     }
 
     func setWindows(_ windows: [CaptureWindow]) {
         currentWindows = windows
+    }
+
+    func setRefreshOverride(_ result: CaptureWindowRefreshResult?) {
+        refreshOverride = result
+    }
+
+    func setRestartWindows(_ windows: [CaptureWindow]?) {
+        restartWindows = windows
+    }
+
+    private static func resolve(
+        _ expectedWindow: CaptureWindow,
+        from windows: [CaptureWindow]
+    ) -> CaptureWindowRefreshResult {
+        let matchingID = windows.filter { $0.identifier == expectedWindow.identifier }
+        guard !matchingID.isEmpty else { return .unavailable }
+        guard let sameOwner = matchingID.first(where: { $0.hasSameOwner(as: expectedWindow) }) else {
+            return .ownerMismatch
+        }
+        guard sameOwner.eligible else { return .unavailable }
+        return .available(sameOwner)
     }
 }
 
@@ -899,6 +1245,8 @@ private final class GatedCaptureEngine: WindowCaptureEngine, @unchecked Sendable
     private let startFailure: CaptureCoreError?
     private let lock = NSLock()
     private var stopCountValue = 0
+    private var startCountValue = 0
+    private var startedWindowsValue: [CaptureWindow] = []
 
     init(
         startGate: TestAsyncSignal,
@@ -916,8 +1264,11 @@ private final class GatedCaptureEngine: WindowCaptureEngine, @unchecked Sendable
     }
 
     func start(window: CaptureWindow, generation: UInt64) async throws {
-        _ = window
         _ = generation
+        lock.withLock {
+            startCountValue += 1
+            startedWindowsValue.append(window)
+        }
         await startEntered.signal()
         await startGate.wait()
         if let startFailure {
@@ -961,5 +1312,13 @@ private final class GatedCaptureEngine: WindowCaptureEngine, @unchecked Sendable
 
     func stopCount() -> Int {
         lock.withLock { stopCountValue }
+    }
+
+    func startCount() -> Int {
+        lock.withLock { startCountValue }
+    }
+
+    func startedWindow() -> CaptureWindow? {
+        lock.withLock { startedWindowsValue.last }
     }
 }

@@ -2,6 +2,37 @@ import Foundation
 import RemoteProtocol
 import SecurityCore
 
+/// Stable, privacy-safe categories for session failures written to Debug
+/// diagnostics. Associated values are deliberately excluded.
+public enum SessionFailureCategory: String, Equatable, Sendable {
+    case invalidState = "invalid_state"
+    case peerRoleMismatch = "peer_role_mismatch"
+    case unsupportedVersion = "unsupported_version"
+    case mandatoryCapabilityMissing = "mandatory_capability_missing"
+    case pairingRequired = "pairing_required"
+    case pairingDenied = "pairing_denied"
+    case pairingFailed = "pairing_failed"
+    case unauthorizedMessage = "unauthorized_message"
+    case replayDetected = "replay_detected"
+    case authorizationWindowGenerationRequired = "authorization_window_generation_required"
+    case handshakeTimeout = "handshake_timeout"
+    case heartbeatTimeout = "heartbeat_timeout"
+    case authorizationReceiptTimeout = "authorization_receipt_timeout"
+    case reconnectRequired = "reconnect_required"
+    case authorizationChanged = "authorization_changed"
+    case incomingMessageBackpressure = "incoming_message_backpressure"
+    case videoBoundsExceeded = "video_bounds_exceeded"
+    case transportEOF = "transport_eof"
+    case transportFailure = "transport_failure"
+}
+
+/// The fixed class of a terminal transport signal, with no framework error
+/// details or peer-provided strings.
+public enum TransportTerminationClass: String, Equatable, Sendable {
+    case endOfStream = "end_of_stream"
+    case failure
+}
+
 public enum SessionError: Error, Equatable, Sendable, CustomStringConvertible {
     case invalidState(SessionState)
     case peerRoleMismatch
@@ -15,11 +46,45 @@ public enum SessionError: Error, Equatable, Sendable, CustomStringConvertible {
     case authorizationWindowGenerationRequired
     case handshakeTimeout
     case heartbeatTimeout
+    case authorizationReceiptTimeout
     case reconnectRequired
     case authorizationChanged
     case incomingMessageBackpressure(Channel)
     case videoBoundsExceeded
+    case transportEOF
     case transportFailure(String)
+
+    public var failureCategory: SessionFailureCategory {
+        switch self {
+        case .invalidState: return .invalidState
+        case .peerRoleMismatch: return .peerRoleMismatch
+        case .unsupportedVersion: return .unsupportedVersion
+        case .mandatoryCapabilityMissing: return .mandatoryCapabilityMissing
+        case .pairingRequired: return .pairingRequired
+        case .pairingDenied: return .pairingDenied
+        case .pairingFailed: return .pairingFailed
+        case .unauthorizedMessage: return .unauthorizedMessage
+        case .replayDetected: return .replayDetected
+        case .authorizationWindowGenerationRequired: return .authorizationWindowGenerationRequired
+        case .handshakeTimeout: return .handshakeTimeout
+        case .heartbeatTimeout: return .heartbeatTimeout
+        case .authorizationReceiptTimeout: return .authorizationReceiptTimeout
+        case .reconnectRequired: return .reconnectRequired
+        case .authorizationChanged: return .authorizationChanged
+        case .incomingMessageBackpressure: return .incomingMessageBackpressure
+        case .videoBoundsExceeded: return .videoBoundsExceeded
+        case .transportEOF: return .transportEOF
+        case .transportFailure: return .transportFailure
+        }
+    }
+
+    public var transportTerminationClass: TransportTerminationClass? {
+        switch self {
+        case .transportEOF: return .endOfStream
+        case .transportFailure: return .failure
+        default: return nil
+        }
+    }
 
     public var description: String {
         switch self {
@@ -38,12 +103,14 @@ public enum SessionError: Error, Equatable, Sendable, CustomStringConvertible {
             return "authorization requires a selected window generation"
         case .handshakeTimeout: return "session handshake timed out"
         case .heartbeatTimeout: return "heartbeat timed out"
+        case .authorizationReceiptTimeout: return "authorization receipt barrier timed out"
         case .reconnectRequired: return "session must reconnect before authorization"
         case .authorizationChanged: return "session authorization changed while sending"
         case let .incomingMessageBackpressure(channel):
             let channelName = channel == .control ? "control" : "media"
             return "incoming \(channelName) message delivery is backpressured"
         case .videoBoundsExceeded: return "video parameters exceed negotiated bounds"
+        case .transportEOF: return "transport reached EOF"
         case let .transportFailure(detail): return "transport failure: \(detail)"
         }
     }
@@ -109,6 +176,7 @@ public struct SessionSnapshot: Equatable, Sendable {
     public let authorized: Bool
     public let authorizedWindowGeneration: UInt64?
     public let authorizedCapabilities: Set<Capability>
+    public let receiveGeneration: UInt64
     public let reconnectGeneration: UInt64
     public let authorizationGeneration: UInt64
     public let effectiveProtocolLimits: ProtocolLimits
@@ -131,7 +199,8 @@ public struct SessionSnapshot: Equatable, Sendable {
         negotiatedMaxVideoHeight: UInt32? = nil,
         negotiatedMaxFrameRate: UInt16? = nil,
         authorizationGeneration: UInt64 = 0,
-        effectiveProtocolLimits: ProtocolLimits = .default
+        effectiveProtocolLimits: ProtocolLimits = .default,
+        receiveGeneration: UInt64 = 0
     ) {
         self.state = state
         self.peerIdentity = peerIdentity
@@ -140,6 +209,7 @@ public struct SessionSnapshot: Equatable, Sendable {
         self.authorized = authorized
         self.authorizedWindowGeneration = authorizedWindowGeneration
         self.authorizedCapabilities = authorizedCapabilities
+        self.receiveGeneration = receiveGeneration
         self.reconnectGeneration = reconnectGeneration
         self.authorizationGeneration = authorizationGeneration
         self.effectiveProtocolLimits = effectiveProtocolLimits
@@ -147,6 +217,27 @@ public struct SessionSnapshot: Equatable, Sendable {
         self.negotiatedMaxVideoWidth = negotiatedMaxVideoWidth
         self.negotiatedMaxVideoHeight = negotiatedMaxVideoHeight
         self.negotiatedMaxFrameRate = negotiatedMaxFrameRate
+    }
+}
+
+/// The exact authorization epoch written by one successful Host authorization
+/// operation. This contains transport-neutral numeric metadata only.
+public struct SessionAuthorizationTransition: Equatable, Sendable {
+    public let previousAuthorizationGeneration: UInt64
+    public let authorizationGeneration: UInt64
+    public let reconnectGeneration: UInt64
+    public let receiveGeneration: UInt64
+
+    public init(
+        previousAuthorizationGeneration: UInt64,
+        authorizationGeneration: UInt64,
+        reconnectGeneration: UInt64,
+        receiveGeneration: UInt64
+    ) {
+        self.previousAuthorizationGeneration = previousAuthorizationGeneration
+        self.authorizationGeneration = authorizationGeneration
+        self.reconnectGeneration = reconnectGeneration
+        self.receiveGeneration = receiveGeneration
     }
 }
 
@@ -164,6 +255,34 @@ public struct SessionInputAdmissionToken: Equatable, Sendable {
     fileprivate let capability: Capability
 }
 
+/// Reports whether an input send crossed into the session transport.
+public enum SessionInputSendState: Equatable, Sendable {
+    /// Session validation failed before the transport was invoked.
+    case notStarted
+    /// The session invoked `SessionTransport.send`; delivery may be uncertain.
+    case transportSendStarted
+}
+
+/// Thread-safe observation for one input send attempt.
+///
+/// A `SessionCoordinator` updates this immediately before invoking the
+/// underlying transport. Callers can therefore distinguish local admission
+/// failures from errors that happened after transport delivery began.
+public final class SessionInputSendObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedState: SessionInputSendState = .notStarted
+
+    public init() {}
+
+    public var state: SessionInputSendState {
+        lock.withLock { storedState }
+    }
+
+    fileprivate func markTransportSendStarted() {
+        lock.withLock { storedState = .transportSendStarted }
+    }
+}
+
 /// The result of a synchronous Host input-source selection admission. The
 /// authorization and reconnect generations are captured atomically with the
 /// operation and can fence its acknowledgement send.
@@ -173,6 +292,51 @@ public struct InputSourceSelectionAdmissionResult<Value: Sendable>: Sendable {
     public let reconnectGeneration: UInt64
     public let windowGeneration: UInt64
     public let requestID: UInt64
+}
+
+typealias AuthorizationReceiptStamp = EnvelopeReceiptStamp
+
+/// Captures which Host authorization epoch was active when a transport
+/// envelope entered the receive task, before actor scheduling can delay its
+/// validation until after a local reauthorization completes.
+final class AuthorizationReceiptFence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var epoch: UInt64 = 0
+    private var transitionInFlight = false
+
+    func beginLocalTransition() -> UInt64 {
+        lock.withLock {
+            epoch &+= 1
+            transitionInFlight = true
+            return epoch
+        }
+    }
+
+    func endLocalTransition(epoch expectedEpoch: UInt64) {
+        lock.withLock {
+            guard epoch == expectedEpoch else { return }
+            transitionInFlight = false
+        }
+    }
+
+    func cancelLocalTransition() {
+        lock.withLock {
+            epoch &+= 1
+            transitionInFlight = false
+        }
+    }
+
+    func capture() -> AuthorizationReceiptStamp {
+        lock.withLock {
+            AuthorizationReceiptStamp(epoch: epoch, transitionInFlight: transitionInFlight)
+        }
+    }
+
+    func shouldDiscardProtectedMessage(receivedAt stamp: AuthorizationReceiptStamp) -> Bool {
+        lock.withLock {
+            stamp.transitionInFlight || transitionInFlight || stamp.epoch != epoch
+        }
+    }
 }
 
 public actor SessionCoordinator {
@@ -360,14 +524,28 @@ public actor SessionCoordinator {
         sentAt: Date,
         sentTimestampNanoseconds: UInt64
     )?
+    // A receipt barrier is separate from the periodic heartbeat probe. A
+    // heartbeat Pong already in flight when authorization changes must not
+    // release the authorization receipt fence.
+    private var authorizationReceiptBarrierNonce: UInt64?
+    private var completedAuthorizationReceiptBarrierNonce: UInt64?
     private var clockSyncEstimator = ClockSyncEstimator()
     private var nextPingNonce: UInt64 = 1
     private var lastHeartbeatAt: Date?
     private var reconnectGeneration: UInt64 = 0
     private var authorizationGeneration: UInt64 = 0
+    private let authorizationReceiptFence = AuthorizationReceiptFence()
     private var receiveGeneration: UInt64 = 0
     private var heartbeatGeneration: UInt64 = 0
     private var handshakeGeneration: UInt64 = 0
+    private let authorizationTransitionMutex = AsyncMutex()
+#if DEBUG
+    private var authorizationTransitionMutexWaitersForTesting = 0
+
+    var authorizationTransitionMutexWaiterCountForTesting: Int {
+        authorizationTransitionMutexWaitersForTesting
+    }
+#endif
     private let outboundMutex = AsyncMutex()
     private var receiveTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
@@ -417,6 +595,8 @@ public actor SessionCoordinator {
         )
         self.incomingMessages = stream.stream
         self.incomingMessageStorage = stream.storage
+        let receiptFence = self.authorizationReceiptFence
+        transport.incoming.installReceiptStampProvider { receiptFence.capture() }
     }
 
     deinit {
@@ -442,7 +622,8 @@ public actor SessionCoordinator {
             negotiatedMaxVideoHeight: negotiatedMaxVideoHeight,
             negotiatedMaxFrameRate: negotiatedMaxFrameRate,
             authorizationGeneration: authorizationGeneration,
-            effectiveProtocolLimits: effectiveProtocolLimits()
+            effectiveProtocolLimits: effectiveProtocolLimits(),
+            receiveGeneration: receiveGeneration
         )
     }
 
@@ -742,19 +923,47 @@ public actor SessionCoordinator {
         }
     }
 
+    @discardableResult
     public func authorize(
         windowGeneration: UInt64? = nil,
         capabilities: Set<Capability>? = nil
-    ) async throws {
+    ) async throws -> SessionAuthorizationTransition {
         guard configuration.role == .host else {
             throw SessionError.invalidState(state)
         }
+        let invocationReceiveGeneration = receiveGeneration
+        let invocationReconnectGeneration = reconnectGeneration
+        // Keep auth changes ordered while the receipt fence is open, but do
+        // not hold outboundMutex while waiting for the peer's Pong. The
+        // receive task may need that mutex to answer an earlier Ping.
+#if DEBUG
+        authorizationTransitionMutexWaitersForTesting += 1
+#endif
+        await authorizationTransitionMutex.acquire()
+#if DEBUG
+        authorizationTransitionMutexWaitersForTesting -= 1
+#endif
+        defer { authorizationTransitionMutex.release() }
+
+        // Keep the invocation bound to the transport it entered on while it
+        // waited for the transition mutex. A queued request must not rebind
+        // itself to a replacement transport. Authorization generation is
+        // read after the mutex so same-session requests still serialize.
+        guard isCurrent(
+            receiveGeneration: invocationReceiveGeneration,
+            reconnectGeneration: invocationReconnectGeneration
+        ) else {
+            throw SessionError.reconnectRequired
+        }
+        let requestReceiveGeneration = invocationReceiveGeneration
+        let requestReconnectGeneration = invocationReconnectGeneration
+        let requestAuthorizationGeneration = authorizationGeneration
         guard state == .capabilitiesNegotiated || state == .windowSelectionAuthorized else {
             throw SessionError.invalidState(state)
         }
-        let sessionGeneration = reconnectGeneration
-        let sessionReceiveGeneration = receiveGeneration
-        let sessionAuthorizationGeneration = authorizationGeneration
+        let sessionGeneration = requestReconnectGeneration
+        let sessionReceiveGeneration = requestReceiveGeneration
+        let sessionAuthorizationGeneration = requestAuthorizationGeneration
         let requested = capabilities ?? negotiatedCapabilities
         guard requested.isSubset(of: negotiatedCapabilities) else {
             let missing = requested.subtracting(negotiatedCapabilities).sorted { $0.rawValue < $1.rawValue }
@@ -775,7 +984,12 @@ public actor SessionCoordinator {
         // admission so an already-waiting send cannot be admitted after the
         // new authorization epoch begins.
         await outboundMutex.acquire()
-        defer { outboundMutex.release() }
+        var holdsOutboundMutex = true
+        defer {
+            if holdsOutboundMutex {
+                outboundMutex.release()
+            }
+        }
         guard isCurrent(
             receiveGeneration: sessionReceiveGeneration,
             reconnectGeneration: sessionGeneration,
@@ -785,6 +999,8 @@ public actor SessionCoordinator {
         }
         let operationAuthorizationGeneration = sessionAuthorizationGeneration &+ 1
         authorizationGeneration = operationAuthorizationGeneration
+        let authorizationReceiptEpoch = authorizationReceiptFence.beginLocalTransition()
+        defer { authorizationReceiptFence.endLocalTransition(epoch: authorizationReceiptEpoch) }
         clearAuthorization()
         await transport.invalidateProtectedMessages()
         guard isCurrent(
@@ -794,13 +1010,42 @@ public actor SessionCoordinator {
         ) else {
             throw SessionError.reconnectRequired
         }
-        _ = try await sendUnrestrictedAfterAdmission(
-            .sessionAuthorize(authorization),
-            flags: [],
-            operationGeneration: sessionGeneration,
-            operationReceiveGeneration: sessionReceiveGeneration,
-            operationAuthorizationGeneration: operationAuthorizationGeneration
-        )
+        do {
+            _ = try await sendUnrestrictedAfterAdmission(
+                .sessionAuthorize(authorization),
+                flags: [],
+                operationGeneration: sessionGeneration,
+                operationReceiveGeneration: sessionReceiveGeneration,
+                operationAuthorizationGeneration: operationAuthorizationGeneration
+            )
+            let receiptBarrier = try await enqueueAuthorizationReceiptBarrier(
+                operationGeneration: sessionGeneration,
+                operationReceiveGeneration: sessionReceiveGeneration,
+                operationAuthorizationGeneration: operationAuthorizationGeneration
+            )
+            outboundMutex.release()
+            holdsOutboundMutex = false
+            try await awaitAuthorizationReceiptBarrier(
+                nonce: receiptBarrier.nonce,
+                sentAtUptimeNanoseconds: receiptBarrier.sentAtUptimeNanoseconds,
+                operationGeneration: sessionGeneration,
+                operationReceiveGeneration: sessionReceiveGeneration,
+                operationAuthorizationGeneration: operationAuthorizationGeneration
+            )
+        } catch {
+            let failure = authorizationTransitionFailure(for: error)
+            if holdsOutboundMutex {
+                outboundMutex.release()
+                holdsOutboundMutex = false
+            }
+            await fail(
+                failure,
+                expectedReceiveGeneration: sessionReceiveGeneration,
+                expectedReconnectGeneration: sessionGeneration,
+                expectedAuthorizationGeneration: operationAuthorizationGeneration
+            )
+            throw failure
+        }
         guard isCurrent(
             receiveGeneration: sessionReceiveGeneration,
             reconnectGeneration: sessionGeneration,
@@ -815,26 +1060,53 @@ public actor SessionCoordinator {
         authorizedWindowGeneration = windowGeneration
         authorizedCapabilities = requested
         state = .windowSelectionAuthorized
+        return SessionAuthorizationTransition(
+            previousAuthorizationGeneration: sessionAuthorizationGeneration,
+            authorizationGeneration: operationAuthorizationGeneration,
+            reconnectGeneration: sessionGeneration,
+            receiveGeneration: sessionReceiveGeneration
+        )
     }
 
     public func revokeAuthorization() async throws {
         guard configuration.role == .host else {
             throw SessionError.invalidState(state)
         }
-        let sessionGeneration = reconnectGeneration
-        let sessionReceiveGeneration = receiveGeneration
-        let sessionAuthorizationGeneration = authorizationGeneration
+        await authorizationTransitionMutex.acquire()
+        defer { authorizationTransitionMutex.release() }
+
+        let requestReceiveGeneration = receiveGeneration
+        let requestReconnectGeneration = reconnectGeneration
+        let requestAuthorizationGeneration = authorizationGeneration
+
+        guard isCurrent(
+            receiveGeneration: requestReceiveGeneration,
+            reconnectGeneration: requestReconnectGeneration,
+            authorizationGeneration: requestAuthorizationGeneration
+        ) else {
+            throw SessionError.reconnectRequired
+        }
+        let sessionGeneration = requestReconnectGeneration
+        let sessionReceiveGeneration = requestReceiveGeneration
+        let sessionAuthorizationGeneration = requestAuthorizationGeneration
         await outboundMutex.acquire()
+        var holdsOutboundMutex = true
+        defer {
+            if holdsOutboundMutex {
+                outboundMutex.release()
+            }
+        }
         guard isCurrent(
             receiveGeneration: sessionReceiveGeneration,
             reconnectGeneration: sessionGeneration,
             authorizationGeneration: sessionAuthorizationGeneration
         ) else {
-            outboundMutex.release()
             throw SessionError.reconnectRequired
         }
         authorizationGeneration &+= 1
         let operationAuthorizationGeneration = authorizationGeneration
+        let authorizationReceiptEpoch = authorizationReceiptFence.beginLocalTransition()
+        defer { authorizationReceiptFence.endLocalTransition(epoch: authorizationReceiptEpoch) }
         clearAuthorization()
         await transport.invalidateProtectedMessages()
         guard isCurrent(
@@ -842,7 +1114,6 @@ public actor SessionCoordinator {
             reconnectGeneration: sessionGeneration,
             authorizationGeneration: operationAuthorizationGeneration
         ) else {
-            outboundMutex.release()
             throw SessionError.reconnectRequired
         }
         let message = SessionAuthorizeMessage(authorized: false, capabilities: [])
@@ -854,17 +1125,34 @@ public actor SessionCoordinator {
                 operationReceiveGeneration: sessionReceiveGeneration,
                 operationAuthorizationGeneration: operationAuthorizationGeneration
             )
-        } catch {
+            let receiptBarrier = try await enqueueAuthorizationReceiptBarrier(
+                operationGeneration: sessionGeneration,
+                operationReceiveGeneration: sessionReceiveGeneration,
+                operationAuthorizationGeneration: operationAuthorizationGeneration
+            )
             outboundMutex.release()
+            holdsOutboundMutex = false
+            try await awaitAuthorizationReceiptBarrier(
+                nonce: receiptBarrier.nonce,
+                sentAtUptimeNanoseconds: receiptBarrier.sentAtUptimeNanoseconds,
+                operationGeneration: sessionGeneration,
+                operationReceiveGeneration: sessionReceiveGeneration,
+                operationAuthorizationGeneration: operationAuthorizationGeneration
+            )
+        } catch {
+            if holdsOutboundMutex {
+                outboundMutex.release()
+                holdsOutboundMutex = false
+            }
+            let failure = authorizationTransitionFailure(for: error)
             await fail(
-                .transportFailure(String(describing: error)),
+                failure,
                 expectedReceiveGeneration: sessionReceiveGeneration,
                 expectedReconnectGeneration: sessionGeneration,
                 expectedAuthorizationGeneration: operationAuthorizationGeneration
             )
-            throw error
+            throw failure
         }
-        outboundMutex.release()
     }
 
     /// Returns `.replacedMedia` when the keyframe-aware media queue discarded
@@ -1101,7 +1389,8 @@ public actor SessionCoordinator {
     /// generation.
     public func sendInput(
         _ input: InputEventMessage,
-        using admission: SessionInputAdmissionToken
+        using admission: SessionInputAdmissionToken,
+        observation: SessionInputSendObservation? = nil
     ) async throws {
         let payload = MessagePayload.inputEvent(input)
         try validateMessageDirection(for: payload.messageType, incoming: false)
@@ -1125,7 +1414,8 @@ public actor SessionCoordinator {
             flags: [],
             operationGeneration: admission.reconnectGeneration,
             operationReceiveGeneration: admission.receiveGeneration,
-            operationAuthorizationGeneration: admission.authorizationGeneration
+            operationAuthorizationGeneration: admission.authorizationGeneration,
+            inputSendObservation: observation
         )
     }
 
@@ -1162,7 +1452,10 @@ public actor SessionCoordinator {
         state = .stopping
         incomingMessageStorage.finish()
         authorizationGeneration &+= 1
+        authorizationReceiptFence.cancelLocalTransition()
         clearAuthorization()
+        authorizationReceiptBarrierNonce = nil
+        completedAuthorizationReceiptBarrierNonce = nil
         receiveGeneration &+= 1
         let closeReceiveGeneration = receiveGeneration
         heartbeatGeneration &+= 1
@@ -1193,6 +1486,7 @@ public actor SessionCoordinator {
         reconnectGeneration &+= 1
         authorizationGeneration &+= 1
         clearAuthorization()
+        authorizationReceiptFence.cancelLocalTransition()
         state = .reconnecting
         heartbeatTask?.cancel()
         handshakeTask?.cancel()
@@ -1206,6 +1500,8 @@ public actor SessionCoordinator {
         await transport.close()
         incomingMessageStorage.reset()
         transport = newTransport
+        let receiptFence = authorizationReceiptFence
+        newTransport.incoming.installReceiptStampProvider { receiptFence.capture() }
         peerIdentity = nil
         peerHello = nil
         peerCapabilities = nil
@@ -1221,6 +1517,8 @@ public actor SessionCoordinator {
         lastKeyframeRequestNanoseconds = nil
         congestionMonitor = ReceiverCongestionMonitor()
         pendingPing = nil
+        authorizationReceiptBarrierNonce = nil
+        completedAuthorizationReceiptBarrierNonce = nil
         clockSyncEstimator = ClockSyncEstimator()
         lastHeartbeatAt = nil
         outboundMutex.release()
@@ -1406,7 +1704,8 @@ public actor SessionCoordinator {
         operationGeneration: UInt64,
         operationReceiveGeneration: UInt64,
         operationAuthorizationGeneration: UInt64,
-        timestampNanoseconds: UInt64? = nil
+        timestampNanoseconds: UInt64? = nil,
+        inputSendObservation: SessionInputSendObservation? = nil
     ) async throws -> TransportSendResult {
         guard operationReceiveGeneration == receiveGeneration,
               operationGeneration == reconnectGeneration else {
@@ -1431,6 +1730,7 @@ public actor SessionCoordinator {
         )
         let targetTransport = transport
         do {
+            inputSendObservation?.markTransportSendStarted()
             let result = try await targetTransport.send(envelope)
             // Keep sequence numbers monotonic for an unchanged transport even
             // when an authorization transition invalidates a queued media
@@ -1461,13 +1761,16 @@ public actor SessionCoordinator {
         let generation = receiveGeneration
         let sessionGeneration = reconnectGeneration
         let stream = transport.incoming
+        let authorizationReceiptFence = self.authorizationReceiptFence
         receiveTask = Task { [weak self] in
             do {
-                for try await envelope in stream {
+                var iterator = stream.makeReceiptAwareAsyncIterator()
+                while let item = try await iterator.next() {
                     await self?.handle(
-                        envelope,
+                        item.envelope,
                         generation: generation,
-                        reconnectGeneration: sessionGeneration
+                        reconnectGeneration: sessionGeneration,
+                        authorizationReceiptStamp: item.receiptStamp ?? authorizationReceiptFence.capture()
                     )
                 }
                 await self?.handleTransportEOF(
@@ -1487,7 +1790,8 @@ public actor SessionCoordinator {
     private func handle(
         _ envelope: Envelope,
         generation: UInt64,
-        reconnectGeneration sessionGeneration: UInt64
+        reconnectGeneration sessionGeneration: UInt64,
+        authorizationReceiptStamp: AuthorizationReceiptStamp
     ) async {
         guard isCurrent(
             receiveGeneration: generation,
@@ -1519,6 +1823,7 @@ public actor SessionCoordinator {
                 generation: generation,
                 reconnectGeneration: sessionGeneration,
                 authorizationGenerationAtReceipt: operationAuthorizationGeneration,
+                authorizationReceiptStamp: authorizationReceiptStamp,
                 inputSourceSelectionDiscardGenerationAtReceipt: inputSourceSelectionDiscardGenerationAtReceipt,
                 localInputAdmissionGenerationAtReceipt: localInputAdmissionGenerationAtReceipt,
                 localInputAdmissionRevisionAtReceipt: localInputAdmissionRevisionAtReceipt,
@@ -1558,6 +1863,7 @@ public actor SessionCoordinator {
         generation: UInt64,
         reconnectGeneration sessionGeneration: UInt64,
         authorizationGenerationAtReceipt: UInt64,
+        authorizationReceiptStamp: AuthorizationReceiptStamp,
         inputSourceSelectionDiscardGenerationAtReceipt: UInt64,
         localInputAdmissionGenerationAtReceipt: UInt64,
         localInputAdmissionRevisionAtReceipt: UInt64,
@@ -1571,6 +1877,17 @@ public actor SessionCoordinator {
         ) else { return }
         let operationAuthorizationGeneration = authorizationGeneration
         try validateMessageDirection(for: message.messageType, incoming: true)
+        if configuration.role == .host,
+           Self.protectedMessageTypes.contains(message.messageType),
+           authorizationReceiptFence.shouldDiscardProtectedMessage(receivedAt: authorizationReceiptStamp) {
+            // The Viewer can still be sending valid traffic from the previous
+            // epoch until the replacement SessionAuthorize reaches it. Drop
+            // protected payloads received during that transition or queued
+            // for actor handling from an older epoch; sequence, schema, and
+            // direction errors remain terminal, and traffic received outside
+            // the transition still goes through ordinary authorization.
+            return
+        }
         if configuration.role == .host,
            negotiatedCapabilities.contains(.backgroundControl) {
             switch message {
@@ -1772,6 +2089,11 @@ public actor SessionCoordinator {
                 expectedAuthorizationGeneration: operationAuthorizationGeneration
             )
         case let .pong(pong):
+            if authorizationReceiptBarrierNonce == pong.nonce {
+                authorizationReceiptBarrierNonce = nil
+                completedAuthorizationReceiptBarrierNonce = pong.nonce
+                return
+            }
             guard let pendingProbe = pendingPing, pendingProbe.nonce == pong.nonce else {
                 throw SessionError.replayDetected
             }
@@ -1937,6 +2259,7 @@ public actor SessionCoordinator {
         ) else { return }
 
         authorizationGeneration &+= 1
+        authorizationReceiptFence.cancelLocalTransition()
         clearAuthorization()
         state = .stopping
         incomingMessageStorage.finish()
@@ -2501,6 +2824,107 @@ public actor SessionCoordinator {
         }
     }
 
+    /// Enqueues a control Ping after SessionAuthorize while the caller owns
+    /// outboundMutex. The returned Ping must be answered before the caller
+    /// ends the receipt fence.
+    private func enqueueAuthorizationReceiptBarrier(
+        operationGeneration: UInt64,
+        operationReceiveGeneration: UInt64,
+        operationAuthorizationGeneration: UInt64
+    ) async throws -> (nonce: UInt64, sentAtUptimeNanoseconds: UInt64) {
+        guard isCurrent(
+            receiveGeneration: operationReceiveGeneration,
+            reconnectGeneration: operationGeneration,
+            authorizationGeneration: operationAuthorizationGeneration
+        ) else {
+            throw SessionError.reconnectRequired
+        }
+
+        // pingPong negotiates periodic heartbeats. The current protocol
+        // receive path still answers one-shot control Pings without that
+        // capability; if a peer does not answer, this transition fails closed.
+        // In particular, local queue admission never ends the receipt fence.
+
+        var nonce = nextPingNonce
+        if pendingPing?.nonce == nonce {
+            nonce = nonce == UInt64.max ? 1 : nonce + 1
+        }
+        nextPingNonce = nonce == UInt64.max ? 1 : nonce + 1
+        authorizationReceiptBarrierNonce = nonce
+        completedAuthorizationReceiptBarrierNonce = nil
+        let sentAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        do {
+            _ = try await sendUnrestrictedAfterAdmission(
+                .ping(PingMessage(nonce: nonce)),
+                flags: [],
+                operationGeneration: operationGeneration,
+                operationReceiveGeneration: operationReceiveGeneration,
+                operationAuthorizationGeneration: operationAuthorizationGeneration
+            )
+        } catch {
+            clearAuthorizationReceiptBarrier(nonce: nonce)
+            throw error
+        }
+        return (nonce, sentAtUptimeNanoseconds)
+    }
+
+    /// Waits until the Viewer has processed the ordered authorization message.
+    /// NetworkFramedTransport.send only confirms local queue admission, so a
+    /// Pong to the later control Ping is the receipt boundary that lets the
+    /// Host release its stale-message fence. The caller must not own
+    /// outboundMutex while this wait is in progress.
+    private func awaitAuthorizationReceiptBarrier(
+        nonce: UInt64,
+        sentAtUptimeNanoseconds: UInt64,
+        operationGeneration: UInt64,
+        operationReceiveGeneration: UInt64,
+        operationAuthorizationGeneration: UInt64
+    ) async throws {
+        defer { clearAuthorizationReceiptBarrier(nonce: nonce) }
+        let timeoutNanoseconds = configuration.heartbeatTimeoutNanoseconds
+        let pollIntervalNanoseconds: UInt64 = 10_000_000
+        while true {
+            guard isCurrent(
+                receiveGeneration: operationReceiveGeneration,
+                reconnectGeneration: operationGeneration,
+                authorizationGeneration: operationAuthorizationGeneration
+            ), state != .stopping, state != .failed else {
+                throw SessionError.reconnectRequired
+            }
+            if completedAuthorizationReceiptBarrierNonce == nonce {
+                return
+            }
+            let now = DispatchTime.now().uptimeNanoseconds
+            let elapsedNanoseconds = now &- sentAtUptimeNanoseconds
+            guard elapsedNanoseconds < timeoutNanoseconds else {
+                throw SessionError.authorizationReceiptTimeout
+            }
+            let remainingNanoseconds = timeoutNanoseconds - elapsedNanoseconds
+            try await Task.sleep(
+                nanoseconds: min(pollIntervalNanoseconds, remainingNanoseconds)
+            )
+        }
+    }
+
+    private func clearAuthorizationReceiptBarrier(nonce: UInt64) {
+        if authorizationReceiptBarrierNonce == nonce {
+            authorizationReceiptBarrierNonce = nil
+        }
+        if completedAuthorizationReceiptBarrierNonce == nonce {
+            completedAuthorizationReceiptBarrierNonce = nil
+        }
+    }
+
+    private func authorizationTransitionFailure(for error: Error) -> SessionError {
+        if let sessionError = error as? SessionError {
+            return sessionError
+        }
+        if error is CancellationError {
+            return .reconnectRequired
+        }
+        return .transportFailure(String(describing: error))
+    }
+
     private func startHandshakeDeadline() {
         handshakeTask?.cancel()
         handshakeGeneration &+= 1
@@ -2608,6 +3032,9 @@ public actor SessionCoordinator {
             )
             return
         }
+        // A pre-transition heartbeat Pong may still be in flight, but no new
+        // heartbeat may overtake the authorization receipt barrier.
+        if authorizationReceiptFence.capture().transitionInFlight { return }
         guard pendingPing == nil else { return }
         let nonce = nextPingNonce
         nextPingNonce = nextPingNonce == UInt64.max ? 1 : nextPingNonce + 1
@@ -2666,7 +3093,7 @@ public actor SessionCoordinator {
         guard state != .stopping, state != .failed else { return }
         let sessionAuthorizationGeneration = authorizationGeneration
         await fail(
-            .transportFailure("transport reached EOF"),
+            .transportEOF,
             expectedReceiveGeneration: generation,
             expectedReconnectGeneration: sessionGeneration,
             expectedAuthorizationGeneration: sessionAuthorizationGeneration
@@ -2704,7 +3131,10 @@ public actor SessionCoordinator {
             return
         }
         authorizationGeneration &+= 1
+        authorizationReceiptFence.cancelLocalTransition()
         clearAuthorization()
+        authorizationReceiptBarrierNonce = nil
+        completedAuthorizationReceiptBarrierNonce = nil
         lastFailure = error
         state = .failed
         incomingMessageStorage.finish(throwing: error)

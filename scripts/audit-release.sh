@@ -16,6 +16,7 @@ if [[ -L "${release_root}" || ! -d "${release_root}" ]]; then
 fi
 release_root="$(cd -P -- "${release_root}" && pwd -P)"
 artifact_channel="$(macremoteapp_resolve_artifact_channel "${repo_root}" "${release_root}")" || exit 2
+macremoteapp_require_release_channel "${artifact_channel}" || exit 2
 release_identity="$(macremoteapp_release_identity \
     "${release_root}/MacRemoteApp-Host.app/Contents/Info.plist" \
     "${release_root}/MacRemoteApp-Viewer.app/Contents/Info.plist")" || exit 2
@@ -308,7 +309,7 @@ for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
         exit 1
     fi
 
-    debug_markers='--m3-list-windows|--m2-physical-host|--m2-physical-viewer|--m7-physical-host|--m7-physical-viewer|--m5-input-surface|MACREMOTEAPP_P12_PASSWORD'
+    debug_markers='--m3-list-windows|--m2-physical-host|--m2-physical-viewer|--m7-physical-host|--m7-physical-viewer|--m5-input-surface|MACREMOTEAPP_P12_PASSWORD|MACREMOTEAPP_M10_DEBUG_DIAGNOSTICS'
     if strings "${binary_path}" | grep -En -- "${debug_markers}" >/dev/null; then
         echo "Release audit failed: debug/test command material is present in ${app_name}" >&2
         exit 1

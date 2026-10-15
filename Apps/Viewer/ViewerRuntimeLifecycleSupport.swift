@@ -1,5 +1,98 @@
 import Foundation
 import InputCore
+import TransportCore
+
+enum ViewerInputFailureDisposition: Equatable, Sendable {
+    case recheckInput
+    case endSession
+
+    var requiresSessionReset: Bool {
+        self == .endSession
+    }
+}
+
+enum ViewerInputFailureCategory: String, CaseIterable, Equatable, Hashable, Sendable {
+    case localPreflight = "local_preflight"
+    case capabilityUnavailable = "capability_unavailable"
+    case authorizationNotReady = "authorization_not_ready"
+    case deliveryUncertain = "delivery_uncertain"
+    case queueOverflow = "queue_overflow"
+    case heldStateReleaseFailure = "held_state_release_failure"
+    case unexpected
+
+    var disposition: ViewerInputFailureDisposition {
+        switch self {
+        case .localPreflight, .capabilityUnavailable, .authorizationNotReady:
+            return .recheckInput
+        case .deliveryUncertain, .queueOverflow, .heldStateReleaseFailure, .unexpected:
+            return .endSession
+        }
+    }
+}
+
+enum ViewerInputSendBoundary: String, CaseIterable, Equatable, Hashable, Sendable {
+    case beforeTransportInvocation = "before_transport_invocation"
+    case transportSendStarted = "transport_send_started"
+    case unknown
+}
+
+struct ViewerInputSendFailureDiagnostic: Equatable, Sendable {
+    let underlyingCategory: ViewerInputFailureCategory
+    let boundary: ViewerInputSendBoundary
+}
+
+enum ViewerInputSendFailureClassifier {
+    static func category(for error: Error) -> ViewerInputFailureCategory {
+        diagnostic(for: error).underlyingCategory
+    }
+
+    static func diagnostic(for error: Error) -> ViewerInputSendFailureDiagnostic {
+        if let error = error as? ViewerInputTransportError {
+            return ViewerInputSendFailureDiagnostic(
+                underlyingCategory: error.failureCategory,
+                boundary: error.failureBoundary
+            )
+        }
+        if error is InputCoreError {
+            return ViewerInputSendFailureDiagnostic(
+                underlyingCategory: .localPreflight,
+                boundary: .beforeTransportInvocation
+            )
+        }
+        if let error = error as? SessionError {
+            let category: ViewerInputFailureCategory
+            switch error {
+            case .unauthorizedMessage:
+                category = .capabilityUnavailable
+            case .authorizationChanged, .reconnectRequired:
+                category = .authorizationNotReady
+            case .transportEOF, .transportFailure:
+                category = .deliveryUncertain
+            default:
+                category = .unexpected
+            }
+            return ViewerInputSendFailureDiagnostic(
+                underlyingCategory: category,
+                boundary: .unknown
+            )
+        }
+        // Unknown operation errors may have crossed the transport boundary.
+        return ViewerInputSendFailureDiagnostic(
+            underlyingCategory: .unexpected,
+            boundary: .unknown
+        )
+    }
+
+    static func effectiveCategory(
+        for underlyingCategory: ViewerInputFailureCategory,
+        mayLeaveHeldInputState: Bool
+    ) -> ViewerInputFailureCategory {
+        if underlyingCategory.disposition == .recheckInput && mayLeaveHeldInputState {
+            return .heldStateReleaseFailure
+        }
+        return underlyingCategory
+    }
+}
 
 struct ViewerInputSendScope: Equatable, Sendable {
     let sessionID: UUID
@@ -437,6 +530,11 @@ enum ViewerSessionCleanupPresentation: Equatable {
     }
 }
 
+enum ViewerInputSendOutcome: Equatable, Sendable {
+    case sent
+    case discarded
+}
+
 /// A bounded FIFO with one consumer. Scope changes discard queued work, while
 /// an already-running send is allowed to finish before the next scope drains.
 @MainActor
@@ -447,25 +545,28 @@ final class ViewerInputSendQueue {
         case overflow
     }
 
-    typealias Sender = (InputEventRecord, UInt64) async throws -> Void
+    typealias Sender = (InputEventRecord, UInt64) async throws -> ViewerInputSendOutcome
     typealias Operation = (ViewerInputSendScope) async throws -> Void
+    typealias StatefulOperation = (ViewerInputSendScope) async throws -> [InputStateTransition]
 
     private struct Entry {
         let scope: ViewerInputSendScope
-        let operation: Operation
+        let operation: StatefulOperation
+        let mayEndHeldInputState: Bool
     }
 
     private let capacity: Int
-    private let onFailure: (ViewerInputSendScope) -> Void
+    private let onFailure: (ViewerInputSendScope, ViewerInputFailureCategory) -> Void
     private var activeScope: ViewerInputSendScope?
     private var entries: [Entry] = []
     private var isSending = false
+    private var sentInputState = InputStateTracker()
     private var worker: Task<Void, Never>?
     private var workerID: UUID?
 
     init(
         capacity: Int = 128,
-        onFailure: @escaping (ViewerInputSendScope) -> Void = { _ in }
+        onFailure: @escaping (ViewerInputSendScope, ViewerInputFailureCategory) -> Void = { _, _ in }
     ) {
         precondition(capacity > 0)
         self.capacity = capacity
@@ -475,6 +576,7 @@ final class ViewerInputSendQueue {
     func updateScope(_ scope: ViewerInputSendScope?) {
         guard scope != activeScope else { return }
         activeScope = scope
+        sentInputState.reset()
         entries.removeAll(keepingCapacity: true)
         worker?.cancel()
         startWorkerIfNeeded()
@@ -491,12 +593,24 @@ final class ViewerInputSendQueue {
             return .staleScope
         }
         guard entries.count + (isSending ? 1 : 0) < capacity else {
-            invalidate(scope, notifyFailure: true)
+#if DEBUG
+            M10ViewerDiagnosticRecorder.shared.recordViewerInputFailureContext(
+                underlyingCategory: .queueOverflow,
+                boundary: .beforeTransportInvocation
+            )
+#endif
+            invalidate(scope, failureCategory: .queueOverflow)
             return .overflow
         }
-        entries.append(Entry(scope: scope) { currentScope in
-            try await send(record, currentScope.authorizationGeneration)
-        })
+        entries.append(Entry(
+            scope: scope,
+            operation: { currentScope in
+                let outcome = try await send(record, currentScope.authorizationGeneration)
+                guard outcome == .sent else { return [] }
+                return Self.stateTransition(for: record).map { [$0] } ?? []
+            },
+            mayEndHeldInputState: Self.isStateEnding(record)
+        ))
         startWorkerIfNeeded()
         return .enqueued
     }
@@ -504,14 +618,54 @@ final class ViewerInputSendQueue {
     @discardableResult
     func enqueueOperation(
         in scope: ViewerInputSendScope,
+        mayEndHeldInputState: Bool = false,
         operation: @escaping Operation
     ) -> EnqueueResult {
         guard activeScope == scope else { return .staleScope }
         guard entries.count + (isSending ? 1 : 0) < capacity else {
-            invalidate(scope, notifyFailure: true)
+#if DEBUG
+            M10ViewerDiagnosticRecorder.shared.recordViewerInputFailureContext(
+                underlyingCategory: .queueOverflow,
+                boundary: .beforeTransportInvocation
+            )
+#endif
+            invalidate(scope, failureCategory: .queueOverflow)
             return .overflow
         }
-        entries.append(Entry(scope: scope, operation: operation))
+        entries.append(Entry(
+            scope: scope,
+            operation: { currentScope in
+                try await operation(currentScope)
+                return []
+            },
+            mayEndHeldInputState: mayEndHeldInputState
+        ))
+        startWorkerIfNeeded()
+        return .enqueued
+    }
+
+    @discardableResult
+    func enqueueStatefulOperation(
+        in scope: ViewerInputSendScope,
+        mayEndHeldInputState: Bool = false,
+        operation: @escaping StatefulOperation
+    ) -> EnqueueResult {
+        guard activeScope == scope else { return .staleScope }
+        guard entries.count + (isSending ? 1 : 0) < capacity else {
+#if DEBUG
+            M10ViewerDiagnosticRecorder.shared.recordViewerInputFailureContext(
+                underlyingCategory: .queueOverflow,
+                boundary: .beforeTransportInvocation
+            )
+#endif
+            invalidate(scope, failureCategory: .queueOverflow)
+            return .overflow
+        }
+        entries.append(Entry(
+            scope: scope,
+            operation: operation,
+            mayEndHeldInputState: mayEndHeldInputState
+        ))
         startWorkerIfNeeded()
         return .enqueued
     }
@@ -539,11 +693,30 @@ final class ViewerInputSendQueue {
             guard activeScope == entry.scope else { continue }
             isSending = true
             do {
-                try await entry.operation(entry.scope)
+                let transitions = try await entry.operation(entry.scope)
+                if activeScope == entry.scope {
+                    for transition in transitions {
+                        sentInputState.apply(transition)
+                    }
+                }
             } catch {
                 isSending = false
                 if activeScope == entry.scope {
-                    invalidate(entry.scope, notifyFailure: true)
+                    let diagnostic = ViewerInputSendFailureClassifier.diagnostic(for: error)
+                    let mayLeaveHeldInputState = !sentInputState.isEmpty ||
+                        entry.mayEndHeldInputState ||
+                        entries.contains(where: \.mayEndHeldInputState)
+                    let category = ViewerInputSendFailureClassifier.effectiveCategory(
+                        for: diagnostic.underlyingCategory,
+                        mayLeaveHeldInputState: mayLeaveHeldInputState
+                    )
+#if DEBUG
+                    M10ViewerDiagnosticRecorder.shared.recordViewerInputFailureContext(
+                        underlyingCategory: diagnostic.underlyingCategory,
+                        boundary: diagnostic.boundary
+                    )
+#endif
+                    invalidate(entry.scope, failureCategory: category)
                 }
             }
             isSending = false
@@ -557,14 +730,41 @@ final class ViewerInputSendQueue {
 
     private func invalidate(
         _ scope: ViewerInputSendScope,
-        notifyFailure: Bool
+        failureCategory: ViewerInputFailureCategory? = nil
     ) {
         guard activeScope == scope else { return }
         activeScope = nil
         entries.removeAll(keepingCapacity: true)
         worker?.cancel()
-        if notifyFailure {
-            onFailure(scope)
+        if let failureCategory {
+            onFailure(scope, failureCategory)
+        }
+    }
+
+    private static func isStateEnding(_ record: InputEventRecord) -> Bool {
+        switch record.kind {
+        case .keyUp:
+            return true
+        case .pointerButton:
+            return record.pressed == false
+        default:
+            return false
+        }
+    }
+
+    private static func stateTransition(for record: InputEventRecord) -> InputStateTransition? {
+        switch record.kind {
+        case .keyDown:
+            guard let keyCode = record.keyCode else { return nil }
+            return .began(.key(keyCode))
+        case .keyUp:
+            guard let keyCode = record.keyCode else { return nil }
+            return .ended(.key(keyCode))
+        case .pointerButton:
+            guard let button = record.button, let pressed = record.pressed else { return nil }
+            return pressed ? .began(.pointerButton(button)) : .ended(.pointerButton(button))
+        case .pointerMove, .scroll, .focusIntent:
+            return nil
         }
     }
 }

@@ -39,15 +39,23 @@ bash -n \
     scripts/dmg-uninstall.sh \
     scripts/install-device-apps.sh \
     scripts/package-device-apps.sh \
+    scripts/package-debug-diagnostic-apps.sh \
+    scripts/audit-debug-diagnostic-apps.sh \
+    scripts/promote-debug-diagnostic-apps.sh \
+    scripts/notarize-debug-diagnostic-apps.sh \
+    scripts/validate-notarized-debug-diagnostic-apps.sh \
     scripts/notarize-device-apps.sh \
     scripts/release-notarized.sh \
     scripts/uninstall-device-apps.sh \
     scripts/Uninstall-MacRemoteApp.command \
     scripts/test-artifact-naming.sh \
+    scripts/test-debug-diagnostic-packaging.sh \
     scripts/test-notarization-config.sh \
     scripts/test-uninstall-macremoteapp.sh
 echo "Running isolated artifact-naming fixtures"
 bash scripts/test-artifact-naming.sh
+echo "Running M10 Debug diagnostic packaging fixtures"
+bash scripts/test-debug-diagnostic-packaging.sh
 echo "Running isolated notarization-configuration fixtures"
 bash scripts/test-notarization-config.sh
 if ! grep -q -- '--remove-all-data' Apps/Host/main.swift ||
@@ -393,9 +401,12 @@ for document in \
     docs/M8_PERFORMANCE_RESILIENCE.md \
     docs/M9_SECURITY_RELEASE.md \
     docs/M10_ACCEPTANCE.md \
+    docs/SECURITY.md \
     docs/USER_GUIDE.md \
     docs/DEBUGGING.md \
-    docs/DEBUG_LOG_COLLECTION.md
+    docs/DEBUG_LOG_COLLECTION.md \
+    docs/RELEASE_DEBUGGING.md \
+    docs/RELEASE_DEBUG_LOG_COLLECTION.md
 do
     test -s "${document}"
 done
@@ -404,13 +415,19 @@ bash -n \
     scripts/run-m8-benchmark.sh \
     scripts/artifact-naming.sh \
     scripts/audit-release.sh \
+    scripts/audit-debug-diagnostic-apps.sh \
+    scripts/promote-debug-diagnostic-apps.sh \
     scripts/create-device-dmgs.sh \
     scripts/check-notary-profile.sh \
     scripts/install-device-apps.sh \
     scripts/run-m10-acceptance.sh \
+    scripts/package-debug-diagnostic-apps.sh \
+    scripts/notarize-debug-diagnostic-apps.sh \
+    scripts/validate-notarized-debug-diagnostic-apps.sh \
     scripts/notarize-device-apps.sh \
     scripts/release-notarized.sh \
     scripts/test-artifact-naming.sh \
+    scripts/test-debug-diagnostic-packaging.sh \
     scripts/validate-notarized-release.sh \
     scripts/uninstall-device-apps.sh
 

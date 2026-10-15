@@ -74,6 +74,54 @@ enum HostRuntimeCooperativeActivationPolicy {
     }
 }
 
+enum HostRuntimeVideoAuthorizationRecoveryPolicy {
+    static func shouldRecover(
+        capturedAuthorizationGeneration: UInt64,
+        capturedWindowGeneration: UInt64?,
+        capturedAuthorized: Bool,
+        freshAuthorizationGeneration: UInt64,
+        freshWindowGeneration: UInt64?,
+        freshAuthorized: Bool
+    ) -> Bool {
+        guard capturedAuthorized else { return false }
+        return capturedAuthorizationGeneration != freshAuthorizationGeneration ||
+            capturedWindowGeneration != freshWindowGeneration ||
+            capturedAuthorized != freshAuthorized
+    }
+}
+
+enum HostRuntimeClipboardAuthorizationPolicy {
+    static func permits(
+        pairedPeerTrusted: Bool,
+        capabilityNegotiated: Bool,
+        pairingRevoked: Bool = false
+    ) -> Bool {
+        pairedPeerTrusted && capabilityNegotiated && !pairingRevoked
+    }
+}
+
+enum HostRuntimeCaptureLivenessPolicy {
+    static func keepsAuthenticatedSession(for state: CaptureSessionState) -> Bool {
+        switch state {
+        case .capturing, .recovering: true
+        case .idle, .starting, .stopping, .stopped, .failed: false
+        }
+    }
+}
+
+enum HostRuntimeWindowCatalogPolicy {
+    /// A temporary picker-catalog omission must not make the Viewer clear an
+    /// already selected target. CaptureCore owns the bounded target-liveness
+    /// decision; the catalog resumes publishing when that target reappears.
+    static func shouldPublish(
+        _ windows: [CaptureWindow],
+        preserving selectedWindow: CaptureWindow?
+    ) -> Bool {
+        guard let selectedWindow else { return true }
+        return windows.contains { $0.hasSameOwner(as: selectedWindow) }
+    }
+}
+
 enum HostRuntimeCallbackTeardownScheduler {
     @discardableResult
     static func schedule(
@@ -93,6 +141,7 @@ enum HostRuntimeStatus: Sendable, Equatable, CustomStringConvertible {
     /// that the Host activated the app because of the Viewer's selection, so
     /// the person at the Host can see why their frontmost app changed.
     case sharing(application: String, broughtToFront: Bool)
+    case recovering(application: String)
     case pairing(code: String)
     case listening
     case failed
@@ -109,6 +158,7 @@ enum HostRuntimeStatus: Sendable, Equatable, CustomStringConvertible {
             return broughtToFront
                 ? "Viewer brought \(application) to the front and is sharing it"
                 : "Viewer is sharing \(application)"
+        case let .recovering(application): return "Restoring video for \(application)"
         case .pairing: return "Pairing requested"
         case .listening: return "Listening for a paired Viewer"
         case .failed: return "Startup failed — retry setup"
@@ -147,7 +197,7 @@ actor HostRuntime {
         }
     }
 
-    private static let capabilities: Set<Capability> = [
+    static let capabilities: Set<Capability> = [
         .pingPong,
         .windowSelection,
         .h264Video,
@@ -177,6 +227,7 @@ actor HostRuntime {
     let controlStatusUpdates: AsyncStream<HostControlStatus>
     private let controlStatusContinuation: AsyncStream<HostControlStatus>.Continuation
     private let controlGrantStore: any ControlGrantStore
+    private let trustStore: any TrustStore
     private let controlAuthorization: HostControlAuthorizationCoordinator
     private var controlStatusValue: HostControlStatus = .unavailable
     private var controlPeerIdentifier: String?
@@ -185,7 +236,6 @@ actor HostRuntime {
     private var controlWireAuthorized = false
     private var controlPaused = false
     private var controlSessionID: UUID?
-    private var controlAuthorizationTask: Task<Void, Never>?
     private var controlAppliedRevision: UInt64 = 0
     private var pairingResetInProgress = false
 
@@ -206,6 +256,12 @@ actor HostRuntime {
     private var advertisedWindows: [CaptureWindow] = []
     private var videoConfigSentGeneration: UInt64?
     private var videoConfigSentAuthorizationGeneration: UInt64?
+#if DEBUG
+    private var lastDebugSessionState: M10HostSessionDiagnosticSnapshot?
+    private var lastDebugScreenRecordingPermission: M10HostScreenRecordingPermission?
+    private var lastDebugWindowCatalog: M10HostWindowCatalogDiagnosticSnapshot?
+    private var lastDebugInputReadiness: M10HostInputReadiness?
+#endif
     /// Set when the media queue discarded video or the decoder configuration
     /// must be resent. The Viewer skips delta frames until the next keyframe,
     /// so the capture loop forces one.
@@ -217,12 +273,11 @@ actor HostRuntime {
     /// M8 stage budget evidence: capture arrival to wire-queue admission.
     private var captureToSendCollector = BoundedStageLatencyCollector()
     private static let stageLogSampleInterval = 600
-    private var clipboardOptedInForSession = false
-    private var clipboardConsentPromptedForSession = false
-    private var clipboardConsentTask: Task<Void, Never>?
+    private var clipboardAuthorizedForSession = false
     private var retryRequested = false
     private var restartRequested = false
     private var selectionTransitionInProgress = false
+    private var captureRecoveryStatusActive = false
     private let startupLogger = Logger(
         subsystem: "com.rudinyu.MacRemoteApp",
         category: "host-runtime"
@@ -234,6 +289,9 @@ actor HostRuntime {
         captureSession: WindowCaptureSession? = nil,
         controlGrantStore: any ControlGrantStore = KeychainControlGrantStore(
             service: Configuration.defaultControlGrantStoreService
+        ),
+        trustStore: any TrustStore = KeychainTrustStore(
+            service: Configuration.defaultTrustStoreService
         )
     ) {
         let statusStream = AsyncStream<HostRuntimeStatus>.makeStream(
@@ -250,15 +308,8 @@ actor HostRuntime {
         self.controlStatusUpdates = controlStatusStream.stream
         self.controlStatusContinuation = controlStatusStream.continuation
         self.controlGrantStore = controlGrantStore
-        self.controlAuthorization = HostControlAuthorizationCoordinator(
-            store: controlGrantStore,
-            prompt: { peerName, peerIdentifier in
-                await HostControlPrompt.requestConsent(
-                    peerName: peerName,
-                    peerIdentifier: peerIdentifier
-                )
-            }
-        )
+        self.trustStore = trustStore
+        self.controlAuthorization = HostControlAuthorizationCoordinator(trustStore: trustStore)
     }
 
     func run() async throws {
@@ -319,11 +370,8 @@ actor HostRuntime {
         guard let session = activeSession, let controlSessionID else { return }
         let updated = await controlAuthorization.togglePause(for: controlSessionID)
         guard activeSession === session, self.controlSessionID == controlSessionID else { return }
-        if updated.granted {
-            await applyControlAuthorization(updated, for: session)
-        } else {
-            await requestControlConsent(for: session)
-        }
+        guard updated.granted else { return }
+        await applyControlAuthorization(updated, for: session)
     }
 
     func revokeViewerControl() async {
@@ -339,12 +387,24 @@ actor HostRuntime {
             controlGranted = false
             controlWireAuthorized = false
             controlAppliedRevision = max(controlAppliedRevision, ticket.revision)
+            clipboardAuthorizedForSession = false
             stateStore.setProcessTargetingAuthorized(false)
             publishControlStatus(.revoked)
             await setLocalControlAdmission(false, revision: ticket.revision, for: session)
+            try? await inputRuntime?.setClipboardEnabled(false)
             await synchronizeInputAuthorization(session)
         }
         let result = await controlAuthorization.completeRevocation(ticket)
+        if result.status == .revoked,
+           activeSession != nil,
+           self.controlSessionID == result.sessionID,
+           result.peerIdentifier == ticket.peerIdentifier {
+            // If a same-peer session replaced the revoked session while the
+            // Keychain operation was suspended, fence that authenticated
+            // transport too before it can remain active without pairing trust.
+            await stopActiveSession()
+            return
+        }
         guard stillCurrent,
               ticket.sessionID == controlSessionID,
               activeSession === session,
@@ -361,12 +421,20 @@ actor HostRuntime {
         pairingResetInProgress = true
         defer { pairingResetInProgress = false }
         await stopActiveSession()
-        // Remove process-control grants first. If Keychain refuses this
-        // operation, existing paired trust stays intact and the failure guard
-        // blocks reuse of any stale grant.
-        _ = try await controlAuthorization.removeAllGrants()
-        let trustStore = KeychainTrustStore(service: Configuration.defaultTrustStoreService)
-        let count = try await trustStore.removeAllPairings()
+        // Old P6 grant records are no longer consulted. Remove them best-effort
+        // while the paired Viewer trust record remains the sole authorization.
+        _ = try? await controlGrantStore.removeAll()
+        let count: Int
+        if let keychainTrustStore = trustStore as? KeychainTrustStore {
+            count = try await keychainTrustStore.removeAllPairings()
+        } else {
+            let peers = try await trustStore.allTrustedPeers()
+            for peer in peers {
+                try await trustStore.revoke(peerIdentifier: peer.identity.identifier)
+            }
+            count = peers.count
+        }
+        await controlAuthorization.clearRevocationFailuresAfterPairingReset()
         if listener != nil {
             publish(.listening)
         }
@@ -396,9 +464,10 @@ actor HostRuntime {
         let inputStatus = await inputRuntime?.status() ?? .selectionUnavailable
         guard activeSession === session,
               controlRevision.map({ $0 == controlAppliedRevision }) ?? true else { return }
-        let localPermission = await MainActor.run {
-            CoreGraphicsAccessibilityContextProvider.currentPermissionState()
-        }
+        // Permission preflight is synchronous CoreGraphics I/O; keep it off
+        // AppKit's main actor so the 100 ms authorization monitor cannot stall
+        // the Host event loop while TCC responds.
+        let localPermission = CoreGraphicsAccessibilityContextProvider.currentPermissionState()
         guard activeSession === session,
               controlRevision.map({ $0 == controlAppliedRevision }) ?? true else { return }
         let permission: PermissionState
@@ -459,30 +528,13 @@ actor HostRuntime {
             return
         }
         await applyControlAuthorization(initial, for: session)
-        guard activeSession === session,
-              self.controlSessionID == controlSessionID,
-              snapshot.negotiatedCapabilities.contains(.backgroundControl) else { return }
-
-        // Durable lookup and any local consent prompt run independently from
-        // session startup so window discovery, selection, and view-only video
-        // continue while control is pending or denied.
-        controlAuthorizationTask?.cancel()
-        let authorization = controlAuthorization
-        controlAuthorizationTask = Task { [weak self] in
-            let resolved = await authorization.resolveInitialConsent(for: controlSessionID)
-            await self?.applyControlAuthorization(resolved, for: session)
-        }
-    }
-
-    private func requestControlConsent(for session: SessionCoordinator) async {
-        guard activeSession === session,
-              let controlSessionID,
-              (await session.snapshot()).negotiatedCapabilities.contains(.backgroundControl) else { return }
+        let resolved = await controlAuthorization.resolvePairingTrust(for: controlSessionID)
         guard activeSession === session, self.controlSessionID == controlSessionID else { return }
-        await setControlStatus(.negotiating, for: session)
-        guard activeSession === session, self.controlSessionID == controlSessionID else { return }
-        let result = await controlAuthorization.requestConsent(for: controlSessionID)
-        await applyControlAuthorization(result, for: session)
+        clipboardAuthorizedForSession = HostRuntimeClipboardAuthorizationPolicy.permits(
+            pairedPeerTrusted: resolved.trusted,
+            capabilityNegotiated: snapshot.negotiatedCapabilities.contains(.textClipboard)
+        )
+        await applyControlAuthorization(resolved, for: session)
     }
 
     private func applyControlAuthorization(
@@ -671,7 +723,9 @@ actor HostRuntime {
     }
 
     private func prepareScreenRecordingPermission() async throws {
-        guard await captureSession.permissionState() != .authorized else {
+        let initialPermission = await captureSession.permissionState()
+        recordDebugScreenRecordingPermission(initialPermission)
+        guard initialPermission != .authorized else {
             return
         }
 
@@ -684,13 +738,16 @@ actor HostRuntime {
             )
         }
 
-        _ = await captureSession.requestPermission()
+        let requestedPermission = await captureSession.requestPermission()
+        recordDebugScreenRecordingPermission(requestedPermission)
         // On some macOS releases the consent UI is delivered asynchronously.
         // Recheck for a bounded period before failing closed, so an Allow click
         // is not mistaken for a denial merely because the TCC database has not
         // returned the new state to this process yet.
         for _ in 0 ..< 120 {
-            if await captureSession.permissionState() == .authorized {
+            let permission = await captureSession.permissionState()
+            recordDebugScreenRecordingPermission(permission)
+            if permission == .authorized {
                 return
             }
             try await Task.sleep(nanoseconds: 250_000_000)
@@ -717,8 +774,6 @@ actor HostRuntime {
         activeSession = nil
         controlSessionID = nil
         controlAppliedRevision = 0
-        controlAuthorizationTask?.cancel()
-        controlAuthorizationTask = nil
         controlGranted = false
         controlWireAuthorized = false
         controlPaused = false
@@ -735,8 +790,6 @@ actor HostRuntime {
         sessionMonitor?.cancel()
         sessionMonitor = nil
         await stopVideoPipeline()
-        clipboardConsentTask?.cancel()
-        clipboardConsentTask = nil
         await inputRuntime?.stop()
         inputRuntime = nil
         if let stoppingSession {
@@ -744,10 +797,10 @@ actor HostRuntime {
         }
         selectedWindow = nil
         selectedWindowGeneration = nil
+        captureRecoveryStatusActive = false
         advertisedWindowCatalogGeneration = 0
         advertisedWindows.removeAll(keepingCapacity: false)
-        clipboardOptedInForSession = false
-        clipboardConsentPromptedForSession = false
+        clipboardAuthorizedForSession = false
         stateStore.clearSelection()
         publishControlStatus(.unavailable)
     }
@@ -777,7 +830,7 @@ actor HostRuntime {
 
         let pairingCoordinator = PairingCoordinator(
             localIdentity: localIdentity.peerIdentity,
-            trustStore: KeychainTrustStore(service: Configuration.defaultTrustStoreService)
+            trustStore: trustStore
         )
 
         let session = SessionCoordinator(
@@ -797,11 +850,13 @@ actor HostRuntime {
             transport: transport,
             pairingCoordinator: pairingCoordinator
         )
+#if DEBUG
+        let diagnosticConnectionSequence = M10HostDiagnosticFileLog.shared.recordConnectionStarted()
+        M10HostDiagnosticFileLog.shared.bind(session, toConnectionSequence: diagnosticConnectionSequence)
+#endif
         activeSession = session
         controlSessionID = UUID()
         controlAppliedRevision = 0
-        controlAuthorizationTask?.cancel()
-        controlAuthorizationTask = nil
         publish(.connected)
         controlGranted = false
         controlWireAuthorized = false
@@ -810,14 +865,12 @@ actor HostRuntime {
         controlPeerName = nil
         stateStore.setProcessTargetingAuthorized(false)
         await setControlStatus(.negotiating, for: session)
-        clipboardOptedInForSession = false
-        clipboardConsentPromptedForSession = false
+        clipboardAuthorizedForSession = false
         stateStore.update(session: await session.snapshot())
 
         let contextProvider = CoreGraphicsAccessibilityContextProvider(
             sessionStateProvider: { [stateStore] in stateStore.sessionState() },
-            selectionProvider: { [stateStore] in stateStore.selection() },
-            secureInputStateProvider: CoreGraphicsAccessibilityContextProvider.detectSecureInputState
+            selectionProvider: { [stateStore] in stateStore.selection() }
         )
         let runtime = await HostApp.startInputSession(
             session,
@@ -830,7 +883,10 @@ actor HostRuntime {
                 let snapshot = await session.snapshot()
                 stateStore.update(session: snapshot)
             },
-            onInputStatusChange: { status in
+            onInputStatusChange: { [weak self] status in
+#if DEBUG
+                await self?.recordDebugInputReadiness(status)
+#endif
                 let snapshot = await session.snapshot()
                 guard snapshot.state != .failed,
                       snapshot.state != .stopping,
@@ -888,19 +944,37 @@ actor HostRuntime {
             try await waitForPairing(session, pairingCoordinator: pairingCoordinator)
             try await waitForCapabilities(session)
             await prepareViewerControl(for: session)
-            let windows = try await captureSession.discoverWindows()
+            let windows = try await discoverWindowsForRuntime()
             advertisedWindowGeneration = max(1, (await captureSession.snapshot().generation) &+ 1)
             stateStore.update(session: await session.snapshot())
-            try await session.authorize(
+            try await authorizeSession(
+                session,
+                source: .connectionEstablishment,
                 windowGeneration: advertisedWindowGeneration,
                 capabilities: [.windowSelection]
             )
             stateStore.update(session: await session.snapshot())
             _ = try await publishWindowCatalog(windows, to: session, force: true)
+#if DEBUG
+            M10HostDiagnosticFileLog.shared.record(.connectionOutcome(.connected))
+#endif
             sessionMonitor = Task { [weak self] in
                 await self?.monitor(session)
             }
+        } catch let error as SessionError {
+#if DEBUG
+            M10HostDiagnosticFileLog.shared.record(
+                .connectionOutcome(error == .pairingDenied ? .pairingDenied : .sessionFailure)
+            )
+            recordDebugSessionFailure(error)
+#endif
+            await setLocalControlAdmission(false, for: session)
+            await setControlStatus(.unavailable, for: session)
+            await teardown(session: session)
         } catch {
+#if DEBUG
+            M10HostDiagnosticFileLog.shared.record(.connectionOutcome(.connectionFailure))
+#endif
             await setLocalControlAdmission(false, for: session)
             await setControlStatus(.unavailable, for: session)
             await teardown(session: session)
@@ -915,6 +989,10 @@ actor HostRuntime {
         var projectedChallengeID: UInt64?
         while !Task.isCancelled {
             let snapshot = await session.snapshot()
+            recordDebugSessionState(snapshot)
+#if DEBUG
+            M10HostVideoDiagnostics.shared.flushIfDue()
+#endif
             switch snapshot.state {
             case .trusted, .capabilitiesNegotiated, .windowSelectionAuthorized,
                  .streaming:
@@ -996,6 +1074,7 @@ actor HostRuntime {
     private func waitForCapabilities(_ session: SessionCoordinator) async throws {
         for _ in 0 ..< 300 {
             let snapshot = await session.snapshot()
+            recordDebugSessionState(snapshot)
             if snapshot.state == .capabilitiesNegotiated || snapshot.state == .windowSelectionAuthorized {
                 return
             }
@@ -1011,24 +1090,49 @@ actor HostRuntime {
         var nextWindowListRefreshAt: UInt64 = 0
         while !Task.isCancelled {
             let snapshot = await session.snapshot()
+            recordDebugSessionState(snapshot)
             stateStore.update(session: snapshot)
             if snapshot.state == .failed || snapshot.state == .stopping {
+#if DEBUG
+                if snapshot.state == .failed {
+                    recordDebugSessionFailure(await session.failureReason())
+                }
+#endif
                 await teardown(session: session)
                 return
             }
             if selectedWindow != nil, !selectionTransitionInProgress {
                 await synchronizeInputAuthorization(session)
                 let captureSnapshot = await captureSession.snapshot()
-                switch captureSnapshot.state {
-                case .capturing:
-                    break
-                case .idle, .starting, .stopping, .stopped, .failed:
-                    // CaptureCore can stop after a window disappears or a
-                    // permission is revoked while the transport remains
-                    // authenticated. Tear down the protected session instead
-                    // of leaving input enabled without a live video target.
+                guard HostRuntimeCaptureLivenessPolicy.keepsAuthenticatedSession(
+                    for: captureSnapshot.state
+                ) else {
+                    // Confirmed target loss or permission failure closes the
+                    // protected session. A short discovery gap and bounded
+                    // stream restart keep the authenticated session alive.
                     await teardown(session: session)
                     return
+                }
+                switch captureSnapshot.state {
+                case .capturing:
+                    if captureRecoveryStatusActive, let selectedWindow {
+                        captureRecoveryStatusActive = false
+                        publish(.sharing(
+                            application: Self.statusApplicationName(for: selectedWindow),
+                            broughtToFront: false
+                        ))
+                    }
+                    break
+                case .recovering:
+                    if !captureRecoveryStatusActive, let selectedWindow {
+                        captureRecoveryStatusActive = true
+                        publish(.recovering(
+                            application: Self.statusApplicationName(for: selectedWindow)
+                        ))
+                    }
+                    break
+                case .idle, .starting, .stopping, .stopped, .failed:
+                    break
                 }
             }
             let canRefreshWindowCatalog = snapshot.state == .capabilitiesNegotiated ||
@@ -1055,7 +1159,7 @@ actor HostRuntime {
               !selectionTransitionInProgress else { return }
         let windows: [CaptureWindow]
         do {
-            windows = try await captureSession.discoverWindows()
+            windows = try await discoverWindowsForRuntime()
         } catch {
             startupLogger.error(
                 "Host window list refresh failed (error: \(String(describing: error), privacy: .public))"
@@ -1090,7 +1194,7 @@ actor HostRuntime {
         if let discoveredWindows {
             windows = discoveredWindows
         } else {
-            windows = (try? await captureSession.discoverWindows()) ?? advertisedWindows
+            windows = (try? await discoverWindowsForRuntime()) ?? advertisedWindows
         }
         guard activeSession === session else { return }
 
@@ -1123,6 +1227,7 @@ actor HostRuntime {
         defer { selectionTransitionInProgress = false }
         selectedWindow = nil
         selectedWindowGeneration = nil
+        captureRecoveryStatusActive = false
         stateStore.clearSelection()
         await stopVideoPipeline()
 
@@ -1136,13 +1241,79 @@ actor HostRuntime {
         advertisedWindowGeneration = snapshot.authorizedWindowGeneration ?? fallbackWindowGeneration
         stateStore.update(session: snapshot)
 
-        if clipboardOptedInForSession,
+        if clipboardAuthorizedForSession,
            snapshot.authorizedCapabilities.contains(.textClipboard),
            let inputRuntime {
             try? await inputRuntime.setClipboardEnabled(true)
         }
         await republishWindowCatalogAfterRejectedSelection(session)
     }
+
+    /// Records the exact authorization epoch returned by TransportCore for
+    /// successful attempts. Failed attempts retain source and requested
+    /// metadata without inventing a generation transition.
+    private func authorizeSession(
+        _ session: SessionCoordinator,
+        source: M10HostAuthorizationSource,
+        windowGeneration: UInt64?,
+        capabilities: Set<Capability>
+    ) async throws {
+        do {
+#if DEBUG
+            let transition = try await session.authorize(
+                windowGeneration: windowGeneration,
+                capabilities: capabilities
+            )
+            recordAuthorizationAttempt(
+                session,
+                source: source,
+                succeeded: true,
+                transition: transition,
+                requestedWindowGeneration: windowGeneration,
+                requestedCapabilities: capabilities
+            )
+#else
+            _ = try await session.authorize(
+                windowGeneration: windowGeneration,
+                capabilities: capabilities
+            )
+#endif
+        } catch {
+#if DEBUG
+            recordAuthorizationAttempt(
+                session,
+                source: source,
+                succeeded: false,
+                transition: nil,
+                requestedWindowGeneration: windowGeneration,
+                requestedCapabilities: capabilities
+            )
+#endif
+            throw error
+        }
+    }
+
+#if DEBUG
+    private func recordAuthorizationAttempt(
+        _ session: SessionCoordinator,
+        source: M10HostAuthorizationSource,
+        succeeded: Bool,
+        transition: SessionAuthorizationTransition?,
+        requestedWindowGeneration: UInt64?,
+        requestedCapabilities: Set<Capability>
+    ) {
+        M10HostDiagnosticFileLog.shared.record(
+            .authorizationAttempt(
+                source: source,
+                succeeded: succeeded,
+                transition: transition.map { M10HostAuthorizationDiagnosticTransition($0) },
+                requestedWindowGeneration: requestedWindowGeneration,
+                requestedCapabilities: M10HostCapabilityDiagnosticFlags(requestedCapabilities)
+            ),
+            connectionSequenceOverride: M10HostDiagnosticFileLog.shared.connectionSequence(for: session) ?? 0
+        )
+    }
+#endif
 
     private func synchronizeInputAuthorization(_ session: SessionCoordinator) async {
         guard activeSession === session,
@@ -1160,9 +1331,7 @@ actor HostRuntime {
             return
         }
 
-        let permission = await MainActor.run {
-            CoreGraphicsAccessibilityContextProvider.currentPermissionState()
-        }
+        let permission = CoreGraphicsAccessibilityContextProvider.currentPermissionState()
         guard activeSession === session,
               self.controlSessionID == controlSessionID,
               controlAppliedRevision == expectedControlRevision else { return }
@@ -1189,18 +1358,20 @@ actor HostRuntime {
         } else {
             desired.remove(.backgroundControl)
         }
-        if clipboardOptedInForSession,
+        if clipboardAuthorizedForSession,
            snapshot.negotiatedCapabilities.contains(.textClipboard) {
             desired.insert(.textClipboard)
         } else {
             desired.remove(.textClipboard)
         }
         guard desired != snapshot.authorizedCapabilities else { return }
-        let shouldRestoreClipboard = clipboardOptedInForSession &&
+        let shouldRestoreClipboard = clipboardAuthorizedForSession &&
             desired.contains(.textClipboard)
 
         do {
-            try await session.authorize(
+            try await authorizeSession(
+                session,
+                source: .inputAuthorization,
                 windowGeneration: selectedWindowGeneration,
                 capabilities: desired
             )
@@ -1225,13 +1396,16 @@ actor HostRuntime {
                           self.controlSessionID == controlSessionID,
                           controlAppliedRevision == expectedControlRevision else { return }
                 } catch {
-                    // A lifecycle reset can race this reauthorization. If
-                    // the local clipboard bridge cannot be re-enabled, do
-                    // not leave the peer with an apparently authorized but
-                    // unusable clipboard capability.
+                    // Text clipboard is optional. A local bridge failure
+                    // disables only this capability for the current session;
+                    // it must not affect the selected video or LAN session.
+                    clipboardAuthorizedForSession = false
+                    try? await inputRuntime.setClipboardEnabled(false)
                     var fallback = desired
                     fallback.remove(.textClipboard)
-                    try? await session.authorize(
+                    try? await authorizeSession(
+                        session,
+                        source: .clipboardFallback,
                         windowGeneration: selectedWindowGeneration,
                         capabilities: fallback
                     )
@@ -1265,16 +1439,22 @@ actor HostRuntime {
         guard activeSession === session else { return }
         switch message {
         case let .windowSelection(selection):
+#if DEBUG
+            M10HostDiagnosticFileLog.shared.record(.windowSelection(.requested))
+#endif
             guard selection.windowGeneration == advertisedWindowGeneration,
                   selection.catalogGeneration == advertisedWindowCatalogGeneration,
                   let advertisedWindow = advertisedWindows.first(where: {
                       $0.identifier == selection.windowIdentifier && $0.eligible
                   }) else {
+#if DEBUG
+                M10HostDiagnosticFileLog.shared.record(.windowSelection(.rejected))
+#endif
                 await republishWindowCatalogAfterRejectedSelection(session)
                 return
             }
             do {
-                let windows = try await captureSession.discoverWindows()
+                let windows = try await discoverWindowsForRuntime()
                 guard activeSession === session else { return }
                 guard let window = windows.first(where: {
                     $0.identifier == selection.windowIdentifier && $0.eligible
@@ -1285,6 +1465,9 @@ actor HostRuntime {
                 }),
                 currentAdvertisedWindow.hasSameOwner(as: advertisedWindow),
                 window.hasSameOwner(as: currentAdvertisedWindow) else {
+#if DEBUG
+                    M10HostDiagnosticFileLog.shared.record(.windowSelection(.rejected))
+#endif
                     await republishWindowCatalogAfterRejectedSelection(session, discoveredWindows: windows)
                     return
                 }
@@ -1320,7 +1503,13 @@ actor HostRuntime {
                         generation: replacementGeneration,
                         session: session
                     )
+#if DEBUG
+                    M10HostDiagnosticFileLog.shared.record(.windowSelection(.accepted))
+#endif
                 } catch {
+#if DEBUG
+                    M10HostDiagnosticFileLog.shared.record(.windowSelection(.rejected))
+#endif
                     startupLogger.error(
                         "Host could not start the selected window; keeping the session available for retry (error: \(String(describing: error), privacy: .public))"
                     )
@@ -1331,6 +1520,9 @@ actor HostRuntime {
                 }
             } catch {
                 guard activeSession === session else { return }
+#if DEBUG
+                M10HostDiagnosticFileLog.shared.record(.windowSelection(.rejected))
+#endif
                 startupLogger.error(
                     "Host could not refresh windows during selection; keeping the session available (error: \(String(describing: error), privacy: .public))"
                 )
@@ -1363,7 +1555,18 @@ actor HostRuntime {
                 ),
                 reason: "viewer-report"
             )
+        case let .sessionState(message):
+            if message.state == .failed || message.state == .stopping {
+#if DEBUG
+                M10HostDiagnosticFileLog.shared.record(.peerTerminal(
+                    message.state == .failed ? .sessionFailed : .sessionStopping
+                ))
+#endif
+            }
         case .close:
+#if DEBUG
+            M10HostDiagnosticFileLog.shared.record(.peerTerminal(.close))
+#endif
             scheduleTeardown(session: session)
         default:
             break
@@ -1460,16 +1663,19 @@ actor HostRuntime {
         generation: UInt64,
         session: SessionCoordinator
     ) async throws {
-
         await stopVideoPipeline()
-        try await captureSession.start(windowIdentifier: window.identifier)
+#if DEBUG
+        M10HostVideoDiagnostics.shared.beginWindow()
+#endif
+        captureRecoveryStatusActive = false
+        try await captureSession.start(window: window)
         let captureSnapshot = await captureSession.snapshot()
         // CaptureCore owns its internal engine generation. It advances that
         // value on every restart, including a same-session window switch. The
         // wire generation remains the advertised WindowList generation and is
         // intentionally validated separately above.
         guard case .capturing = captureSnapshot.state,
-              captureSnapshot.selectedWindow?.identifier == window.identifier,
+              captureSnapshot.selectedWindow?.hasSameOwner(as: window) == true,
               let selected = captureSnapshot.selectedWindow,
               let dimensions = captureSnapshot.outputDimensions else {
             throw HostRuntimeError.staleWindowGeneration
@@ -1478,15 +1684,17 @@ actor HostRuntime {
         let negotiatedCapabilities = (await session.snapshot()).negotiatedCapabilities
         let negotiatedInput = negotiatedCapabilities.intersection(Self.inputCapabilities)
         let processControlNegotiated = negotiatedCapabilities.contains(.backgroundControl)
-        let permission = await MainActor.run {
-            let current = CoreGraphicsAccessibilityContextProvider.currentPermissionState()
-            guard !negotiatedInput.isEmpty, current != .authorized else {
-                return current
-            }
+        let currentPermission = CoreGraphicsAccessibilityContextProvider.currentPermissionState()
+        let permission: HostInputPermissionState
+        if !negotiatedInput.isEmpty, currentPermission != .authorized {
             // Ask only after a Viewer has negotiated input and the operator has
             // selected a Host window. The signed Host bundle owns the TCC
             // request; a view-only session never receives this prompt.
-            return CoreGraphicsAccessibilityContextProvider.requestPermission()
+            permission = await MainActor.run {
+                CoreGraphicsAccessibilityContextProvider.requestPermission()
+            }
+        } else {
+            permission = currentPermission
         }
         // Authorize only the capabilities both endpoints negotiated. A Viewer
         // may intentionally omit optional input or clipboard support; that
@@ -1500,13 +1708,14 @@ actor HostRuntime {
         } else if !authorizedCapabilities.contains(.keyboardInput) {
             authorizedCapabilities.remove(.inputSourceSync)
         }
-        if !clipboardOptedInForSession {
+        if !clipboardAuthorizedForSession {
             authorizedCapabilities.remove(.textClipboard)
         }
 
-        // This path is entered only for an explicit Viewer window selection.
-        // P6 uses its separately granted process-targeted path and never
-        // causes the selected app to be brought to the front.
+        // P6 keeps the selected app in its current activation state and relies
+        // on Host-accepted pairing, negotiated P6, and the existing
+        // process-target safety checks. Peers without P6 keep the established
+        // explicit-selection foreground handoff.
         let didForegroundSelectedApplication = processControlNegotiated
             ? false
             : await bringSelectedApplicationToForeground(selected)
@@ -1516,7 +1725,12 @@ actor HostRuntime {
             )
         }
 
-        try await session.authorize(windowGeneration: generation, capabilities: authorizedCapabilities)
+        try await authorizeSession(
+            session,
+            source: .windowSelection,
+            windowGeneration: generation,
+            capabilities: authorizedCapabilities
+        )
         selectedWindow = selected
         selectedWindowGeneration = generation
         publish(
@@ -1543,8 +1757,27 @@ actor HostRuntime {
         )
         stateStore.update(session: await session.snapshot())
 
-        if clipboardOptedInForSession {
-            try await inputRuntime?.setClipboardEnabled(true)
+        if clipboardAuthorizedForSession,
+           authorizedCapabilities.contains(.textClipboard) {
+            do {
+                try await inputRuntime?.setClipboardEnabled(true)
+            } catch {
+                // Text clipboard is optional. A bridge failure must not turn
+                // an accepted window selection into a video/session failure.
+                clipboardAuthorizedForSession = false
+                try? await inputRuntime?.setClipboardEnabled(false)
+                authorizedCapabilities.remove(.textClipboard)
+                try await authorizeSession(
+                    session,
+                    source: .clipboardFallback,
+                    windowGeneration: generation,
+                    capabilities: authorizedCapabilities
+                )
+                stateStore.update(session: await session.snapshot())
+                startupLogger.error(
+                    "Host clipboard bridge is unavailable; continuing without text clipboard"
+                )
+            }
         }
 
         // `dimensions` is the pixel size the capture engine was configured
@@ -1583,7 +1816,7 @@ actor HostRuntime {
         // Announce that the selection succeeded before sending a refreshed
         // catalog. The Viewer can then distinguish a genuine stream start
         // from a catalog refresh rejecting an out-of-date picker selection.
-        let refreshedWindows = try await captureSession.discoverWindows()
+        let refreshedWindows = try await discoverWindowsForRuntime()
         _ = try await publishWindowCatalog(refreshedWindows, to: session, force: true)
 
         let frames = captureSession.frames
@@ -1597,6 +1830,11 @@ actor HostRuntime {
                     relayFrame,
                     droppedFrameObserved: relay.takeDroppedFrame()
                 )
+                if !decision.shouldSend {
+#if DEBUG
+                    M10HostVideoDiagnostics.shared.recordDropped()
+#endif
+                }
                 if decision.requestKeyframe {
                     await self?.requestKeyframe()
                 }
@@ -1614,6 +1852,9 @@ actor HostRuntime {
             do {
                 for try await frame in frames {
                     guard !Task.isCancelled, let encoder else { return }
+#if DEBUG
+                    M10HostVideoDiagnostics.shared.recordCaptured()
+#endif
                     let requested = await self?.consumeKeyframeRequest() ?? false
                     let forceKeyframe = requested || framesSinceKeyframe >= 60
                     do {
@@ -1623,11 +1864,23 @@ actor HostRuntime {
                             presentationTimestamp: frame.presentationTimestamp,
                             forceKeyframe: forceKeyframe,
                             completion: { result in
+#if DEBUG
+                                switch result {
+                                case .success:
+                                    M10HostVideoDiagnostics.shared.recordEncoded()
+                                case .failure:
+                                    M10HostVideoDiagnostics.shared.recordEncodeFailure()
+                                }
+#endif
                                 relay.submit(result)
                             }
                         )
                         framesSinceKeyframe = forceKeyframe ? 0 : framesSinceKeyframe + 1
                     } catch {
+#if DEBUG
+                        M10HostVideoDiagnostics.shared.recordEncodeFailure()
+                        M10HostVideoDiagnostics.shared.recordDropped()
+#endif
                         // VideoToolbox queue pressure is handled by dropping
                         // the frame; the bounded CaptureCore stream provides
                         // the next opportunity for a keyframe.
@@ -1641,67 +1894,6 @@ actor HostRuntime {
             }
         }
 
-        // Clipboard sync is optional. Presenting its consent sheet must never
-        // hold up the selected-window video path: authorize and stream the
-        // picture first, then apply clipboard permission independently.
-        if negotiatedCapabilities.contains(.textClipboard) {
-            scheduleClipboardConsentPrompt(for: session)
-        }
-    }
-
-    private func scheduleClipboardConsentPrompt(for session: SessionCoordinator) {
-        guard !clipboardConsentPromptedForSession,
-              activeSession === session,
-              let selectedWindow,
-              let selectedWindowGeneration else { return }
-        clipboardConsentPromptedForSession = true
-        clipboardConsentTask = Task { [weak self] in
-            let consented = await HostClipboardPrompt.requestConsent(
-                expiresAt: Date().addingTimeInterval(60),
-                isSessionActive: {
-                    let snapshot = await session.snapshot()
-                    guard snapshot.authorized else { return false }
-                    switch snapshot.state {
-                    case .failed, .stopping, .reconnecting:
-                        return false
-                    default:
-                        return true
-                    }
-                }
-            )
-            await self?.completeClipboardConsent(
-                consented,
-                for: session,
-                selectedWindowAtPrompt: selectedWindow,
-                selectionGenerationAtPrompt: selectedWindowGeneration
-            )
-        }
-    }
-
-    private func completeClipboardConsent(
-        _ consented: Bool,
-        for session: SessionCoordinator,
-        selectedWindowAtPrompt: CaptureWindow,
-        selectionGenerationAtPrompt: UInt64
-    ) async {
-        guard activeSession === session else { return }
-        clipboardConsentTask = nil
-        _ = await restoreSelectedApplicationToForeground(
-            selectedWindowAtPrompt,
-            for: session,
-            requestGeneration: selectionGenerationAtPrompt,
-            requiresHostFrontmost: true
-        )
-        guard activeSession === session else { return }
-        guard consented,
-              (await session.snapshot()).negotiatedCapabilities.contains(.textClipboard) else {
-            return
-        }
-        clipboardOptedInForSession = true
-        // The regular authorization monitor applies the new capability as
-        // soon as the current selection transition has published its generation.
-        guard !selectionTransitionInProgress else { return }
-        await synchronizeInputAuthorization(session)
     }
 
     private func sendEncoded(
@@ -1765,6 +1957,9 @@ actor HostRuntime {
                 expectedAuthorizationGeneration: authorizationGeneration
             )
             if result == .replacedMedia {
+#if DEBUG
+                M10HostVideoDiagnostics.shared.recordDropped()
+#endif
                 keyframeRequested = true
                 // The Host send queue is full: the path cannot carry the
                 // current bitrate.
@@ -1772,6 +1967,10 @@ actor HostRuntime {
                     bitrateController?.recordCongestion(atNanoseconds: DispatchTime.now().uptimeNanoseconds),
                     reason: "host-queue-discard"
                 )
+            } else {
+#if DEBUG
+                M10HostVideoDiagnostics.shared.recordSendQueued()
+#endif
             }
             captureToSendCollector.append(
                 startNanoseconds: frame.captureTimestamp,
@@ -1780,25 +1979,152 @@ actor HostRuntime {
             logCaptureToSendStageIfDue()
         } catch let error as SessionError {
             switch error {
-            case .authorizationChanged, .reconnectRequired:
+            case .authorizationChanged:
                 // This is a normal race with authorization/reconnect. The
                 // next admitted keyframe will rebuild VideoConfig for the
                 // current epoch; do not freeze the capture pipeline.
-                videoConfigSentGeneration = nil
-                videoConfigSentAuthorizationGeneration = nil
-            default:
-                startupLogger.error(
-                    "Host video send failed (generation: \(generation, privacy: .public), error: \(error.description, privacy: .public))"
+                let observedSnapshot = await session.snapshot()
+                guard activeSession === session else { return }
+                resetVideoConfigurationForAuthorizationTransition()
+#if DEBUG
+                recordVideoAuthorizationDenial(
+                    session: session,
+                    reason: M10HostVideoAuthorizationReason.forSessionError(error) ?? .other,
+                    recovered: true,
+                    captured: snapshot,
+                    observed: observedSnapshot
                 )
+#endif
+            case .reconnectRequired:
+                // A stale receive/reconnect lease is distinct from a changed
+                // authorization epoch, though both keep the current recovery
+                // behavior and request a fresh keyframe.
+                let observedSnapshot = await session.snapshot()
+                guard activeSession === session else { return }
+                resetVideoConfigurationForAuthorizationTransition()
+#if DEBUG
+                recordVideoAuthorizationDenial(
+                    session: session,
+                    reason: M10HostVideoAuthorizationReason.forSessionError(error) ?? .other,
+                    recovered: true,
+                    captured: snapshot,
+                    observed: observedSnapshot
+                )
+#endif
+            case let .unauthorizedMessage(messageType)
+                where messageType == .videoConfig || messageType == .videoFrame:
+                let freshSnapshot = await session.snapshot()
+                guard activeSession === session else { return }
+                guard HostRuntimeVideoAuthorizationRecoveryPolicy.shouldRecover(
+                    capturedAuthorizationGeneration: snapshot.authorizationGeneration,
+                    capturedWindowGeneration: snapshot.authorizedWindowGeneration,
+                    capturedAuthorized: snapshot.authorized,
+                    freshAuthorizationGeneration: freshSnapshot.authorizationGeneration,
+                    freshWindowGeneration: freshSnapshot.authorizedWindowGeneration,
+                    freshAuthorized: freshSnapshot.authorized
+                ) else {
+#if DEBUG
+                    let reason = videoAuthorizationDenialReason(
+                        captured: snapshot,
+                        current: freshSnapshot,
+                        expectedWindowGeneration: generation
+                    )
+                    recordVideoAuthorizationDenial(
+                        session: session,
+                        reason: reason,
+                        recovered: false,
+                        captured: snapshot,
+                        observed: freshSnapshot
+                    )
+#endif
+                    startupLogger.error("Host video send stopped after authorization denial")
+                    await stopVideoPipelineIfCurrent(session)
+                    return
+                }
+                resetVideoConfigurationForAuthorizationTransition()
+#if DEBUG
+                let reason = videoAuthorizationDenialReason(
+                    captured: snapshot,
+                    current: freshSnapshot,
+                    expectedWindowGeneration: generation
+                )
+                recordVideoAuthorizationDenial(
+                    session: session,
+                    reason: reason,
+                    recovered: true,
+                    captured: snapshot,
+                    observed: freshSnapshot
+                )
+#endif
+                let messageTypeName = messageType == .videoConfig ? "video_config" : "video_frame"
+                startupLogger.notice(
+                    "Host video authorization changed; pipeline recovery requested type=\(messageTypeName, privacy: .public)"
+                )
+            default:
+#if DEBUG
+                M10HostVideoDiagnostics.shared.recordSendFailure()
+#endif
+                startupLogger.error("Host video send stopped after a fixed session error")
                 await stopVideoPipelineIfCurrent(session)
             }
         } catch {
-            startupLogger.error(
-                "Host video send failed (generation: \(generation, privacy: .public), error: \(String(describing: error), privacy: .public))"
-            )
+#if DEBUG
+            M10HostVideoDiagnostics.shared.recordSendFailure()
+#endif
+            startupLogger.error("Host video send stopped after a fixed send failure")
             await stopVideoPipelineIfCurrent(session)
         }
     }
+
+    private func resetVideoConfigurationForAuthorizationTransition() {
+        videoConfigSentGeneration = nil
+        videoConfigSentAuthorizationGeneration = nil
+        requestKeyframe()
+    }
+
+#if DEBUG
+    private func videoAuthorizationDenialReason(
+        captured: SessionSnapshot,
+        current: SessionSnapshot,
+        expectedWindowGeneration: UInt64
+    ) -> M10HostVideoAuthorizationReason {
+        guard current.authorized else { return .sessionUnauthorized }
+        guard current.authorizedCapabilities.contains(.h264Video) else { return .missingCapability }
+        guard current.authorizedWindowGeneration == expectedWindowGeneration else {
+            return .windowGenerationMismatch
+        }
+        guard captured.receiveGeneration == current.receiveGeneration,
+              captured.reconnectGeneration == current.reconnectGeneration else {
+            return .reconnectRequired
+        }
+        guard captured.authorizationGeneration == current.authorizationGeneration else {
+            return .authorizationChanged
+        }
+        return .other
+    }
+
+    private func recordVideoAuthorizationDenial(
+        session: SessionCoordinator,
+        reason: M10HostVideoAuthorizationReason,
+        recovered: Bool,
+        captured: SessionSnapshot,
+        observed: SessionSnapshot
+    ) {
+        M10HostDiagnosticFileLog.shared.record(
+            .videoAuthorizationDenied(
+                reason: reason,
+                recovered: recovered,
+                capturedAuthorizationGeneration: captured.authorizationGeneration,
+                observedAuthorizationGeneration: observed.authorizationGeneration,
+                capturedReconnectGeneration: captured.reconnectGeneration,
+                observedReconnectGeneration: observed.reconnectGeneration,
+                capturedReceiveGeneration: captured.receiveGeneration,
+                observedReceiveGeneration: observed.receiveGeneration
+            ),
+            connectionSequenceOverride: M10HostDiagnosticFileLog.shared.connectionSequence(for: session) ?? 0
+        )
+    }
+#endif
 
     /// Logs only aggregate timing, roughly every ten seconds at 60 fps.
     private func logCaptureToSendStageIfDue() {
@@ -1968,6 +2294,9 @@ actor HostRuntime {
         keyframeRequested = false
         captureToSendCollector.reset()
         bitrateController = nil
+#if DEBUG
+        M10HostVideoDiagnostics.shared.flushPendingWindow()
+#endif
     }
 
     private func stopVideoPipeline() async {
@@ -1985,6 +2314,9 @@ actor HostRuntime {
         keyframeRequested = false
         captureToSendCollector.reset()
         bitrateController = nil
+#if DEBUG
+        M10HostVideoDiagnostics.shared.flushPendingWindow()
+#endif
     }
 
     /// Ends the ordered send path. The send task is cancelled rather than
@@ -2013,6 +2345,186 @@ actor HostRuntime {
         )
     }
 
+    private func discoverWindowsForRuntime() async throws -> [CaptureWindow] {
+#if DEBUG
+        let permission = await captureSession.permissionState()
+        let diagnosticPermission: M10HostScreenRecordingPermission =
+            permission == .authorized ? .authorized : .denied
+        recordDebugScreenRecordingPermission(permission)
+        guard permission == .authorized else {
+            recordDebugWindowCatalog(
+                permission: .denied,
+                outcome: .permissionDenied,
+                counts: ScreenRecordingWindowDiscoveryCounts(
+                    candidates: 0,
+                    eligible: 0,
+                    offScreen: 0,
+                    nonBaseLayer: 0,
+                    missingApplication: 0,
+                    helperApplication: 0,
+                    invalidWindow: 0
+                )
+            )
+            throw CaptureCoreError.permissionDenied
+        }
+
+        do {
+            let result = try await windowProvider.discoverWindowsWithDiagnostics()
+            let outcome: M10HostDiscoveryOutcome
+            if result.counts.eligible > 0 {
+                outcome = .eligibleWindows
+            } else if result.counts.candidates == 0 {
+                outcome = .noCandidates
+            } else {
+                outcome = .allCandidatesFiltered
+            }
+            recordDebugWindowCatalog(
+                permission: diagnosticPermission,
+                outcome: outcome,
+                counts: result.counts
+            )
+            return result.windows
+        } catch {
+            let latestPermission = await captureSession.permissionState()
+            let permissionWasDenied = latestPermission != .authorized
+            recordDebugScreenRecordingPermission(latestPermission)
+            recordDebugWindowCatalog(
+                permission: permissionWasDenied ? .denied : diagnosticPermission,
+                outcome: permissionWasDenied ? .permissionDenied : .providerError,
+                counts: ScreenRecordingWindowDiscoveryCounts(
+                    candidates: 0,
+                    eligible: 0,
+                    offScreen: 0,
+                    nonBaseLayer: 0,
+                    missingApplication: 0,
+                    helperApplication: 0,
+                    invalidWindow: 0
+                )
+            )
+            throw error
+        }
+#else
+        return try await captureSession.discoverWindows()
+#endif
+    }
+
+    private func recordDebugSessionState(_ snapshot: SessionSnapshot) {
+#if DEBUG
+        let state: M10HostSessionState
+        switch snapshot.state {
+        case .discovered: state = .discovered
+        case .connecting: state = .connecting
+        case .authenticated: state = .authenticated
+        case .pairingRequired: state = .pairingRequired
+        case .trusted: state = .trusted
+        case .capabilitiesNegotiated: state = .capabilitiesNegotiated
+        case .windowSelectionAuthorized: state = .windowSelectionAuthorized
+        case .streaming: state = .streaming
+        case .stopping: state = .stopping
+        case .reconnecting: state = .reconnecting
+        case .failed: state = .failed
+        }
+        let value = M10HostSessionDiagnosticSnapshot(
+            state: state,
+            authorized: snapshot.authorized,
+            windowAuthorized: snapshot.authorizedWindowGeneration != nil,
+            videoCapability: snapshot.authorizedCapabilities.contains(.h264Video),
+            mouseCapability: snapshot.authorizedCapabilities.contains(.mouseInput),
+            keyboardCapability: snapshot.authorizedCapabilities.contains(.keyboardInput),
+            windowSelectionCapability: snapshot.authorizedCapabilities.contains(.windowSelection),
+            clipboardCapability: snapshot.authorizedCapabilities.contains(.textClipboard),
+            backgroundControlCapability: snapshot.authorizedCapabilities.contains(.backgroundControl)
+        )
+        guard lastDebugSessionState != value else { return }
+        lastDebugSessionState = value
+        M10HostDiagnosticFileLog.shared.record(
+            .sessionState(
+                state: value.state,
+                authorized: value.authorized,
+                windowAuthorized: value.windowAuthorized,
+                videoCapability: value.videoCapability,
+                mouseCapability: value.mouseCapability,
+                keyboardCapability: value.keyboardCapability,
+                windowSelectionCapability: value.windowSelectionCapability,
+                clipboardCapability: value.clipboardCapability,
+                backgroundControlCapability: value.backgroundControlCapability
+            )
+        )
+#endif
+    }
+
+    private func recordDebugInputReadiness(_ status: HostInputStatus) {
+#if DEBUG
+        let state: M10HostInputReadiness
+        switch status {
+        case .ready: state = .ready
+        case .backgroundTargetReady: state = .backgroundTargetReady
+        case .inputStateCleanupPending: state = .cleanupPending
+        case .sessionUnauthorized: state = .sessionUnauthorized
+        case .selectionUnavailable: state = .selectionUnavailable
+        case .capabilityUnavailable: state = .capabilityUnavailable
+        case .permissionUnavailable: state = .permissionUnavailable
+        case .focusUnavailable: state = .focusUnavailable
+        }
+        guard lastDebugInputReadiness != state else { return }
+        lastDebugInputReadiness = state
+        M10HostDiagnosticFileLog.shared.record(.inputReadiness(state))
+#endif
+    }
+
+    private func recordDebugScreenRecordingPermission(_ permission: CapturePermissionState) {
+#if DEBUG
+        let state: M10HostScreenRecordingPermission =
+            permission == .authorized ? .authorized : .denied
+        guard lastDebugScreenRecordingPermission != state else { return }
+        lastDebugScreenRecordingPermission = state
+        M10HostDiagnosticFileLog.shared.record(.screenRecordingPermission(state))
+#endif
+    }
+
+#if DEBUG
+    private func recordDebugSessionFailure(_ error: SessionError?) {
+        guard let error else { return }
+        M10HostDiagnosticFileLog.shared.record(.sessionFailure(error.failureCategory))
+        if let terminationClass = error.transportTerminationClass {
+            M10HostDiagnosticFileLog.shared.record(.transportTermination(terminationClass))
+        }
+    }
+
+    private func recordDebugWindowCatalog(
+        permission: M10HostScreenRecordingPermission,
+        outcome: M10HostDiscoveryOutcome,
+        counts: ScreenRecordingWindowDiscoveryCounts
+    ) {
+        let value = M10HostWindowCatalogDiagnosticSnapshot(
+            permission: permission,
+            outcome: outcome,
+            candidates: counts.candidates,
+            eligible: counts.eligible,
+            offScreen: counts.offScreen,
+            nonBaseLayer: counts.nonBaseLayer,
+            missingApplication: counts.missingApplication,
+            helperApplication: counts.helperApplication,
+            invalidWindow: counts.invalidWindow
+        )
+        guard lastDebugWindowCatalog != value else { return }
+        lastDebugWindowCatalog = value
+        M10HostDiagnosticFileLog.shared.record(
+            .windowCatalog(
+                permission: value.permission,
+                outcome: value.outcome,
+                candidates: value.candidates,
+                eligible: value.eligible,
+                offScreen: value.offScreen,
+                nonBaseLayer: value.nonBaseLayer,
+                missingApplication: value.missingApplication,
+                helperApplication: value.helperApplication,
+                invalidWindow: value.invalidWindow
+            )
+        )
+    }
+#endif
+
     /// Publishes a catalog snapshot and returns whether a wire message was
     /// sent. The catalog generation is advanced before the await so a queued
     /// selection from the previous snapshot fails closed while the new list is
@@ -2023,6 +2535,12 @@ actor HostRuntime {
         to session: SessionCoordinator,
         force: Bool = false
     ) async throws -> Bool {
+        guard HostRuntimeWindowCatalogPolicy.shouldPublish(
+            windows,
+            preserving: selectedWindow
+        ) else {
+            return false
+        }
         let changed = advertisedWindowCatalogGeneration == 0 || windows != advertisedWindows
         guard changed || force else { return false }
 
@@ -2041,6 +2559,9 @@ actor HostRuntime {
             catalogGeneration: advertisedWindowCatalogGeneration
         )
         try await session.send(.windowList(message))
+#if DEBUG
+        M10HostDiagnosticFileLog.shared.record(.windowCatalogPublished(eligibleCount: UInt64(windows.count)))
+#endif
         return true
     }
 }

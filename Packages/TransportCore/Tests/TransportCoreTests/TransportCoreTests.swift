@@ -24,6 +24,71 @@ final class TransportCoreTests: XCTestCase {
         XCTAssertEqual(TransportCoreModule.name, "TransportCore")
     }
 
+    func testKeyframeAdmissionPurgesMultipleQueuedKeyframesAndDeltas() throws {
+        struct QueuedItem {
+            let id: Int
+            let kind: KeyframeAwareMediaAdmission.Kind
+            let isMedia: Bool
+        }
+
+        var admission = KeyframeAwareMediaAdmission()
+        var queue = [
+            QueuedItem(id: 1, kind: .keyframe, isMedia: true),
+            QueuedItem(id: 2, kind: .deltaFrame, isMedia: true),
+            QueuedItem(id: 3, kind: .keyframe, isMedia: true),
+            QueuedItem(id: 4, kind: .control, isMedia: false)
+        ]
+
+        let decision = try admission.admit(
+            .keyframe,
+            into: &queue,
+            maxMediaCount: 3,
+            isMedia: \.isMedia,
+            kindOf: \.kind
+        )
+
+        XCTAssertTrue(decision.admitIncoming)
+        XCTAssertFalse(decision.awaitingKeyframe)
+        queue.append(QueuedItem(id: 5, kind: .keyframe, isMedia: true))
+        XCTAssertEqual(queue.map(\.id), [4, 5])
+    }
+
+    func testSessionFailureCategoriesDiscardAssociatedValuesAndClassifyTransportTermination() {
+        let privateDetail = "/Users/private/clipboard-window-title: transport detail"
+        let cases: [(SessionError, SessionFailureCategory)] = [
+            (.invalidState(.connecting), .invalidState),
+            (.peerRoleMismatch, .peerRoleMismatch),
+            (.unsupportedVersion, .unsupportedVersion),
+            (.mandatoryCapabilityMissing(.h264Video), .mandatoryCapabilityMissing),
+            (.pairingRequired, .pairingRequired),
+            (.pairingDenied, .pairingDenied),
+            (.pairingFailed, .pairingFailed),
+            (.unauthorizedMessage(.hello), .unauthorizedMessage),
+            (.replayDetected, .replayDetected),
+            (.authorizationWindowGenerationRequired, .authorizationWindowGenerationRequired),
+            (.handshakeTimeout, .handshakeTimeout),
+            (.heartbeatTimeout, .heartbeatTimeout),
+            (.authorizationReceiptTimeout, .authorizationReceiptTimeout),
+            (.reconnectRequired, .reconnectRequired),
+            (.authorizationChanged, .authorizationChanged),
+            (.incomingMessageBackpressure(.control), .incomingMessageBackpressure),
+            (.videoBoundsExceeded, .videoBoundsExceeded),
+            (.transportEOF, .transportEOF),
+            (.transportFailure(privateDetail), .transportFailure)
+        ]
+
+        for (error, expectedCategory) in cases {
+            XCTAssertEqual(error.failureCategory, expectedCategory)
+            XCTAssertFalse(error.failureCategory.rawValue.contains(privateDetail))
+        }
+        XCTAssertEqual(SessionError.transportEOF.transportTerminationClass, .endOfStream)
+        XCTAssertEqual(
+            SessionError.transportFailure(privateDetail).transportTerminationClass,
+            .failure
+        )
+        XCTAssertNil(SessionError.heartbeatTimeout.transportTerminationClass)
+    }
+
     func testInMemoryBonjourDiscoveryPublishesReadinessSeparatelyFromResults() async {
         let discovery = InMemoryBonjourDiscovery()
         var stateIterator = discovery.stateUpdates.makeAsyncIterator()
@@ -123,26 +188,134 @@ final class TransportCoreTests: XCTestCase {
         XCTAssertNil(emptyDequeued)
     }
 
-    func testBoundedQueueFailsExplicitlyWhenRequiredMediaHasNoRoom() async throws {
-        let queue = try BoundedFrameQueue(maxControlFrames: 1, maxMediaFrames: 1)
+    func testBoundedQueueNewestKeyframeSupersedesQueuedFramesAtCapacity() async throws {
+        let queue = try BoundedFrameQueue(maxControlFrames: 1, maxMediaFrames: 3)
+        let control = try Envelope(
+            channel: .control,
+            messageType: .ping,
+            sequence: 0,
+            timestamp: 0
+        )
         let firstKeyframe = try makeVideoEnvelope(sequence: 0, keyframe: true)
-        let secondKeyframe = try makeVideoEnvelope(sequence: 1, keyframe: true)
-        let delta = try makeVideoEnvelope(sequence: 2, keyframe: false)
+        let firstDelta = try makeVideoEnvelope(sequence: 1, keyframe: false)
+        let secondDelta = try makeVideoEnvelope(sequence: 2, keyframe: false)
+        let newestKeyframe = try makeVideoEnvelope(sequence: 3, keyframe: true)
 
-        let firstResult = try await queue.enqueue(firstKeyframe)
-        XCTAssertEqual(firstResult, .queued)
+        _ = try await queue.enqueue(control)
+        _ = try await queue.enqueue(firstKeyframe)
+        _ = try await queue.enqueue(firstDelta)
+        _ = try await queue.enqueue(secondDelta)
+        let fullCounts = await queue.counts()
+        XCTAssertEqual(fullCounts.media, 3)
+
+        let result = try await queue.enqueue(newestKeyframe)
+        XCTAssertEqual(result, .queued)
+        let counts = await queue.counts()
+        XCTAssertEqual(counts.control, 1)
+        XCTAssertEqual(counts.media, 1)
+        let dequeuedControl = await queue.dequeue()
+        let dequeuedKeyframe = await queue.dequeue()
+        let emptyDequeued = await queue.dequeue()
+        XCTAssertEqual(dequeuedControl, control)
+        XCTAssertEqual(dequeuedKeyframe, newestKeyframe)
+        XCTAssertNil(emptyDequeued)
+    }
+
+    func testBoundedQueuePreservesAwaitingKeyframeWhenRequiredMediaBlocksAdmission() async throws {
+        let queue = try BoundedFrameQueue(maxControlFrames: 1, maxMediaFrames: 1)
+        let videoConfig = try Envelope(
+            message: .videoConfig(
+                VideoConfigMessage(generation: 9, decoderConfiguration: Data([0x01]))
+            ),
+            sequence: 0,
+            timestamp: 0
+        )
+        let rejectedKeyframe = try makeVideoEnvelope(sequence: 1, keyframe: true)
+        let delta = try makeVideoEnvelope(sequence: 2, keyframe: false)
+        let recoveryKeyframe = try makeVideoEnvelope(sequence: 3, keyframe: true)
+
+        _ = try await queue.enqueue(videoConfig)
         do {
-            _ = try await queue.enqueue(secondKeyframe)
-            XCTFail("a keyframe must not evict another keyframe")
+            _ = try await queue.enqueue(rejectedKeyframe)
+            XCTFail("a keyframe must not evict required video configuration")
         } catch TransportError.mediaBackpressure {
-            // Expected.
+            // Expected: the required configuration owns the only media slot.
         }
-        // The rejected keyframe cannot be referenced, so later delta frames
-        // are skipped even after room becomes available.
-        _ = await queue.dequeue()
+
+        let dequeuedConfig = await queue.dequeue()
+        XCTAssertEqual(dequeuedConfig, videoConfig)
         let deltaResult = try await queue.enqueue(delta)
         XCTAssertEqual(deltaResult, .discardedMedia)
-        let emptyDequeued = await queue.dequeue()
+        let recoveryResult = try await queue.enqueue(recoveryKeyframe)
+        XCTAssertEqual(recoveryResult, .queued)
+        let dequeuedKeyframe = await queue.dequeue()
+        XCTAssertEqual(dequeuedKeyframe, recoveryKeyframe)
+    }
+
+    func testIncomingEnvelopeStreamAcceptsNewestKeyframeAtMediaCapacity() async throws {
+        let incoming = try EnvelopeStream.makeBounded(maxControlFrames: 1, maxMediaFrames: 3)
+        let control = try Envelope(
+            channel: .control,
+            messageType: .ping,
+            sequence: 0,
+            timestamp: 0
+        )
+        let firstKeyframe = try makeVideoEnvelope(sequence: 0, keyframe: true)
+        let firstDelta = try makeVideoEnvelope(sequence: 1, keyframe: false)
+        let secondDelta = try makeVideoEnvelope(sequence: 2, keyframe: false)
+        let newestKeyframe = try makeVideoEnvelope(sequence: 3, keyframe: true)
+
+        XCTAssertEqual(try incoming.storage.yield(control), .queued)
+        XCTAssertEqual(try incoming.storage.yield(firstKeyframe), .queued)
+        XCTAssertEqual(try incoming.storage.yield(firstDelta), .queued)
+        XCTAssertEqual(try incoming.storage.yield(secondDelta), .queued)
+        XCTAssertEqual(try incoming.storage.yield(newestKeyframe), .queued)
+        incoming.storage.finish()
+
+        var iterator = incoming.stream.makeAsyncIterator()
+        let dequeuedControl = try await iterator.next()
+        let dequeuedKeyframe = try await iterator.next()
+        let emptyDequeued = try await iterator.next()
+        XCTAssertEqual(dequeuedControl, control)
+        XCTAssertEqual(dequeuedKeyframe, newestKeyframe)
+        XCTAssertNil(emptyDequeued)
+    }
+
+    func testMessageStreamAcceptsNewestKeyframeAtMediaCapacity() async throws {
+        let output = try MessageStream.makeBounded(maxControlMessages: 1, maxMediaMessages: 3)
+        func videoMessage(sequence: UInt64, keyframe: Bool) -> MessagePayload {
+            .videoFrame(
+                VideoFrameMessage(
+                    generation: 9,
+                    captureTimestamp: sequence,
+                    presentationTimestamp: sequence,
+                    width: 1,
+                    height: 1,
+                    keyframe: keyframe,
+                    accessUnit: Data([UInt8(sequence & 0xFF)])
+                )
+            )
+        }
+
+        let control = MessagePayload.ping(PingMessage(nonce: 1))
+        let firstKeyframe = videoMessage(sequence: 0, keyframe: true)
+        let firstDelta = videoMessage(sequence: 1, keyframe: false)
+        let secondDelta = videoMessage(sequence: 2, keyframe: false)
+        let newestKeyframe = videoMessage(sequence: 3, keyframe: true)
+
+        XCTAssertEqual(try output.storage.yield(control), .queued)
+        XCTAssertEqual(try output.storage.yield(firstKeyframe), .queued)
+        XCTAssertEqual(try output.storage.yield(firstDelta), .queued)
+        XCTAssertEqual(try output.storage.yield(secondDelta), .queued)
+        XCTAssertEqual(try output.storage.yield(newestKeyframe), .queued)
+        output.storage.finish()
+
+        var iterator = output.stream.makeAsyncIterator()
+        let dequeuedControl = try await iterator.next()
+        let dequeuedKeyframe = try await iterator.next()
+        let emptyDequeued = try await iterator.next()
+        XCTAssertEqual(dequeuedControl, control)
+        XCTAssertEqual(dequeuedKeyframe, newestKeyframe)
         XCTAssertNil(emptyDequeued)
     }
 
@@ -1633,15 +1806,17 @@ final class TransportCoreTests: XCTestCase {
             await Task.yield()
         }
 
-        let authorizeTask = Task { () -> String? in
+        let authorizeTask = Task<SessionError?, Never> {
             do {
                 try await host.authorize(
                     windowGeneration: 11,
                     capabilities: [.windowSelection]
                 )
                 return nil
+            } catch let error as SessionError {
+                return error
             } catch {
-                return String(describing: error)
+                return .transportFailure(String(describing: error))
             }
         }
         XCTAssertEqual(
@@ -1685,7 +1860,10 @@ final class TransportCoreTests: XCTestCase {
         let authorizationError = await authorizeTask.value
         let reconnectError = await reconnectTask.value
         let reconnectedHostError = await reconnectedHostStart.value
-        XCTAssertNil(authorizationError)
+        XCTAssertTrue(
+            authorizationError == nil || authorizationError == .reconnectRequired,
+            "the request may finish on the old session before reconnect, or fail as stale"
+        )
         XCTAssertNil(reconnectError)
         XCTAssertNil(reconnectedHostError)
         for _ in 0 ..< 100 {
@@ -1775,21 +1953,100 @@ final class TransportCoreTests: XCTestCase {
             oldAuthorizationGeneration
         )
 
+        let staleObservation = SessionInputSendObservation()
         do {
-            try await viewer.sendInput(input, using: oldAdmission)
+            try await viewer.sendInput(
+                input,
+                using: oldAdmission,
+                observation: staleObservation
+            )
             XCTFail("an input admission from the previous authorization epoch must be rejected")
         } catch SessionError.authorizationChanged {
             // Expected: the old record cannot enter the reauthorized session.
         }
+        XCTAssertEqual(staleObservation.state, .notStarted)
         XCTAssertEqual(host.incomingMessages.storage.counts().control, 0)
 
         let freshAdmission = try await viewer.makeInputAdmission(for: input)
-        try await viewer.sendInput(input, using: freshAdmission)
+        let freshObservation = SessionInputSendObservation()
+        try await viewer.sendInput(
+            input,
+            using: freshAdmission,
+            observation: freshObservation
+        )
+        XCTAssertEqual(freshObservation.state, .transportSendStarted)
         for _ in 0 ..< 100 {
             if host.incomingMessages.storage.counts().control == 1 { break }
             await Task.yield()
         }
         XCTAssertEqual(host.incomingMessages.storage.counts().control, 1)
+
+        await host.stop()
+        await viewer.stop()
+    }
+
+    func testInputSendObservationMarksTransportBoundaryBeforeTransportFailure() async throws {
+        let hostIdentity = try PeerIdentity(publicKeyRepresentation: Data("host-input-send-boundary".utf8))
+        let viewerIdentity = try PeerIdentity(publicKeyRepresentation: Data("viewer-input-send-boundary".utf8))
+        let pair = InMemoryTransport.makePair(
+            firstAuthentication: .trusted(viewerIdentity),
+            secondAuthentication: .trusted(hostIdentity)
+        )
+        let failingViewerTransport = FailingInputTransport(base: pair.second)
+
+        let capabilities: Set<Capability> = [.pingPong, .mouseInput]
+        let host = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .host,
+                implementationIdentifier: "input-send-boundary-host",
+                capabilities: capabilities
+            ),
+            transport: pair.first
+        )
+        let viewer = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .viewer,
+                implementationIdentifier: "input-send-boundary-viewer",
+                capabilities: capabilities
+            ),
+            transport: failingViewerTransport
+        )
+
+        async let hostStart: Void = host.start()
+        async let viewerStart: Void = viewer.start()
+        try await hostStart
+        try await viewerStart
+        for _ in 0 ..< 100 {
+            if (await host.snapshot()).state == .capabilitiesNegotiated,
+               (await viewer.snapshot()).state == .capabilitiesNegotiated {
+                break
+            }
+            await Task.yield()
+        }
+
+        try await host.authorize(windowGeneration: 29, capabilities: [.mouseInput])
+        for _ in 0 ..< 100 {
+            if (await viewer.snapshot()).authorized { break }
+            await Task.yield()
+        }
+
+        let input = InputEventMessage(
+            kind: .pointerMove,
+            windowGeneration: 29,
+            x: 12,
+            y: 34
+        )
+        let admission = try await viewer.makeInputAdmission(for: input)
+        let observation = SessionInputSendObservation()
+        do {
+            try await viewer.sendInput(input, using: admission, observation: observation)
+            XCTFail("the test transport must fail the input send")
+        } catch SessionError.transportFailure {
+            // The injected transport failure happened after send began.
+        }
+
+        XCTAssertEqual(failingViewerTransport.failedInputCount, 1)
+        XCTAssertEqual(observation.state, .transportSendStarted)
 
         await host.stop()
         await viewer.stop()
@@ -1896,7 +2153,7 @@ final class TransportCoreTests: XCTestCase {
         await viewer.stop()
     }
 
-    func testStaleRevokeFailureCannotFailAReauthorizedSession() async throws {
+    func testFailedRevocationBlocksReauthorizationFromOvertakingTransition() async throws {
         let hostIdentity = try PeerIdentity(publicKeyRepresentation: Data("host-revoke-race".utf8))
         let viewerIdentity = try PeerIdentity(publicKeyRepresentation: Data("viewer-revoke-race".utf8))
         let pair = InMemoryTransport.makePair(
@@ -1956,9 +2213,9 @@ final class TransportCoreTests: XCTestCase {
             "the test must hold the revoke notification before reauthorization"
         )
 
-        // revokeAuthorization has already invalidated the old epoch. This
-        // call captures the new epoch while the stale revoke send is blocked;
-        // the subsequent stale fail must not close it.
+        // The auth transition lock keeps reauthorization behind this unresolved
+        // revoke. If its notification fails, the session must fail closed
+        // instead of allowing a newer authorization to overtake it.
         let reauthorizeTask = Task { () -> Bool in
             do {
                 try await host.authorize(windowGeneration: 41, capabilities: [.mouseInput])
@@ -1975,11 +2232,11 @@ final class TransportCoreTests: XCTestCase {
         let revokeFailed = await revokeTask.value
         let reauthorized = await reauthorizeTask.value
         XCTAssertTrue(revokeFailed)
-        XCTAssertTrue(reauthorized)
+        XCTAssertFalse(reauthorized)
         let snapshot = await host.snapshot()
-        XCTAssertEqual(snapshot.state, .windowSelectionAuthorized)
-        XCTAssertTrue(snapshot.authorized)
-        XCTAssertEqual(snapshot.authorizedWindowGeneration, 41)
+        XCTAssertEqual(snapshot.state, .failed)
+        XCTAssertFalse(snapshot.authorized)
+        XCTAssertNil(snapshot.authorizedWindowGeneration)
 
         await host.stop()
         await viewer.stop()
@@ -2379,7 +2636,7 @@ final class TransportCoreTests: XCTestCase {
     private func isPairingTimeoutFailure(_ error: SessionError?) -> Bool {
         guard let error else { return false }
         switch error {
-        case .pairingFailed, .transportFailure:
+        case .pairingFailed, .transportFailure, .transportEOF:
             return true
         default:
             return false
@@ -3156,6 +3413,57 @@ final class TransportCoreTests: XCTestCase {
             maxControlFrames: maxControlFrames,
             maxMediaFrames: maxMediaFrames
         )
+    }
+}
+
+private final class FailingInputTransport: SessionTransport, @unchecked Sendable {
+    let incoming: EnvelopeStream
+
+    private let base: InMemoryTransport
+    private let lock = NSLock()
+    private var didFailInput = false
+    private var storedFailedInputCount = 0
+
+    init(base: InMemoryTransport) {
+        self.base = base
+        self.incoming = base.incoming
+    }
+
+    var failedInputCount: Int {
+        lock.withLock { storedFailedInputCount }
+    }
+
+    func start() async throws {
+        try await base.start()
+    }
+
+    func send(_ envelope: Envelope) async throws -> TransportSendResult {
+        let shouldFail = lock.withLock {
+            guard envelope.messageType == .inputEvent, !didFailInput else { return false }
+            didFailInput = true
+            storedFailedInputCount += 1
+            return true
+        }
+        if shouldFail {
+            throw TransportError.connectionFailed("injected input send failure")
+        }
+        return try await base.send(envelope)
+    }
+
+    func invalidateProtectedMessages() async {
+        await base.invalidateProtectedMessages()
+    }
+
+    func close() async {
+        await base.close()
+    }
+
+    func authentication() async -> PeerAuthenticationState {
+        await base.authentication()
+    }
+
+    func snapshot() async -> TransportSnapshot {
+        await base.snapshot()
     }
 }
 

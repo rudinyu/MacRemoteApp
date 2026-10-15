@@ -6,7 +6,9 @@ M6 adds the Host-side input boundary for the typed M5 event model. The
 implementation is complete for deterministic package and composition tests.
 Actual OS event posting remains an explicit manual evidence step because it
 requires local PostEvent access and can affect the selected test
-application. No M7 clipboard behavior is included.
+application. The negotiated P6 extension permits Host-authorized process-target
+input while the selected app is inactive; legacy peers retain the foreground
+path. No M7 clipboard behavior is included.
 
 ## Ownership
 
@@ -61,10 +63,15 @@ authenticated and authorized session
   AND authorized selected-window generation matches
   AND exact selected target still exists with valid geometry and layer 0
   AND selected target identity, owner, and process still match
-  AND NSWorkspace.frontmostApplication PID matches the selected process
-  AND top regular layer-0 WindowServer window belongs to the selected PID and bundle
-      (it may have a different window identifier, such as an app-owned sheet)
-  AND no overlapping unresolved layer-0 window can cover the selected target
+  AND (
+        legacy foreground policy:
+          NSWorkspace.frontmostApplication PID matches the selected process
+          AND top regular layer-0 WindowServer window belongs to the selected PID and bundle
+          AND no overlapping unresolved layer-0 window can cover the selected target
+        OR negotiated P6 policy:
+          Host pairing trust, process-control admission, and control generation match
+          AND global and target-process secure-input checks are known safe
+      )
   AND PostEvent permission is authorized
   AND input capability is enabled
   AND event shape, modifier mask, sequence, and rate are valid
@@ -104,30 +111,33 @@ scroll, keyboard, modifier, and focus-intent commands reach the adapter; mouse
 buttons are limited to left, right, and center. Focus intent is an eligibility
 signal and never activates a background window.
 
-The real context provider checks PostEvent permission, optional local
-Accessibility secure-input state, the current on-screen window identity,
-front-to-back window ordering, and console lock state. The adapter repeats the
-complete target/focus/permission check
+The real context provider checks PostEvent permission, the current on-screen
+window identity, front-to-back window ordering, and console lock state. Legacy
+foreground input retains its optional local Accessibility secure-input
+inspection. P6 background input requires Accessibility to establish known-safe
+global and target-process state; unavailable or mismatched inspection blocks
+it. The adapter repeats the complete applicable target/focus/permission check
 immediately before posting a `CGEvent`, then uses target-bound process posting
 so a focus change cannot redirect the event to another frontmost application.
 
-On an explicit Viewer window selection, the Host activates the owning regular
-application. If Accessibility trust is already available, it may use the
-public AX window list and raise action to bring the exact selected window
-forward. Matching uses global point geometry and verifies the local window
-title when available; the title also breaks duplicate-geometry ties. Missing,
-ambiguous, or mismatched candidates are not raised. App activation or AXRaise is never proof of focus: input remains
-blocked until a fresh WindowServer snapshot confirms the exact selected window
-is frontmost. Accessibility remains optional and is not a substitute for
-PostEvent permission.
+On an explicit legacy Viewer window selection, the Host may activate the
+owning regular application. If Accessibility trust is already available, it
+may use the public AX window list and raise action to bring the exact selected
+window forward. Matching uses global point geometry and verifies the local
+window title when available; the title also breaks duplicate-geometry ties.
+Missing, ambiguous, or mismatched candidates are not raised. App activation or
+AXRaise is never proof of focus: legacy input remains blocked until a fresh
+WindowServer snapshot confirms foreground eligibility. P6 does not activate
+the selected app. Accessibility is optional for the legacy foreground path
+and is not a substitute for PostEvent permission.
 
 macOS does not expose a general public secure-input status query. The provider
-therefore reports `unknown` when optional Accessibility inspection is
-unavailable; the independent foreground/window checks still protect the base
-PostEvent path. A detected secure field remains rejected, and an explicit
-local `inactive`/`active` signal is accepted only from a Host-owned provider.
-It never infers secure-input safety from the Viewer or from received event
-data.
+therefore reports `unknown` when Accessibility inspection is unavailable.
+Legacy foreground/window checks still protect the base PostEvent path, while
+P6 background input fails closed on unknown global or target state. A detected
+secure field remains rejected, and an explicit local `inactive`/`active`
+signal is accepted only from a Host-owned provider. It never infers secure-input
+safety from the Viewer or from received event data.
 
 ## Keyboard layouts, dead keys, and input methods
 
@@ -188,9 +198,9 @@ desktop's actual source.
   admission also enforces the configured encoded-payload bound.
 
 The real adapter is not invoked by automated tests. Manual OS verification
-must use a disposable foreground test application, grant PostEvent access to
-the signed Host bundle, confirm pointer/scroll/key behavior, then revoke or
-remove the grant and verify that subsequent events are rejected. Accessibility
-may be granted separately to exercise the optional AX/secure-input enhancement.
-Do not use a
-password field, login window, authentication dialog, or a production app.
+must use a disposable test application, grant PostEvent access to the signed
+Host bundle, and confirm pointer/scroll/key behavior. Test the legacy path with
+the app foreground; test P6 with the app inactive, an accepted Host pairing,
+and known-safe Accessibility inspection. Then revoke the relevant permission
+or unpair the Viewer and verify that subsequent events are rejected. Do not use a password
+field, login window, authentication dialog, or a production app.

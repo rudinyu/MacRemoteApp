@@ -1,18 +1,20 @@
 # MacRemoteApp Development Plan
 
-## Authorized post-V1 P6 work
+## P6 status: active extension; physical acceptance pending
 
-The 2026-10-08 request authorizes completing the existing
-[P6 Host-controlled input extension](P6_BACKGROUND_CONTROL.md), as an explicit
-M6 input-policy extension whose evidence is separate from the V1 M10 gate.
-Its exit criteria are independent local control consent,
-Keychain-backed peer grants, truthful foreground/process-target signals,
-safe process posting without activation, pause/revoke preserving video,
-stale-work invalidation, deterministic regression coverage, and the canonical
-local CI gate. Physical P6 and M10 acceptance remain explicit evidence gaps.
-The same request includes the M9 release-tooling fix to load the shared
-Codex notarization configuration while preserving explicit project overrides;
-it does not authorize a new Apple submission or release.
+[P6 Host-controlled input](P6_BACKGROUND_CONTROL.md) allows a trusted Viewer to
+control the selected app process while it is inactive. Host acceptance of the
+pairing is the durable local authorization; no separate per-session control
+prompt is used. The security contract still requires capability negotiation,
+current target and generation checks, valid permissions and geometry, and
+fail-closed secure-input and console-state checks. Peers without P6 retain the
+foreground-only path. P6 does not authorize locked-screen control.
+
+P6 deterministic implementation checks are part of the current validation;
+physical P6 input/IME acceptance and Intel-Host-to-Apple-Silicon-Viewer M10
+acceptance remain explicit evidence gaps. The current Debug diagnostic
+candidate is for internal reproduction, not a public release. The shared
+notarization adapter remains the release path for authorized artifacts.
 
 ## Plan status
 
@@ -21,12 +23,19 @@ primary outcome, explicit boundaries, exit criteria, and verification work. A
 milestone is complete only when its exit criteria and tests are satisfied or a
 documented exception is explicitly accepted by the user.
 
+The current user-approved M10 integration completes the selected-window
+background stream behavior for P6 and aligns M7 clipboard authorization with
+pairing trust. This exception may update the scope and exit criteria recorded
+below; physical acceptance remains a separate pending gate.
+
 Current milestone state and open evidence gaps are tracked in
 [the status page](STATUS.md).
 
 ## Delivery principles
 
-- Implement one milestone at a time.
+- Keep changes focused on the user goal. When a safety rule conflicts with an
+  authorized core interaction, revise the security contract and the affected
+  acceptance evidence together before shipping the behavior.
 - Read the complete planning package before coding.
 - Keep Host, Viewer, and shared package boundaries explicit.
 - Use test doubles for capture, network, codec, Keychain, and Accessibility
@@ -317,7 +326,7 @@ handling, no clipboard, and no arbitrary serialized `CGEvent` transport.
   backpressure.
 - Manual Viewer test with a local synthetic stream fixture.
 
-## M6 — Host focus-aware input injection
+## M6 — Host foreground and process-target input injection
 
 ### Status
 
@@ -335,55 +344,60 @@ has not been run automatically.
 - Implement Host-side InputCore mapping and the CoreGraphics/Accessibility
   adapter.
 - Require current session authorization, selected-window generation, required
-  permission, and foreground/focus eligibility before each legacy injection.
+  permission, and applicable foreground or negotiated P6 process-target
+  eligibility before each input injection.
   The exact selected target must remain a valid layer-0 window. Foreground
   eligibility requires an active-PID match and a top regular layer-0
   WindowServer window owned by the selected PID and bundle; its identifier
   may differ from the selected window, allowing app-owned sheets or popovers.
   Potentially overlapping unresolved layer-0 windows remain blockers.
-- Limit cooperative foreground activation to explicit legacy window
-  selection on macOS 14 or later. Host must confirm it is frontmost before
-  yielding activation to the target. If that confirmation fails or the API is
-  unavailable, input stays fail-closed and the Viewer asks the Host user to
-  click or reactivate MacRemoteApp Host. Activation does not authorize input,
-  and the separately accepted P6 process-target path never activates the
-  selected app.
+- Limit cooperative foreground activation to explicit window selection on
+  macOS 14 or later. Host must confirm it is frontmost before
+  yielding activation to the target for peers without P6. If that confirmation
+  fails or the API is unavailable, foreground input stays fail-closed and the
+  Viewer asks the Host user to click or reactivate MacRemoteApp Host. Activation
+  does not authorize input. Negotiated P6 instead requires Host-accepted
+  pairing trust and safe process-target checks while the selected app may
+  remain inactive.
 - Add explicit failure states and stop-input behavior for window/focus/
   permission changes.
 
 ### Explicit non-scope
 
-No ungranted background/unfocused control beyond the separately accepted P6
-contract, locked-screen control, secure-input bypass, system
+No arbitrary process control outside the negotiated, Host-authorized P6
+contract; no locked-screen control, secure-input bypass, system
 authentication-dialog automation, or privilege escalation.
 
 ### Exit criteria
 
 - Authorized pointer, button, scroll, keyboard, and modifier events affect
-  only the selected target while its app has eligible foreground state;
-  foreground eligibility includes active-process identity and the layer-0
-  window classifier.
-- Losing permission, focus, window identity, or session state disables/rejects
-  input immediately and visibly.
+  only the selected target. Legacy peers require foreground eligibility;
+  negotiated P6 requires trusted pairing and safe process-target state while
+  allowing the selected app to remain inactive.
+- Losing permission, applicable focus or P6 target safety, window identity, or
+  session state disables/rejects input immediately and visibly.
 - No arbitrary event archive or unvalidated remote event reaches the OS API.
 
 ### Tests and verification
 
 - Unit tests with fake injection adapters and authorization matrices.
 - Manual test against a safe test application for pointer and keyboard events.
-- Tests for permission revocation, focus loss, stale window generation,
-  malformed events, and reconnect.
+- Tests for permission revocation, focus loss, P6 process-target eligibility,
+  stale window generation, malformed events, and reconnect.
 - Verify secure-input and locked-screen scenarios are rejected/documented.
 
 ## M7 — Text clipboard and session UX
 
 ### Scope
 
-- Implement opt-in, text-only clipboard synchronization with bounded UTF-8
-  payloads, origin/generation tracking, acknowledgements, and conflict policy.
+- Implement text-only clipboard synchronization with bounded UTF-8 payloads,
+  origin/generation tracking, acknowledgements, and conflict policy. Host
+  pairing trust enables the negotiated capability automatically; the Viewer
+  retains an explicit session-local opt-in.
 - Complete Host/Viewer session status, permission, pairing, input, clipboard,
   stream, error, stop, and reconnect UX.
-- Add user-facing trust revocation affordance if required by the M2 design.
+- Keep an explicit pairing revocation action that removes the trusted peer and
+  ends its active session.
 
 ### Explicit non-scope
 
@@ -392,8 +406,10 @@ unbounded clipboard history.
 
 ### Exit criteria
 
-- Clipboard sync is disabled by default and clearly enabled/disabled per
-  session.
+- Clipboard sync sends no text until the Viewer operator enables its local
+  session toggle. Host pairing trust authorizes the negotiated Host-side
+  capability without a separate Host dialog, and both sides clearly report
+  enabled/disabled state per session.
 - Text transfers respect size bounds and do not echo indefinitely.
 - Disconnect clears transient transfer state and disables sync/input.
 - UI states accurately distinguish discovered, paired, authenticated,
@@ -517,6 +533,14 @@ macOS Dock/permission behavior on the physical target Macs.
 - Run the complete Intel Host to Apple Silicon Viewer workflow on the same LAN.
 - Validate pairing, one-window selection, 1080p/60 target/fallback, display,
   mouse, keyboard, text clipboard, disconnect/reconnect, and failure UX.
+- Verify selected-window capture continues while its app is inactive or
+  occluded, does not require activation, tolerates transient catalog gaps, and
+  recovers from unexpected stream completion only after revalidating the same
+  window ID, bundle ID, PID, layer, and geometry.
+- Use accepted Host pairing trust as durable input and negotiated Host
+  clipboard authorization across reconnect. Keep Viewer text-clipboard
+  opt-in session-local, and retain all independent input, target, generation,
+  permission, secure-input, lock, and system-authentication-dialog checks.
 - Finalize support matrix, operator documentation, known limitations, and
   release checklist.
 - Validate standard menus, version/build display, same-window Viewer Settings,
@@ -532,8 +556,9 @@ macOS Dock/permission behavior on the physical target Macs.
 
 ### Explicit non-scope
 
-No feature additions beyond the accepted V1 specification. Any new request
-becomes a post-V1 milestone proposal.
+No feature additions beyond the accepted V1 specification and the user-approved
+M10 integration of P6 capture continuity and M7 pairing-trust clipboard policy.
+Any further request becomes a post-V1 milestone proposal.
 
 User-approved M10 exception (2026-10-04): Viewer-led Chinese/English input-source
 following is authorized as a narrow integration fix. Its contract and tests
@@ -564,6 +589,10 @@ other post-V1 capabilities.
 - Repeat acceptance after a clean install and fresh pairing.
 - Test permission denial/revocation, window close/change, LAN interruption,
   stale trust, unsupported capability, clipboard opt-out, and input disable.
+- Deterministically test transient discovery gaps, bounded capture restart,
+  owner-ID reuse rejection, and Host retention of the authenticated session
+  while capture reports recovery. Record physical background-stream checks as
+  pending until the two-Mac run is complete.
 - Run final build/test/security/release validation and archive only sanitized
   evidence.
 - Use `bash scripts/validate.sh` for code changes; it includes AppSupport tests.

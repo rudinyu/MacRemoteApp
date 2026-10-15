@@ -123,6 +123,10 @@ if [[ "${release_root}" =~ ^/+$ ]]; then
     exit 2
 fi
 case "${release_root}" in
+    "${repo_root}/build/debug-diagnostic")
+        echo "The Debug diagnostic channel requires scripts/package-debug-diagnostic-apps.sh" >&2
+        exit 2
+        ;;
     "${repo_root}/build/testing")
         ;;
     "${repo_root}/build/beta"|"${repo_root}/build/rc"|"${repo_root}/build/release")
@@ -150,6 +154,7 @@ case "${repo_root}" in
 esac
 
 artifact_channel="$(macremoteapp_resolve_artifact_channel "${repo_root}" "${release_root}")" || exit 2
+macremoteapp_require_release_channel "${artifact_channel}" || exit 2
 source_release_identity="$(macremoteapp_release_identity \
     "${repo_root}/Resources/Host-Info.plist" \
     "${repo_root}/Resources/Viewer-Info.plist")" || exit 2
