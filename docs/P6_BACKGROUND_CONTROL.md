@@ -3,14 +3,15 @@
 ## Scope and decision
 
 **Status: active opt-in extension; physical acceptance pending.** P6 permits
-the Viewer to keep viewing and control the selected Host app while it is
-inactive, after capability negotiation and Host-local pairing acceptance. It does
-not change the foreground-only behavior for peers without P6, and does not
-permit locked-screen or secure-input control.
+the Viewer to keep viewing the selected Host app while it is inactive, after
+capability negotiation and Host-local pairing acceptance. Before control,
+the Viewer must explicitly select the app and the Host must foreground its
+regular application and confirm its PID is frontmost. P6 does not permit
+inactive-process input, locked-screen control, or secure-input control.
 
-The 2026-10-14 product decision reaffirmed the selected-app workflow and
-updates the earlier foreground-only rule to support the explicitly authorized
-P6 process-target path described below.
+The 2026-10-14 product decision reaffirmed the selected-app workflow. P6 adds
+pairing and control-generation gates while preserving foreground-only input;
+background viewing remains independent of control readiness.
 P6 is an explicit M6 input-policy extension beyond the V1 baseline and does
 not close any physical M10 acceptance row. Other post-V1 features remain
 deferred.
@@ -40,9 +41,10 @@ durable until the Keychain operation succeeds.
 
 ## Control contract
 
-P6 adds process-targeted mouse and keyboard input for an authenticated,
-paired Viewer. Accepting the Host pairing authorizes that Viewer for input;
-negotiating `backgroundControl` alone does not. The Host automatically uses
+P6 adds Host pairing and control-generation gates for mouse and keyboard input
+from an authenticated Viewer. Accepting the Host pairing authorizes that
+Viewer for input; negotiating `backgroundControl` alone does not. Ordinary
+input still requires the selected app to be foreground. The Host automatically uses
 the saved pairing trust on the first and later supported sessions. The Host
 can pause the current session or unpair the Viewer from its menu-bar control
 actions. Pause leaves authenticated video active; unpairing ends that session
@@ -58,12 +60,22 @@ a valid layer-0 window, and the top regular layer-0 WindowServer window
 belongs to the selected PID and bundle. That top window may have a different
 identifier, as with an app-owned sheet or popover. Only layer-0 windows
 participate; nonzero-layer windows are excluded. An overlapping layer-0
-window with an unresolved owner, or a window whose layer metadata is
-missing, keeps foreground eligibility unknown. `focusEligible` may be false
-while a paired and otherwise safe process target is ready.
-Viewer input readiness uses the P6 control state and process-target signal,
-not foreground eligibility, and labels that state as background control while
-the app is inactive.
+window with an unresolved owner, or a window whose layer metadata is missing,
+keeps foreground eligibility unknown. `processTargetEligible` does not
+override `focusEligible`: an inactive selected process cannot make Viewer
+input ready. Viewer input readiness requires active P6 control, a safe live
+target, and foreground eligibility.
+
+The Host verifies exact P6 target identity in addition to `focusEligible`. It
+requires a live full WindowServer record for the exact selected window ID, PID,
+and bundle ID, with layer 0, regular-application identity, and valid geometry.
+Unknown console state, an unavailable frontmost PID, or a missing or
+mismatched target remains fail-closed. Foreground input uses the same optional
+global secure-input signal for P6 and legacy peers; an unknown global signal
+follows the established foreground policy. Known-safe global and
+target-process checks classify an inactive target only for safe cleanup. A
+background-safe process signal can support viewing and cleanup, but cannot
+authorize ordinary input.
 
 Control has its own positive wire generation, independent of the video
 authorization epoch. The Host publishes it in `SessionState`; the Viewer
@@ -72,22 +84,26 @@ advance that generation, so pre-pause messages delayed in TCP cannot become
 fresh input after resume. Legacy peers omit the optional fields and retain
 the foreground-only contract.
 
-Background eligibility requires a known inactive secure-input signal;
-unavailable inspection blocks background control. Legacy foreground input
-retains its existing optional Accessibility inspection policy.
-Viewer-led input-source following remains foreground-only because selecting
-a Host input source changes global state. Background P6 input uses the Host's
+Foreground P6 uses the same optional global secure-input signal as legacy
+foreground input: a detected active state blocks control, while an unknown
+signal follows the established foreground behavior. Known-inactive global and
+target-process secure-input signals are required only to classify an inactive
+target for safe cleanup; unavailable inspection blocks that cleanup. It never
+admits ordinary input while the app is inactive. Viewer-led input-source following remains foreground-only
+because selecting a Host input source changes global state. P6 uses the Host's
 current source and requires manual source matching; it must not switch the
 source of another foreground application.
 
-Process targeting does not activate the selected application. It targets the
-selected process; exact-window targeting is not guaranteed for applications
-with multiple windows. The Host's cooperative foreground activation is
-reserved for an explicit legacy window selection and does not grant input by
-itself; fresh active-process, layer-0 window, permission, geometry, and
-per-event checks still apply. P6 never invokes that activation path. Secure
-input, a locked/non-console session, unknown or unsafe target geometry, and
-lost Host input permission remain fail-closed. Pausing immediately closes
+On an explicit Viewer selection, including a P6 session, the Host's
+cooperative foreground activation may bring the selected regular app forward.
+It does not grant input by itself: fresh active-process, layer-0 window,
+permission, geometry, and per-event checks still apply. Ordinary events use
+the public system Quartz event stream, where cursor position and hit-testing
+choose the recipient. PID-targeted posting is reserved for safe key/button
+release cleanup during reset, selection change, focus loss, or revocation,
+using the original admitted target identity. Secure input, a locked or
+non-console session, unknown or unsafe target geometry, and lost Host input
+permission remain fail-closed. Pausing immediately closes
 Host-side input admission and clears pressed-input state while leaving
 authenticated video active. Unpairing closes input admission, removes text
 clipboard authorization, and stops the authenticated session after the
@@ -110,11 +126,12 @@ The canonical local gate is
 Physical acceptance remains pending. On the Intel Host and Apple Silicon
 Viewer, use a disposable application and verify pairing denial/view-only,
 pair acceptance, reconnect with the saved identity, continued Viewer frames
-after the app becomes inactive or occluded without activating it, and recovery
-after a stream interruption. Then verify background mouse/keyboard delivery,
+after the app becomes inactive or occluded, and recovery after a stream
+interruption. With the selected app inactive, verify input readiness is closed;
+explicitly reselect it and confirm the Host foregrounds it before ordinary
+mouse/keyboard events use cursor-based system dispatch. Then test focus loss,
 pause with a held key/button, resume, revoke, and new pairing. Confirm that
-video remains available while control is paused or pairing is denied. Repeat
-with PostEvent revoked, secure input, screen lock, target closure, and multiple
-windows of the same app. Record which apps accept process-targeted events and
-any IME/candidate-panel limits; do not infer support from a fake adapter or
-local build.
+video remains available while the app is inactive, control is paused, or pairing
+is denied. Repeat with PostEvent revoked, secure input, screen lock, target
+closure, and multiple windows of the same app. Record any IME/candidate-panel
+limits; do not infer support from a fake adapter or local build.

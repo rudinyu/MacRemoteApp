@@ -1,5 +1,7 @@
 import Foundation
 import InputCore
+import RemoteProtocol
+import SecurityCore
 import TransportCore
 import XCTest
 @testable import Viewer
@@ -126,6 +128,214 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
             "a fresh readiness evaluation may admit input without replacing the session"
         )
         await queue.waitUntilIdle()
+    }
+
+    func testConfirmedAuthorizationEpochChangeAfterAdmissionKeepsSessionWhileInvalidatingOldScope() async {
+        let scope = makeScope()
+        var failure: ViewerInputFailureCategory?
+        let queue = ViewerInputSendQueue { _, category in failure = category }
+        queue.updateScope(scope)
+
+        XCTAssertEqual(
+            queue.enqueue(keyRecord(1, window: scope.windowGeneration, keyCode: 56, pressed: true), in: scope) { _, _ in
+                .sent
+            },
+            .enqueued
+        )
+        await queue.waitUntilIdle()
+
+        XCTAssertEqual(
+            queue.enqueue(keyRecord(2, window: scope.windowGeneration, keyCode: 56, pressed: false), in: scope) { _, _ in
+                throw ViewerInputTransportError.authorizationEpochChangedAfterAdmissionBeforeTransport
+            },
+            .enqueued
+        )
+        await queue.waitUntilIdle()
+
+        XCTAssertEqual(failure, .authorizationNotReady)
+        XCTAssertFalse(failure?.disposition.requiresSessionReset == true)
+        XCTAssertEqual(
+            queue.enqueue(record(3, window: scope.windowGeneration), in: scope) { _, _ in .sent },
+            .staleScope,
+            "failed readiness must still invalidate the old input scope"
+        )
+
+        queue.updateScope(scope)
+        XCTAssertEqual(
+            queue.enqueue(record(4, window: scope.windowGeneration), in: scope) { _, _ in .sent },
+            .enqueued,
+            "a refreshed readiness scope can resume input on the authenticated session"
+        )
+        await queue.waitUntilIdle()
+    }
+
+    func testOtherReadinessErrorsRemainTerminalWhenTheyCouldLeaveHeldInput() async {
+        let scope = makeScope()
+        let failuresToCheck: [Error] = [
+            ViewerInputTransportError.inputNotReady,
+            ViewerInputTransportError.authorizationChangedBeforeTransport,
+            ViewerInputTransportError.postAdmissionAuthorizationChange(rejection: .admissionTokenMismatch),
+            ViewerInputTransportError.postAdmissionAuthorizationChange(rejection: nil),
+            ViewerInputTransportError.inputSourceRequestNotAdmitted,
+            SessionError.authorizationChanged,
+            SessionError.reconnectRequired
+        ]
+
+        for readinessFailure in failuresToCheck {
+            var failure: ViewerInputFailureCategory?
+            let queue = ViewerInputSendQueue { _, category in failure = category }
+            queue.updateScope(scope)
+            XCTAssertEqual(
+                queue.enqueue(keyRecord(1, window: scope.windowGeneration, keyCode: 56, pressed: true), in: scope) { _, _ in
+                    .sent
+                },
+                .enqueued
+            )
+            await queue.waitUntilIdle()
+
+            XCTAssertEqual(
+                queue.enqueue(keyRecord(2, window: scope.windowGeneration, keyCode: 56, pressed: false), in: scope) { _, _ in
+                    throw readinessFailure
+                },
+                .enqueued
+            )
+            await queue.waitUntilIdle()
+
+            XCTAssertEqual(failure, .heldStateReleaseFailure)
+            XCTAssertTrue(failure?.disposition.requiresSessionReset == true)
+        }
+    }
+
+    func testProductionTransportPreAdmissionEpochMismatchIsTerminalForHeldRelease() async throws {
+        let hostIdentity = try PeerIdentity(publicKeyRepresentation: Data("viewer-fence-host".utf8))
+        let viewerIdentity = try PeerIdentity(publicKeyRepresentation: Data("viewer-fence-viewer".utf8))
+        let transports = InMemoryTransport.makePair(
+            firstAuthentication: .trusted(viewerIdentity),
+            secondAuthentication: .trusted(hostIdentity)
+        )
+        try await transports.first.start()
+        try await transports.second.start()
+
+        let capabilities: Set<Capability> = [
+            .pingPong, .mouseInput, .keyboardInput, .backgroundControl
+        ]
+        let host = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .host,
+                implementationIdentifier: "viewer-fence-host",
+                capabilities: capabilities
+            ),
+            transport: transports.first
+        )
+        let viewer = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .viewer,
+                implementationIdentifier: "viewer-fence-viewer",
+                capabilities: capabilities
+            ),
+            transport: transports.second
+        )
+
+        do {
+            async let hostStart: Void = host.start()
+            async let viewerStart: Void = viewer.start()
+            try await hostStart
+            try await viewerStart
+            _ = try await waitForSessionSnapshot(of: host) { $0.state == .capabilitiesNegotiated }
+            _ = try await waitForSessionSnapshot(of: viewer) { $0.state == .capabilitiesNegotiated }
+
+            await host.setLocalInputAdmission(true, revision: 1)
+            try await host.authorize(windowGeneration: 7, capabilities: capabilities)
+            let firstAuthorization = try await waitForSessionSnapshot(of: viewer) {
+                $0.authorized && $0.authorizedWindowGeneration == 7
+            }
+            let scope = makeScope(
+                sessionID: UUID(),
+                windowGeneration: 7,
+                authorizationGeneration: firstAuthorization.authorizationGeneration,
+                controlGeneration: 1
+            )
+            let inputTransport = ViewerInputTransport(session: viewer)
+            var failure: ViewerInputFailureCategory?
+            var observedReleaseError: Error?
+            let queue = ViewerInputSendQueue { _, category in failure = category }
+            queue.updateScope(scope)
+
+            XCTAssertEqual(
+                queue.enqueue(
+                    keyRecord(1, window: 7, keyCode: 56, pressed: true),
+                    in: scope
+                ) { event, epoch in
+                    try await inputTransport.send(
+                        event,
+                        expectedAuthorizationGeneration: epoch,
+                        controlGeneration: scope.controlGeneration
+                    )
+                    return .sent
+                },
+                .enqueued
+            )
+            await queue.waitUntilIdle()
+            XCTAssertNil(failure, "an input token must retain all background-control requirements")
+            let deliveredKeyDown = try await nextInputEvent(from: host.incomingMessages, timeout: .seconds(3))
+            XCTAssertEqual(deliveredKeyDown.kind, .keyDown)
+            XCTAssertEqual(deliveredKeyDown.keyCode, 56)
+            XCTAssertEqual(deliveredKeyDown.controlGeneration, 1)
+
+            // Reauthorize the same selected window before the queued release.
+            // Its expected epoch now mismatches in makeInputAdmission, before
+            // SessionCoordinator can report a post-admission transition.
+            try await host.authorize(windowGeneration: 7, capabilities: capabilities)
+            _ = try await waitForSessionSnapshot(of: viewer) {
+                $0.authorizationGeneration > firstAuthorization.authorizationGeneration &&
+                    $0.authorized && $0.authorizedWindowGeneration == 7
+            }
+
+            XCTAssertEqual(
+                queue.enqueue(
+                    keyRecord(2, window: 7, keyCode: 56, pressed: false),
+                    in: scope
+                ) { event, epoch in
+                    do {
+                        try await inputTransport.send(
+                            event,
+                            expectedAuthorizationGeneration: epoch,
+                            controlGeneration: scope.controlGeneration
+                        )
+                        return .sent
+                    } catch {
+                        observedReleaseError = error
+                        throw error
+                    }
+                },
+                .enqueued
+            )
+            await queue.waitUntilIdle()
+
+            XCTAssertEqual(
+                observedReleaseError as? ViewerInputTransportError,
+                .authorizationChangedBeforeTransport,
+                "an expected-epoch mismatch rejected before admission has no post-admission provenance"
+            )
+            let diagnostic = ViewerInputSendFailureClassifier.diagnostic(
+                for: try XCTUnwrap(observedReleaseError)
+            )
+            XCTAssertFalse(diagnostic.hasConfirmedAuthorizationEpochTransition)
+            XCTAssertEqual(failure, .heldStateReleaseFailure)
+            XCTAssertTrue(failure?.disposition.requiresSessionReset == true)
+            XCTAssertEqual(
+                queue.enqueue(record(3, window: 7), in: scope) { _, _ in .sent },
+                .staleScope,
+                "the failed held-state release must invalidate its old input scope before session shutdown"
+            )
+        } catch {
+            await host.stop()
+            await viewer.stop()
+            throw error
+        }
+
+        await host.stop()
+        await viewer.stop()
     }
 
     func testKnownPreflightFailureOnHeldStateReleaseStillEndsSession() async {
@@ -288,10 +498,76 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
 
     func testInputFailureDiagnosticsKeepUnderlyingCategoryAndTransportBoundary() {
         let preTransport = ViewerInputSendFailureClassifier.diagnostic(
-            for: ViewerInputTransportError.inputNotReady
+            for: ViewerInputTransportError.authorizationChangedBeforeTransport
         )
         XCTAssertEqual(preTransport.underlyingCategory, .authorizationNotReady)
         XCTAssertEqual(preTransport.boundary, .beforeTransportInvocation)
+        XCTAssertFalse(preTransport.hasConfirmedAuthorizationEpochTransition)
+
+        let admissionTokenMismatch = ViewerInputTransportError.postAdmissionAuthorizationChange(
+            rejection: .admissionTokenMismatch
+        )
+        XCTAssertEqual(admissionTokenMismatch, .inputAdmissionTokenMismatchBeforeTransport)
+        let tokenMismatchDiagnostic = ViewerInputSendFailureClassifier.diagnostic(for: admissionTokenMismatch)
+        XCTAssertEqual(tokenMismatchDiagnostic.underlyingCategory, .authorizationNotReady)
+        XCTAssertEqual(tokenMismatchDiagnostic.boundary, .beforeTransportInvocation)
+        XCTAssertFalse(tokenMismatchDiagnostic.hasConfirmedAuthorizationEpochTransition)
+        XCTAssertEqual(
+            ViewerInputSendFailureClassifier.effectiveCategory(
+                for: tokenMismatchDiagnostic,
+                mayLeaveHeldInputState: false
+            ),
+            .authorizationNotReady,
+            "without possible held state, an admission mismatch can still trigger readiness rechecking"
+        )
+        XCTAssertEqual(
+            ViewerInputSendFailureClassifier.effectiveCategory(
+                for: tokenMismatchDiagnostic,
+                mayLeaveHeldInputState: true
+            ),
+            .heldStateReleaseFailure
+        )
+
+        let confirmedEpochChange = ViewerInputTransportError.postAdmissionAuthorizationChange(
+            rejection: .authorizationEpochChangedAfterAdmission
+        )
+        XCTAssertEqual(confirmedEpochChange, .authorizationEpochChangedAfterAdmissionBeforeTransport)
+        let confirmedEpochDiagnostic = ViewerInputSendFailureClassifier.diagnostic(for: confirmedEpochChange)
+        XCTAssertEqual(confirmedEpochDiagnostic.underlyingCategory, .authorizationNotReady)
+        XCTAssertEqual(confirmedEpochDiagnostic.boundary, .beforeTransportInvocation)
+        XCTAssertTrue(confirmedEpochDiagnostic.hasConfirmedAuthorizationEpochTransition)
+
+        let unknownProvenance = ViewerInputTransportError.postAdmissionAuthorizationChange(rejection: nil)
+        XCTAssertEqual(unknownProvenance, .authorizationChangedBeforeTransport)
+        let unknownProvenanceDiagnostic = ViewerInputSendFailureClassifier.diagnostic(for: unknownProvenance)
+        XCTAssertFalse(unknownProvenanceDiagnostic.hasConfirmedAuthorizationEpochTransition)
+        XCTAssertEqual(
+            ViewerInputSendFailureClassifier.effectiveCategory(
+                for: unknownProvenanceDiagnostic,
+                mayLeaveHeldInputState: false
+            ),
+            .authorizationNotReady,
+            "without possible held state, unknown pre-transport provenance can still trigger readiness rechecking"
+        )
+        XCTAssertEqual(
+            ViewerInputSendFailureClassifier.effectiveCategory(
+                for: unknownProvenanceDiagnostic,
+                mayLeaveHeldInputState: true
+            ),
+            .heldStateReleaseFailure
+        )
+
+        let genericReadiness = ViewerInputSendFailureClassifier.diagnostic(
+            for: ViewerInputTransportError.inputNotReady
+        )
+        XCTAssertFalse(genericReadiness.hasConfirmedAuthorizationEpochTransition)
+        XCTAssertEqual(
+            ViewerInputSendFailureClassifier.effectiveCategory(
+                for: genericReadiness,
+                mayLeaveHeldInputState: true
+            ),
+            .heldStateReleaseFailure
+        )
 
         let postTransport = ViewerInputSendFailureClassifier.diagnostic(
             for: ViewerInputTransportError.deliveryUncertain
@@ -312,13 +588,13 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         XCTAssertEqual(unobservedSessionFailure.boundary, .unknown)
 
         let effective = ViewerInputSendFailureClassifier.effectiveCategory(
-            for: preTransport.underlyingCategory,
+            for: confirmedEpochDiagnostic,
             mayLeaveHeldInputState: true
         )
-        XCTAssertEqual(effective, .heldStateReleaseFailure)
-        XCTAssertEqual(preTransport.underlyingCategory, .authorizationNotReady)
-        XCTAssertFalse(preTransport.underlyingCategory.disposition.requiresSessionReset)
-        XCTAssertTrue(effective.disposition.requiresSessionReset)
+        XCTAssertEqual(effective, .authorizationNotReady)
+        XCTAssertEqual(confirmedEpochDiagnostic.underlyingCategory, .authorizationNotReady)
+        XCTAssertFalse(confirmedEpochDiagnostic.underlyingCategory.disposition.requiresSessionReset)
+        XCTAssertFalse(effective.disposition.requiresSessionReset)
     }
 
     func testSessionReplacementDuringBlockedSendCannotRouteQueuedInputAcrossRepeatedWireGeneration() async {
@@ -490,6 +766,7 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         XCTAssertEqual(
             ViewerProcessControlReadiness.blocker(
                 hostPermissionGranted: false,
+                focusEligible: false,
                 processTargetEligible: false
             ),
             .hostPermissionUnavailable
@@ -497,6 +774,7 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         XCTAssertEqual(
             ViewerProcessControlReadiness.blocker(
                 hostPermissionGranted: true,
+                focusEligible: true,
                 processTargetEligible: false
             ),
             .hostProcessTargetUnavailable
@@ -504,12 +782,14 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         XCTAssertNil(
             ViewerProcessControlReadiness.blocker(
                 hostPermissionGranted: true,
+                focusEligible: true,
                 processTargetEligible: true
             )
         )
         XCTAssertEqual(
             ViewerProcessControlReadiness.blocker(
                 hostPermissionGranted: true,
+                focusEligible: true,
                 processTargetEligible: true,
                 controlGeneration: nil
             ),
@@ -533,24 +813,20 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         XCTAssertTrue(unsafeTargetStatus.localizedCaseInsensitiveContains("not active"))
     }
 
-    func testBackgroundControlReadyUsesDistinctViewerLabelWhenSelectedAppIsInactive() {
-        let status = ViewerInputStatusPresentation.readyStatus(
-            focusEligible: false,
-            backgroundControlActive: true
-        )
-
-        XCTAssertEqual(status, ViewerInputStatusPresentation.backgroundControlReadyStatus)
-        XCTAssertTrue(status.localizedCaseInsensitiveContains("background control ready"))
-        XCTAssertTrue(status.localizedCaseInsensitiveContains("selected app is not active"))
-        XCTAssertNotEqual(status, "Connected — input ready")
+    func testP6ReadinessRequiresTheSelectedAppToRemainForeground() {
         XCTAssertEqual(
-            ViewerInputStatusPresentation.readyInputSummary(backgroundControlActive: true),
-            ViewerInputStatusPresentation.backgroundControlReadySummary
+            ViewerProcessControlReadiness.blocker(
+                hostPermissionGranted: true,
+                focusEligible: false,
+                processTargetEligible: true
+            ),
+            .hostFocusUnavailable
         )
-        XCTAssertNotEqual(
-            ViewerInputStatusPresentation.readyInputSummary(backgroundControlActive: true),
-            "Ready"
+        XCTAssertEqual(
+            ViewerInputStatusPresentation.readyStatus(focusEligible: false),
+            ViewerInputStatusPresentation.hostFocusUnavailableStatus
         )
+        XCTAssertEqual(ViewerInputStatusPresentation.readyInputSummary(), "Ready")
     }
 
     func testForegroundActivationFailureAsksHostUserToReactivateHost() {
@@ -1023,10 +1299,51 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         )
     }
 
+    private func waitForSessionSnapshot(
+        of session: SessionCoordinator,
+        timeout: Duration = .seconds(5),
+        satisfying predicate: (SessionSnapshot) -> Bool
+    ) async throws -> SessionSnapshot {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while true {
+            let snapshot = await session.snapshot()
+            if predicate(snapshot) { return snapshot }
+            guard clock.now < deadline else {
+                throw ViewerRuntimeLifecycleTestError.timedOut
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    private func nextInputEvent(
+        from stream: MessageStream,
+        timeout: Duration
+    ) async throws -> InputEventMessage {
+        try await withThrowingTaskGroup(of: InputEventMessage.self) { group in
+            group.addTask {
+                var iterator = stream.makeAsyncIterator()
+                while let payload = try await iterator.next() {
+                    if case let .inputEvent(input) = payload { return input }
+                }
+                throw ViewerRuntimeLifecycleTestError.streamEnded
+            }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw ViewerRuntimeLifecycleTestError.timedOut
+            }
+            defer { group.cancelAll() }
+            guard let input = try await group.next() else {
+                throw ViewerRuntimeLifecycleTestError.streamEnded
+            }
+            return input
+        }
+    }
+
     private func record(
         _ sequence: UInt64,
         window: UInt64,
-        kind: InputEventKind = .focusIntent
+        kind: InputCore.InputEventKind = .focusIntent
     ) -> InputEventRecord {
         InputEventRecord(
             sequence: sequence,
@@ -1092,12 +1409,17 @@ private actor AsyncSignal {
     }
 }
 
+private enum ViewerRuntimeLifecycleTestError: Error {
+    case timedOut
+    case streamEnded
+}
+
 private actor SendRecorder {
     struct Sent: Equatable, Sendable {
         let sequence: UInt64
         let authorizationGeneration: UInt64
         let route: String
-        let kind: InputEventKind
+        let kind: InputCore.InputEventKind
     }
 
     private var values: [Sent] = []

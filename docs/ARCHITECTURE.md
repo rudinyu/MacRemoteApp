@@ -3,11 +3,12 @@
 The [P6 Host-controlled input contract](P6_BACKGROUND_CONTROL.md) is an
 explicit negotiated extension to the foreground input path. Host acceptance
 of the authenticated Viewer pairing provides durable input trust for
-process-targeted input to the selected app while it is inactive, subject to
-the P6 target, permission, secure-input, session, and generation checks. Peers
-without P6 remain foreground-only. P6 does not activate the selected app or
-provide locked-screen control. Session pause closes control; unpairing removes
-trust and ends the active session.
+input, subject to the P6 target, permission, secure-input, session, and
+generation checks. Every ordinary input path requires the selected app to be
+foreground. Explicit selection may activate its regular app before control;
+background viewing remains available while input is disabled. P6 does not
+provide inactive-process or locked-screen control. Session pause closes
+control; unpairing removes trust and ends the active session.
 
 ## Architecture intent
 
@@ -199,12 +200,15 @@ Additional rules:
   eligible-window catalog so the Viewer can replace the selected app without
   reconnecting. On macOS 14 or later, a direct Viewer selection activates
   Host, confirms Host is frontmost, and cooperatively yields activation to
-  that regular app for peers without P6. It may use the public Accessibility
+  that regular app for all peers. It may use the public Accessibility
   raise action for the exact selected target when the Host already has
   Accessibility trust and can match its geometry unambiguously. Legacy input
   requires the exact target live and the active PID plus top regular layer-0
-  window to identify that app. Negotiated P6 instead uses its Host-authorized
-  process-target and secure-input checks and leaves app activation unchanged.
+  window to identify that app. Negotiated P6 adds Host pairing, control
+  generation, and the same optional global secure-input signal as legacy
+  foreground input. Target-process Accessibility inspection is used only to
+  classify an inactive selected target for safe cleanup; it does not impose an
+  additional foreground gate or authorize inactive-process input.
   CaptureCore resolves selected windows from the full ScreenCaptureKit
   catalog, while the picker may show only on-screen targets. A transient
   catalog snapshot that omits the active selection is withheld from Viewer;
@@ -327,7 +331,8 @@ Quit still stops the session through the existing delegate.
 The app retains one Settings controller and projects `HostRuntimeStatus` and
 the configured discovery name into it. Screen Recording, PostEvent, and
 Accessibility checks are read-only and refresh on activation and status
-updates; Accessibility is required for P6 background-safety inspection.
+  updates; target-process Accessibility inspection supports only safe cleanup
+  classification for inactive P6 targets, not ordinary foreground input.
 Bonjour service state is not a Local Network permission
 preflight. Rename, Retry setup, Privacy & Security, and confirmed Forget saved
 pairings actions reuse the existing app operations; the settings component
@@ -370,8 +375,10 @@ with keyframe and timestamp metadata. It owns no socket or session identity.
 `InputCore` validates the Viewer event model, maps normalized Viewer
 coordinates to the selected window's current geometry, and invokes a
 permission-aware CoreGraphics/Accessibility adapter. It must fail closed when
-the selected window is no longer eligible, or when the applicable foreground
-or negotiated P6 process-target checks fail.
+the selected window is no longer eligible, when foreground eligibility is
+lost, or when negotiated P6 process-safety checks fail. Ordinary events use
+the public system Quartz event stream so the cursor and system hit-testing
+determine the recipient.
 
 ### Host input admission and cleanup
 
@@ -394,13 +401,15 @@ M6 splits Host input handling across these owners:
   on-screen window identity, foreground ordering/identity, and lock state.
 - `CoreGraphicsAccessibilityInputAdapter` is the only M6 code that
   constructs/posts `CGEvent` values.
-- For an explicit window selection from a peer without P6, `HostRuntime` makes
-  a bounded cooperative AppKit activation request on macOS 14 or later, after
-  Host foreground status is confirmed. The request is not itself proof of
-  focus. Legacy input checks require the exact selected target to remain live,
-  the selected PID to be active, and a top regular layer-0 WindowServer window
-  from that app. Negotiated P6 skips foreground activation and requires its
-  Host pairing trust and known-safe process-target state instead.
+- For an explicit window selection, `HostRuntime` makes a bounded cooperative
+  AppKit activation request on macOS 14 or later, after Host foreground status
+  is confirmed. The request is not itself proof of focus. Every input path
+  requires the exact selected target to remain live, the selected PID to be
+  active, and a top regular layer-0 WindowServer window from that app. P6 adds
+  Host pairing trust and a control generation, and uses the same optional
+  global secure-input signal as legacy foreground input. Target-process AX
+  inspection is used only to classify an inactive target for safe cleanup; P6
+  does not bypass activation or foreground checks.
 
 The state of admitted pressed input (held keys and buttons) for one selected
 target moves through these states:
@@ -411,7 +420,7 @@ stateDiagram-v2
     Idle --> Admitted: down event passes admission fence and per-event checks
     Idle --> Idle: unmatched release rejected
     Admitted --> Admitted: further input passes per-event checks
-    Admitted --> Released: matching release on the normal input path
+    Admitted --> Released: matching release on the normal system input path
     Admitted --> CleanupPending: revoke, reconnect, stop, applicable focus or target-safety loss, permission loss, selection change, or stream end
     CleanupPending --> Released: target-bound release while identity, generation, bounds, and permission match
     CleanupPending --> CleanupPending: permission unavailable, retry when a safe snapshot returns
@@ -425,36 +434,38 @@ Invariants:
 1. **Layered per-event checks.** Every command carries the selected target
    identity, owning application identifier, process, and generation. The
    controller rechecks session/window/capability facts and current permission,
-   applicable focus or P6 process-target eligibility, and geometry; the
-   adapter repeats the complete target/owning-application/permission check
-   immediately before posting. A `TransportCore` authorization decision alone
-   never authorizes an OS event.
+   foreground focus, any P6 process-safety checks, and geometry; immediately
+   before ordinary posting, the adapter rechecks the exact target, owning
+   application, permission, and foreground PID, then sends through the public
+   system event stream for WindowServer hit-testing. A focus or overlay change
+   in the narrow check-to-dispatch gap can alter the recipient, so physical
+   receipt by the selected app remains unverified. A `TransportCore`
+   authorization decision alone never authorizes an OS event.
 2. **Explicit focus policy.** The adapter never activates a window. Legacy
-   peers require foreground eligibility; after explicit selection Host may
-   activate itself and cooperatively yield to the target. Negotiated P6 may
-   target the authorized selected process while inactive, without activating
-   it. No private API or locked-screen bypass is used.
+   peers and negotiated P6 require foreground eligibility; after explicit
+   selection Host may activate itself and cooperatively yield to the target.
+   No private API or locked-screen bypass is used.
 3. **Fail-closed secure input.** A detected secure-input field or an unknown
    console state is rejected. When the optional AX secure-input signal is
    unavailable, it does not replace the independent foreground/window checks
-   for legacy input; P6 requires the stricter known-safe process-target state
-   defined in its contract.
+   for legacy and foreground P6 input. P6 additionally requires known-safe
+   global and target-process inspection to classify an inactive target for
+   cleanup, which never authorizes ordinary input.
 4. **Admission fence.** Local revoke, reconnect, and stop cannot invalidate
    authorization between the admission check and the Host injection call,
    because input handed to the stream waiter runs inside
    `withIncomingInputAdmission`.
-5. **Queued input is discarded** on local authorization, permission,
-   applicable focus or P6 target-safety, and selection transitions.
+5. **Queued input is discarded** on local authorization, permission, focus,
+   P6 target-safety, and selection transitions.
 6. **Release before clear.** Host reset attempts a safe release of admitted
    pressed state before clearing it and uses a reserved state-ending rate
    lane. Unmatched releases are rejected.
 7. **Target-bound release.** Controller-owned state releases retain a
-   restricted target-bound path after authorization loss or a known focus
-   loss. After authorization is revoked, cleanup may only release
-   controller-admitted state while the same window identity, generation,
-   current bounds, and permission still match. A known inactive target may
-   receive negotiated P6 input only while its process-target checks pass;
-   otherwise it is allowed only for this release path.
+   restricted target-bound path during reset, selection change, authorization
+   loss, or a known focus loss. Cleanup may only release controller-admitted
+   state while the same window identity, generation, current bounds, and
+   permission still match. An inactive target never receives ordinary input;
+   PID-targeted posting is reserved for this release path.
 8. **Selection-change ordering.** Host lifecycle code uses
    `withSelectionReplacement()` (or pairs `selectionWillChange()`/
    `selectionDidChange()`) so the transition is announced before CaptureCore's
@@ -662,9 +673,9 @@ selected-window identity, and permission state.
 - H.264 is the V1 interoperability baseline. HEVC or other codecs are not
   added as speculative features.
 - Screen Recording and PostEvent permissions are Host capabilities and are
-  surfaced by the Host UI. Accessibility is optional for legacy foreground
-  input, but P6 background input requires known-safe AX inspection. Packages
-  must return structured permission states.
+  surfaced by the Host UI. Accessibility is optional for legacy and foreground
+  P6 input; P6 uses known-safe AX process inspection only for inactive-target
+  cleanup. Packages must return structured permission states.
 - The exact macOS deployment target is an M0 decision and must be tested on
   both target architectures where possible.
 - All platform-specific APIs live behind package adapters so protocol and

@@ -34,7 +34,13 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
             onScreenWindowsOnly: onScreenWindowsOnly
         )
         let displays = content.displays.map(Self.displayGeometry)
-        return content.windows.compactMap { evaluateWindow($0, displays: displays).window }.sorted {
+        return content.windows.compactMap {
+            evaluateWindow(
+                $0,
+                displays: displays,
+                allowInactiveOffscreen: false
+            ).window
+        }.sorted {
             if $0.applicationIdentifier == $1.applicationIdentifier {
                 return $0.identifier < $1.identifier
             }
@@ -51,7 +57,7 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
 
         return try await resolveSelectedWindow(
             expectedWindow,
-            allowInactiveOffscreen: false
+            allowInactiveOffscreen: true
         )
     }
 
@@ -77,10 +83,10 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
         allowInactiveOffscreen: Bool
     ) async throws -> CaptureWindowRefreshResult {
 
-        // The ordinary picker catalog is intentionally limited to on-screen
-        // windows. Recheck the selected target against the full catalog so a
-        // stream remains valid when ScreenCaptureKit reports it as active but
-        // offscreen after its app loses foreground.
+        // Recheck the selected target against the full catalog. P6 permits an
+        // authenticated, exact process/window target to remain selected while
+        // its app is inactive; owner, layer, geometry, and capture-size checks
+        // still apply below.
         let content = try await SCShareableContent.excludingDesktopWindows(
             true,
             onScreenWindowsOnly: false
@@ -141,7 +147,11 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
         var windows: [CaptureWindow] = []
         windows.reserveCapacity(content.windows.count)
         for candidate in content.windows {
-            let evaluation = evaluateWindow(candidate, displays: displays)
+            let evaluation = evaluateWindow(
+                candidate,
+                displays: displays,
+                allowInactiveOffscreen: false
+            )
             counts.record(evaluation.rejection)
             if let window = evaluation.window {
                 windows.append(window)
@@ -166,7 +176,12 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
         allowActiveOffscreen: Bool = false,
         allowInactiveOffscreen: Bool = false
     ) -> WindowCandidateEvaluation {
-        guard allowInactiveOffscreen || window.isOnScreen || (allowActiveOffscreen && Self.isActive(window)) else {
+        guard WindowCandidateVisibility.permits(
+            isOnScreen: window.isOnScreen,
+            isActive: Self.isActive(window),
+            allowsActiveOffscreen: allowActiveOffscreen,
+            allowsInactiveOffscreen: allowInactiveOffscreen
+        ) else {
             return .rejected(.offScreen)
         }
         guard window.windowLayer == 0 else { return .rejected(.nonBaseLayer) }
@@ -278,6 +293,17 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
         return !helperMarkers.contains {
             name.contains($0) || identifier.contains($0)
         }
+    }
+}
+
+enum WindowCandidateVisibility {
+    static func permits(
+        isOnScreen: Bool,
+        isActive: Bool,
+        allowsActiveOffscreen: Bool,
+        allowsInactiveOffscreen: Bool
+    ) -> Bool {
+        isOnScreen || allowsInactiveOffscreen || (allowsActiveOffscreen && isActive)
     }
 }
 

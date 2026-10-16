@@ -2,12 +2,13 @@
 
 ## P6 negotiated extension
 
-P6 is the negotiated process-target extension documented in
-[the P6 contract](P6_BACKGROUND_CONTROL.md). When both peers support it and
-the Host has accepted the authenticated Viewer pairing, the Viewer may control
-the selected app while it is inactive. Peers without the capability retain the
-foreground-only input path. Pairing trust does not bypass per-event checks, and
-capability negotiation alone grants no permission.
+P6 is the negotiated process-target safety extension documented in
+[the P6 contract](P6_BACKGROUND_CONTROL.md). Background selection and viewing
+remain available, but ordinary control always requires the selected app to be
+foreground. Explicit Viewer window selection asks Host to cooperatively
+activate the selected regular app before input; the same rule applies with or
+without P6. Pairing trust does not bypass per-event checks, and capability
+negotiation alone grants no permission.
 
 Optional `backgroundControl` capability
 `0x000A` is separate from `keyframeRequest` (`0x0007`), `receiverReport`
@@ -25,18 +26,20 @@ authorization epoch. Missing or stale generations cannot reopen control;
 bytes delayed in the network across pause/resume are rejected. Existing
 non-P6 messages omit these fields and retain their golden encodings.
 These are additive optional TLVs under protocol `2.0`, gated by P6 negotiation.
-The existing `focusEligible` field continues
-to mean foreground eligibility. P6 readiness requires the active control
-state and a safe process target in addition to permission and current session
-authorization; missing fields cannot imply control permission. Old peers
-ignore optional fields and retain the existing foreground policy.
+The existing `focusEligible` field continues to mean foreground eligibility.
+P6 readiness requires foreground eligibility, the active control state, and
+the exact selected process identity in addition to permission and current
+session authorization; target-process Accessibility inspection is used only
+to classify inactive targets for safe cleanup. Missing fields cannot imply
+control permission. Old peers
+ignore optional fields and retain the same foreground input policy.
 Pause/revoke must fence both input events and input-source selections while
 retaining the authenticated video path. The transport must invalidate stale
 queued input rather than admitting it after a later resume.
-Input-source selection is still foreground-only: background process input
-does not authorize changing the Host's global input source. The Viewer uses
-manual source matching while the P6 target is background and starts a fresh
-source synchronization when the target returns to foreground.
+Input-source selection also requires foreground eligibility and does not
+activate or retarget the Host from an input message. The Viewer uses manual
+source matching while the selected app is background and starts a fresh source
+synchronization after explicit selection foregrounds it.
 
 ## Protocol status and scope
 
@@ -47,12 +50,12 @@ authorize implementing later milestone behavior early.
 The protocol supports one Viewer, one selected Host window, authenticated
 control, H.264 video, mouse/keyboard input, and opt-in text clipboard exchange.
 It excludes Internet traversal, WebRTC, audio, file transfer, arbitrary
-pasteboard types, multi-window sessions, arbitrary or unnegotiated background
-control, and locked-screen control. The negotiated P6 extension above defines
-Host-authorized process targeting for an inactive selected app. The M10
-capture-continuity integration does not add wire messages: the selected video
-stream is independent of app foreground state, and transient picker-catalog
-omissions do not revoke the active selection.
+pasteboard types, multi-window sessions, inactive-process input, and
+locked-screen control. P6 adds Host-accepted pairing trust, a control
+generation, and process safety checks while preserving the foreground input
+requirement. The M10 capture-continuity integration does not add wire messages:
+the selected video stream is independent of app foreground state, and
+transient picker-catalog omissions do not revoke the active selection.
 
 ## Transport binding
 
@@ -201,12 +204,11 @@ switch applications without reconnecting. The catalog is picker data, not the
 liveness authority for an already selected target: the Host does not publish a
 transient snapshot that omits its active selection, and CaptureCore tolerates
 brief selected-window lookup gaps before declaring confirmed target loss. For
-peers without P6, an explicitly selected eligible regular app may be brought
-to the Host foreground and input still requires foreground eligibility. P6
-keeps the selected app at its current activation state and permits process
-input only through its separate Host authorization and safety checks. In both
-paths, the selected-window stream continues while the app is inactive or
-occluded. Unexpected capture-stream completion enters a bounded local restart
+any peer, explicit selection of an eligible regular app may bring it to the
+Host foreground, and input requires foreground eligibility. P6 adds its
+separate Host authorization and safety checks but does not permit inactive
+process input. The selected-window stream can continue while the app is
+inactive or occluded. Unexpected capture-stream completion enters a bounded local restart
 path after the Host rechecks the same window ID, bundle ID, PID, layer, and
 valid geometry; this state transition does not change the wire protocol or
 authorization generation. Permission loss, confirmed target loss, or owner
@@ -282,10 +284,13 @@ event archive. It contains only the defined V1 event types:
 
 Coordinates are normalized to the current displayed remote-content rectangle,
 not the Viewer desktop. The Host maps them to the selected window's current
-geometry and clamps/rejects values outside the authorized content. Legacy
-input requires foreground eligibility; negotiated P6 input requires a safe,
-authorized process target instead. Both paths require PostEvent permission,
-session authorization, and valid event rate/sequence.
+geometry and clamps/rejects values outside the authorized content. Both legacy
+and negotiated P6 input require foreground eligibility; P6 also requires a
+safe, authorized process target. Both paths require PostEvent permission,
+session authorization, and valid event rate/sequence. Ordinary events use the
+public system Quartz event stream; PID-targeted posting is limited to safe
+cleanup releases of already admitted state during reset, selection change,
+focus loss, or revocation, using the original target identity.
 
 V1 does not transfer arbitrary key logs, secure-input contents, password
 prompts, or events intended for unselected or unauthorized background

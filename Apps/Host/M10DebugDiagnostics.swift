@@ -82,13 +82,39 @@ enum M10HostWindowSelection: String, Sendable {
 
 enum M10HostInputReadiness: String, Equatable, Sendable {
     case ready
-    case backgroundTargetReady = "background_target_ready"
     case cleanupPending = "cleanup_pending"
     case sessionUnauthorized = "session_unauthorized"
     case selectionUnavailable = "selection_unavailable"
     case capabilityUnavailable = "capability_unavailable"
     case permissionUnavailable = "permission_unavailable"
     case focusUnavailable = "focus_unavailable"
+}
+
+enum M10HostInputEventKind: String, CaseIterable, Equatable, Hashable, Sendable {
+    case mouseMove = "mouse_move"
+    case buttonDown = "button_down"
+    case buttonUp = "button_up"
+    case scroll
+    case keyDown = "key_down"
+    case keyUp = "key_up"
+    case focusIntent = "focus_intent"
+    case other
+
+    static func forMessage(_ input: InputEventMessage) -> Self {
+        switch input.kind {
+        case .pointerMove: .mouseMove
+        case .pointerButton:
+            switch input.pressed {
+            case true?: .buttonDown
+            case false?: .buttonUp
+            case nil: .other
+            }
+        case .scroll: .scroll
+        case .keyDown: .keyDown
+        case .keyUp: .keyUp
+        case .focusIntent: .focusIntent
+        }
+    }
 }
 
 enum M10HostRunLoopPhase: String, Sendable {
@@ -264,6 +290,7 @@ enum M10HostDiagnosticEvent: Sendable {
     )
     case inputTotals(
         received: UInt64,
+        inputEventKinds: [M10HostInputEventKind: UInt64],
         admitted: UInt64,
         queued: UInt64,
         injected: UInt64,
@@ -432,6 +459,7 @@ enum M10HostDiagnosticEvent: Sendable {
             fields["duration_ms"] = durationMilliseconds
         case let .inputTotals(
             received,
+            inputEventKinds,
             admitted,
             queued,
             injected,
@@ -453,6 +481,9 @@ enum M10HostDiagnosticEvent: Sendable {
         ):
             event = "input_window"
             fields["received"] = received
+            fields["input_event_kinds"] = Dictionary(uniqueKeysWithValues: M10HostInputEventKind.allCases.map {
+                ($0.rawValue, inputEventKinds[$0, default: 0])
+            })
             fields["admitted"] = admitted
             fields["queued"] = queued
             fields["injected"] = injected
@@ -1053,6 +1084,7 @@ final class M10HostInputDiagnostics: @unchecked Sendable {
 
     private struct Counts {
         var received: UInt64 = 0
+        var inputEventKinds: [M10HostInputEventKind: UInt64] = [:]
         var admitted: UInt64 = 0
         var queued: UInt64 = 0
         var injected: UInt64 = 0
@@ -1086,8 +1118,11 @@ final class M10HostInputDiagnostics: @unchecked Sendable {
         self.fileLog = fileLog
     }
 
-    func recordReceived(connectionSequence: UInt64?) {
-        update(connectionSequence: connectionSequence) { $0.received &+= 1 }
+    func recordReceived(kind: M10HostInputEventKind, connectionSequence: UInt64?) {
+        update(connectionSequence: connectionSequence) { counts in
+            counts.received &+= 1
+            counts.inputEventKinds[kind, default: 0] &+= 1
+        }
     }
 
     func recordInjected(connectionSequence: UInt64?) {
@@ -1170,6 +1205,9 @@ final class M10HostInputDiagnostics: @unchecked Sendable {
         fileLog.record(
             .inputTotals(
                 received: snapshot.received,
+                inputEventKinds: Dictionary(uniqueKeysWithValues: M10HostInputEventKind.allCases.map {
+                    ($0, snapshot.inputEventKinds[$0, default: 0])
+                }),
                 admitted: snapshot.admitted,
                 queued: snapshot.queued,
                 injected: snapshot.injected,

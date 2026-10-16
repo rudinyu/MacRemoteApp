@@ -2,12 +2,13 @@
 
 ## Status and boundary
 
-This is a planning document. P6 background input was included in the
-`0.2.1011` RC and Build `1023` signed Debug artifacts. Build `1022` also keeps
-the selected-window stream active when its app is inactive; Build `1023` adds
-pre-delivery input-failure recovery while preserving terminal handling for
-uncertain delivery. P6 remains an explicit Host-authorized process-target
-extension. V1 remains a LAN-only
+This is a planning document. Background-process input was present in the
+historical `0.2.1011` RC and Build `1023` signed Debug artifacts. Build `1022`
+also keeps the selected-window stream active when its app is inactive; Build
+`1023` adds pre-delivery input-failure recovery while preserving terminal
+handling for uncertain delivery. Current source policy requires foreground
+input for every peer; P6 retains Host-authorized pairing and process-safety
+checks but does not permit inactive-process input. V1 remains a LAN-only
 session between one Host and one Viewer for one selected window, with H.264
 video, mouse/keyboard input, and opt-in text clipboard.
 
@@ -26,7 +27,7 @@ fallback in the V1 runtime.
 | P3 | WebRTC transport evaluation | Introduces a transport option only after the measured TCP baseline and media/control separation are understood. | Codec/security/ICE policy, certificate identity binding, permission model, fallback behavior, and a documented reason TCP is insufficient. |
 | P4 | Internet relay and NAT traversal | Depends on a reviewed transport abstraction and a service threat model; this is a new trust and availability boundary. | Relay authentication, end-to-end identity continuity, abuse/rate controls, metadata minimization, billing/operations ownership, and opt-in network policy. |
 | P5 | Secure file transfer | Adds durable user data movement and therefore a larger privacy and malware surface. | Explicit per-transfer approval, path sandboxing, size/type/rate limits, cancellation, integrity, audit redaction, and no implicit clipboard/file sharing. |
-| P6 | Background control | Implemented as a negotiated, Host-authorized process-target extension; physical input and IME acceptance remains pending. | Verify the security, consent, stale-work, and recovery gates in [P6](P6_BACKGROUND_CONTROL.md) on Intel Host and Apple Silicon Viewer. |
+| P6 | Pairing and process-safety checks | Implemented as a negotiated, Host-authorized extension that preserves foreground input requirements; physical input and IME acceptance remains pending. | Verify the security, consent, stale-work, and recovery gates in [P6](P6_BACKGROUND_CONTROL.md) on Intel Host and Apple Silicon Viewer. |
 | P7 | Locked-screen control research | This is not a committed feature. It may be infeasible or unsafe under macOS login-window and secure-input rules. | Separate security review and user decision; no implementation milestone is authorized unless an explicit threat model, OS support matrix, recovery path, and consent design are approved. |
 
 ## Cross-stage dependencies

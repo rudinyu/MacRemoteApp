@@ -46,10 +46,11 @@ and capabilities, input readiness, Host input totals and bounded queue/handler
 timings, Host capture/encode/send totals, and Viewer receive/decode/presentation
 totals. Host video authorization denial uses a fixed reason and whether the
 pipeline recovered or stopped. MainActor scheduling gaps and AppKit run-loop
-stalls are separate events. Five-second Viewer input windows distinguish send
-attempts, local acceptance, and send failures without identifying input type
-or value. Events are emitted on transitions or low-frequency windows, never
-for every frame or input event.
+stalls are separate events. Five-second Viewer input windows count send
+attempts, local acceptance, and failures by fixed event kind and fixed failure
+subcategory. Event kinds distinguish classes such as `button_down` and
+`key_up`, but do not record their values. Events are emitted on transitions or
+low-frequency windows, never for every frame or input event.
 
 Host `authorization_attempt.source` is one of
 `connection_establishment`, `window_selection`, `input_authorization`, or
@@ -62,6 +63,14 @@ reason; stale `authorization_changed` and `reconnect_required` are distinct,
 with captured and observed authorization, reconnect, and receive generations.
 Host input aggregates use the `connection_sequence` captured by the input
 loop, including when a partial window flushes after a reconnect.
+
+Viewer `input_window.input_event_kinds` counts fixed event classes such as
+`mouse_move`, `button_down`, `button_up`, `scroll`, `key_down`, and `key_up`.
+`failure_subcategories` distinguishes authorization-epoch mismatch before
+admission, authorization change after admission but before transport,
+reconnect/readiness rejection, capability denial, local preflight rejection,
+uncertain transport delivery, other pre-transport rejection, and unclassified
+failures. These are aggregate counts and contain no event payload.
 
 Viewer `input_window.failure_categories` records the effective category, while
 `underlying_failure_categories` retains the original fixed category when

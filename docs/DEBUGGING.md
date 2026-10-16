@@ -9,8 +9,11 @@ needed. Logs stay on their Mac; the apps do not upload them.
 
 1. Launch the Debug Host and Debug Viewer as signed app bundles on their
    respective Macs. Confirm Host Screen Recording and PostEvent permissions;
-   P6 background input also needs Host Accessibility permission and an
-   accepted Host pairing for the Viewer. Start from a fresh launch when a separate run boundary is
+   P6 foreground control follows the same global secure-input policy as legacy
+   input, and accepted Host pairing is required. Target-process Accessibility
+   inspection is used only for safe inactive-target cleanup. Explicitly select the target window so Host
+   foregrounds its regular app; verify input stops if that app loses focus.
+   Start from a fresh launch when a separate run boundary is
    useful.
 2. Reproduce the issue once and note the approximate UTC time and which
    endpoint showed it. For connection, selection, blank-video, or input issues,
@@ -52,9 +55,11 @@ input readiness use fixed states. Five-second aggregates report Host video
 capture/encode/send outcomes and Viewer receive/decode/presentation counts. A
 Viewer `received` count with `presented: 0` is blank-display evidence. Host
 input totals separate received, admitted, queued, injected, and rejected
-events, with fixed rejection categories and bounded queue/handler timings.
-Viewer input windows separately count send attempts, locally accepted sends,
-and send failures, without identifying input type or value.
+events, with fixed rejection categories, bounded queue/handler timings, and
+aggregate counts by fixed event kind. Viewer input windows count send attempts,
+locally accepted sends, and failures; they also report aggregate counts by
+fixed event kind and bounded failure subcategory. These fields identify only
+event classes such as `button_down` or `key_up`, never their values.
 MainActor scheduling gaps and AppKit main-run-loop stalls are recorded
 separately, with durations and fixed run-loop phases only.
 
@@ -76,8 +81,15 @@ generations. Host `input_window` aggregates are attributed by the
 `connection_sequence` captured when that input loop starts. A delayed flush
 keeps the originating connection sequence after a reconnect.
 
-Viewer `input_window` contains effective `failure_categories` and the
-underlying fixed `underlying_failure_categories`, so an
+Viewer `input_window.input_event_kinds` counts fixed classes such as
+`mouse_move`, `button_down`, `button_up`, `scroll`, `key_down`, and `key_up`.
+`failure_subcategories` separates expected authorization-epoch mismatch before
+admission, authorization change after admission but before transport,
+reconnect/readiness rejection, capability denial, local preflight rejection,
+uncertain transport delivery, other pre-transport rejection, and unclassified
+failures. These are aggregate counts; values and coordinates are not recorded.
+The event also contains effective `failure_categories` and the underlying
+fixed `underlying_failure_categories`, so an
 `authorization_not_ready` failure remains visible if held-state cleanup
 escalates its effective result to `held_state_release_failure`. The
 `failure_boundaries` values are `before_transport_invocation`,

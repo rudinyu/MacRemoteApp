@@ -38,8 +38,9 @@ Network access before Keychain identity enrollment. This keeps a Keychain
 problem from hiding the Host's Local Network permission state. The Host then
 enrolls/reuses its local TLS identity and starts the authenticated listener.
 PostEvent input access is requested only after a Viewer negotiates input and
-the operator selects a window. Accessibility is optional for legacy foreground
-input, but P6 background input requires it for known-safe process inspection.
+the operator selects a window. Accessibility is optional for ordinary
+foreground input, including P6; P6 uses known-safe process inspection only to
+classify an inactive target for safe cleanup.
 The Viewer enrolls/reuses
 its local identity before its Bonjour browser starts.
 Launch the bundles themselves:
@@ -57,8 +58,8 @@ On the Host, verify:
 
 - Screen Recording is enabled for `MacRemoteApp-Host`.
 - PostEvent access is enabled for `MacRemoteApp-Host` when input is tested;
-  Accessibility is required for P6 background-input safety checks and optional
-  for the legacy foreground path.
+  Accessibility is optional for ordinary foreground input, including P6, and
+  is used for P6 inactive-target cleanup safety checks.
 - Local Network access is allowed.
 
 On the Viewer, verify Local Network access. Confirm both Macs are on the same
@@ -108,16 +109,19 @@ path and never copy a `.p12` file to the other Mac.
 
 ## Check window selection and input
 
-- Keep the Host unlocked. When both peers support P6 and the Host has accepted
-  the authenticated Viewer pairing, the selected app may stay in the background;
-  the Viewer reports a distinct background-control-ready state. Without P6 or
-  a trusted Host pairing, keep the target app foreground before testing input.
+- Keep the Host unlocked. The Viewer can show a selected app while it is
+  backgrounded, but explicit window selection must bring the selected regular
+  app to the foreground before input. P6 adds pairing and process-safety checks;
+  it does not support inactive-app input. Confirm the selected PID remains
+  frontmost while testing.
 - Select one eligible window in the Viewer picker.
 - If the window closes, changes identity, loses focus, or the Host permission
   is revoked, select it again after the Host returns to a ready state.
-- If pointer or keyboard input is unavailable, check PostEvent permission and
-  ensure the selected window is still the authorized generation. Accessibility
-  may be enabled for the optional AX/secure-input enhancement.
+- If pointer or keyboard input is unavailable, check PostEvent permission,
+  foreground eligibility, and that the selected window is still the authorized
+  generation. Accessibility may be enabled for the optional global
+  AX/secure-input signal; target-process inspection is used for P6 inactive-
+  target cleanup only.
 - Clipboard is text-only and opt-in; confirm it is enabled on both endpoints
   and do not use it as a binary/file-transfer channel.
 

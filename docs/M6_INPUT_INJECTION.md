@@ -6,9 +6,10 @@ M6 adds the Host-side input boundary for the typed M5 event model. The
 implementation is complete for deterministic package and composition tests.
 Actual OS event posting remains an explicit manual evidence step because it
 requires local PostEvent access and can affect the selected test
-application. The negotiated P6 extension permits Host-authorized process-target
-input while the selected app is inactive; legacy peers retain the foreground
-path. No M7 clipboard behavior is included.
+application. P6 adds Host pairing and control-generation gates, but does not
+permit input to an inactive process. Before input is authorized, an explicit
+Viewer selection must foreground the selected regular app and confirm that its
+PID is frontmost. No M7 clipboard behavior is included.
 
 ## Ownership
 
@@ -48,8 +49,10 @@ path. No M7 clipboard behavior is included.
   normalized-coordinate mapping, event shape/modifier/button validation,
   sequence/rate admission, status, and serialized injection boundary.
 - `Packages/InputCore/CoreGraphicsAccessibilityInput.swift` owns the macOS
-  context provider and the typed CoreGraphics event adapter. The adapter does
-  not activate a background app or accept raw event archives.
+  context provider and the typed CoreGraphics event adapter. The adapter uses
+  the public system Quartz event stream for ordinary input, so cursor position
+  and normal hit-testing determine the recipient; it does not accept raw
+  event archives.
 - `TransportCore` and `SecurityCore` remain the sources of session/trust
   authorization facts. The Host supplies those facts to `InputCore`; a
   transport authorization result alone never posts an OS event.
@@ -63,15 +66,12 @@ authenticated and authorized session
   AND authorized selected-window generation matches
   AND exact selected target still exists with valid geometry and layer 0
   AND selected target identity, owner, and process still match
-  AND (
-        legacy foreground policy:
-          NSWorkspace.frontmostApplication PID matches the selected process
-          AND top regular layer-0 WindowServer window belongs to the selected PID and bundle
-          AND no overlapping unresolved layer-0 window can cover the selected target
-        OR negotiated P6 policy:
-          Host pairing trust, process-control admission, and control generation match
-          AND global and target-process secure-input checks are known safe
-      )
+  AND NSWorkspace.frontmostApplication PID matches the selected process
+  AND top regular layer-0 WindowServer window belongs to the selected PID and bundle
+  AND no overlapping unresolved layer-0 window can cover the selected target
+  AND (if P6 is negotiated) Host pairing trust and control generation match
+  AND (for foreground P6) the same global secure-input policy as legacy
+      foreground input
   AND PostEvent permission is authorized
   AND input capability is enabled
   AND event shape, modifier mask, sequence, and rate are valid
@@ -95,6 +95,11 @@ coordinates are clamped to the current bounds after a window move or resize.
 A rejected event is not retried under a later authorization state, and an
 unmatched release is never sent to the OS.
 
+An inactive P6 target can support cleanup only when both the global and
+target-process secure-input signals are known safe. This exception is limited
+to releases of state admitted earlier while foreground; it never admits
+ordinary input.
+
 ## Mapping and platform boundary
 
 Viewer coordinates are unsigned 16-bit values in the displayed content
@@ -111,31 +116,42 @@ scroll, keyboard, modifier, and focus-intent commands reach the adapter; mouse
 buttons are limited to left, right, and center. Focus intent is an eligibility
 signal and never activates a background window.
 
-The real context provider checks PostEvent permission, the current on-screen
-window identity, front-to-back window ordering, and console lock state. Legacy
-foreground input retains its optional local Accessibility secure-input
-inspection. P6 background input requires Accessibility to establish known-safe
-global and target-process state; unavailable or mismatched inspection blocks
-it. The adapter repeats the complete applicable target/focus/permission check
-immediately before posting a `CGEvent`, then uses target-bound process posting
-so a focus change cannot redirect the event to another frontmost application.
+The real context provider checks PostEvent permission, the exact live
+WindowServer target, front-to-back on-screen ordering, and console lock state.
+Legacy and foreground P6 input use the same optional local Accessibility
+secure-input signal: an active global signal blocks input, while an unknown
+signal follows the established foreground behavior. P6 requires known-safe
+global and target-process inspection only when classifying an inactive target
+for safe cleanup; unavailable or mismatched inspection blocks that cleanup,
+not foreground input. Immediately before ordinary posting, the adapter repeats
+the target, generation, capability, foreground PID, and permission checks, then
+sends the `CGEvent` through the public system event tap. WindowServer hit-tests
+the cursor location. A focus or overlay change in the narrow check-to-dispatch
+gap can alter the recipient, so physical receipt by the selected app remains
+unverified pending two-Mac acceptance. Target-bound `postToPid` is reserved for controller-authorized
+key/button release cleanup during reset, selection change, focus loss, or
+authorization revocation, using the original admitted target identity; it
+never carries ordinary input.
 
-On an explicit legacy Viewer window selection, the Host may activate the
-owning regular application. If Accessibility trust is already available, it
+On an explicit Viewer window selection, including when P6 is negotiated, the
+Host may activate the owning regular application before authorizing input. If
+Accessibility trust is already available, it
 may use the public AX window list and raise action to bring the exact selected
 window forward. Matching uses global point geometry and verifies the local
 window title when available; the title also breaks duplicate-geometry ties.
 Missing, ambiguous, or mismatched candidates are not raised. App activation or
-AXRaise is never proof of focus: legacy input remains blocked until a fresh
-WindowServer snapshot confirms foreground eligibility. P6 does not activate
-the selected app. Accessibility is optional for the legacy foreground path
-and is not a substitute for PostEvent permission.
+AXRaise is never proof of focus: input remains blocked until a fresh
+WindowServer snapshot confirms foreground eligibility. P6 uses the same
+foreground activation and input path; pairing and control generation add
+authorization gates but do not enable inactive-process delivery. Accessibility
+is optional for the legacy foreground path and is not a substitute for
+PostEvent permission.
 
 macOS does not expose a general public secure-input status query. The provider
 therefore reports `unknown` when Accessibility inspection is unavailable.
-Legacy foreground/window checks still protect the base PostEvent path, while
-P6 background input fails closed on unknown global or target state. A detected
-secure field remains rejected, and an explicit local `inactive`/`active`
+Foreground/window checks protect the base PostEvent path, while P6 input fails
+closed on unknown global or target state. A detected secure field remains
+rejected, and an explicit local `inactive`/`active`
 signal is accepted only from a Host-owned provider. It never infers secure-input
 safety from the Viewer or from received event data.
 
@@ -199,8 +215,10 @@ desktop's actual source.
 
 The real adapter is not invoked by automated tests. Manual OS verification
 must use a disposable test application, grant PostEvent access to the signed
-Host bundle, and confirm pointer/scroll/key behavior. Test the legacy path with
-the app foreground; test P6 with the app inactive, an accepted Host pairing,
-and known-safe Accessibility inspection. Then revoke the relevant permission
-or unpair the Viewer and verify that subsequent events are rejected. Do not use a password
+Host bundle, and confirm pointer/scroll/key behavior. Test P6 by starting with
+the app inactive, explicitly selecting it, and confirming that control stays
+unavailable until its PID is foreground. Verify ordinary events follow the
+cursor and hit-testing, and that focus loss blocks new input while cleanup
+releases remain target-bound. Then revoke the relevant permission or unpair the
+Viewer and verify that subsequent events are rejected. Do not use a password
 field, login window, authentication dialog, or a production app.

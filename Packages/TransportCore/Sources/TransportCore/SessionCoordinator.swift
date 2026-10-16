@@ -252,7 +252,7 @@ public struct SessionInputAdmissionToken: Equatable, Sendable {
     fileprivate let reconnectGeneration: UInt64
     fileprivate let authorizationGeneration: UInt64
     fileprivate let windowGeneration: UInt64
-    fileprivate let capability: Capability
+    fileprivate let capabilities: Set<Capability>
 }
 
 /// Reports whether an input send crossed into the session transport.
@@ -263,6 +263,14 @@ public enum SessionInputSendState: Equatable, Sendable {
     case transportSendStarted
 }
 
+/// Bounded reasons a send may be rejected before the transport boundary.
+public enum SessionInputSendRejection: String, CaseIterable, Equatable, Sendable {
+    /// The admission token does not match this message's window or capabilities.
+    case admissionTokenMismatch
+    /// The authorization epoch advanced while this token waited for the outbound mutex.
+    case authorizationEpochChangedAfterAdmission
+}
+
 /// Thread-safe observation for one input send attempt.
 ///
 /// A `SessionCoordinator` updates this immediately before invoking the
@@ -271,11 +279,20 @@ public enum SessionInputSendState: Equatable, Sendable {
 public final class SessionInputSendObservation: @unchecked Sendable {
     private let lock = NSLock()
     private var storedState: SessionInputSendState = .notStarted
+    private var storedPreTransportRejection: SessionInputSendRejection?
 
     public init() {}
 
     public var state: SessionInputSendState {
         lock.withLock { storedState }
+    }
+
+    public var preTransportRejection: SessionInputSendRejection? {
+        lock.withLock { storedPreTransportRejection }
+    }
+
+    fileprivate func markPreTransportRejection(_ rejection: SessionInputSendRejection) {
+        lock.withLock { storedPreTransportRejection = rejection }
     }
 
     fileprivate func markTransportSendStarted() {
@@ -1370,7 +1387,8 @@ public actor SessionCoordinator {
             throw SessionError.authorizationChanged
         }
         try validateAuthorization(for: payload)
-        guard let capability = requiredCapabilities(for: payload).first else {
+        let capabilities = requiredCapabilities(for: payload)
+        guard !capabilities.isEmpty else {
             throw SessionError.unauthorizedMessage(.inputEvent)
         }
         return SessionInputAdmissionToken(
@@ -1378,7 +1396,7 @@ public actor SessionCoordinator {
             reconnectGeneration: reconnectGeneration,
             authorizationGeneration: authorizationGeneration,
             windowGeneration: input.windowGeneration,
-            capability: capability
+            capabilities: capabilities
         )
     }
 
@@ -1395,7 +1413,8 @@ public actor SessionCoordinator {
         let payload = MessagePayload.inputEvent(input)
         try validateMessageDirection(for: payload.messageType, incoming: false)
         guard admission.windowGeneration == input.windowGeneration,
-              admission.capability == requiredCapabilities(for: payload).first else {
+              admission.capabilities == requiredCapabilities(for: payload) else {
+            observation?.markPreTransportRejection(.admissionTokenMismatch)
             throw SessionError.authorizationChanged
         }
 
@@ -1406,6 +1425,7 @@ public actor SessionCoordinator {
             throw SessionError.reconnectRequired
         }
         guard admission.authorizationGeneration == authorizationGeneration else {
+            observation?.markPreTransportRejection(.authorizationEpochChangedAfterAdmission)
             throw SessionError.authorizationChanged
         }
         try validateAuthorization(for: payload)

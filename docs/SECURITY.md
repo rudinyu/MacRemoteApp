@@ -2,23 +2,31 @@
 
 ## Foreground and P6 process-target input policy
 
-The default input path requires the selected app PID to equal
+Ordinary input always requires the selected app PID to equal
 `NSWorkspace.frontmostApplication.processIdentifier`, plus a safe regular
-layer-0 window from that app at the event location. Peers without the negotiated
-`backgroundControl` capability continue to use this foreground-only path.
-After explicit legacy window selection, Host may activate itself and
-cooperatively yield activation to the selected app; this request alone never
-authorizes input.
+layer-0 target and valid event geometry. This applies to peers with and without
+the negotiated `backgroundControl` capability. Events enter the public system
+stream and WindowServer hit-tests the cursor location; a focus or overlay
+change in the narrow final-check-to-dispatch gap can alter the actual
+recipient, so physical receipt by the selected target remains unverified.
+After explicit
+Viewer window selection, Host may activate itself and cooperatively yield
+activation to the selected regular app; this request alone never authorizes
+input. A selected app can still be viewed while inactive, but control is
+unavailable until it is foreground and remains so through each event.
 
-P6 is the explicit exception that allows control of a selected app while it is
-inactive. P6 input requires an authenticated Viewer whose pairing was accepted
-locally on the Host, a current selection and control generation,
-matching target process identity, valid geometry, PostEvent permission, a safe
-console/lock state, and successful secure-input checks. Host does not activate
-the selected app for P6. Viewer reports background-control readiness
-separately from foreground status. Capability negotiation and pairing trust
-never bypass per-event checks. Locked-screen, login-window, secure-input, and
-system authentication-dialog control remain prohibited.
+P6 adds Host-pairing trust and a control generation; it does not permit
+inactive-process input. Foreground P6 input uses the same optional global
+secure-input signal as legacy foreground input: a detected active state blocks
+input, while an unknown signal follows the existing foreground policy.
+Target-process Accessibility inspection is used only to classify an inactive
+selected target for safe cleanup; it never authorizes ordinary input. P6 input
+also requires an authenticated Viewer whose pairing was accepted locally on the
+Host, a current selection and control generation, matching target process
+identity, valid geometry, PostEvent permission, and a safe console/lock state.
+Capability negotiation and pairing trust never bypass per-event checks.
+Locked-screen, login-window, secure-input, and system authentication-dialog
+control remain prohibited.
 
 Window capture continuity is independent of input readiness. After selection,
 the Host resolves the exact layer-0 window from ScreenCaptureKit's full window
@@ -35,11 +43,10 @@ target loss, or Screen Recording permission loss still fails closed. None of
 these capture rules relaxes input authorization or the secure-input, lock,
 console-session, system-authentication-dialog, or PostEvent checks.
 
-P6 input requires current local admission, a live matching target
-and generation, valid geometry, PostEvent permission, a safe console/lock
-state, and the existing secure-input checks. The foreground signal remains
-truthful but does not by itself veto a paired, otherwise safe process target.
-Foreground eligibility also requires the selected PID to match
+P6 input requires current local admission, a live matching target and
+generation, valid geometry, PostEvent permission, foreground eligibility, a
+safe console/lock state, and the existing secure-input checks. Foreground
+eligibility requires the selected PID to match
 `NSWorkspace.frontmostApplication.processIdentifier`. The exact selected
 target must still exist as a valid layer-0 window owned by the selected PID
 and bundle. The top regular layer-0 WindowServer window must belong to that
@@ -47,22 +54,27 @@ same PID and bundle, but may have a different window identifier, as with an
 app-owned sheet or popover. Only layer-0 windows participate; nonzero layers
 are excluded, and an overlapping unknown-owner layer-0 window or window with
 missing layer metadata is an unresolved blocker. A bounded cooperative
-AppKit activation request is allowed only for an explicit legacy window
-selection. The Host must first confirm that it is frontmost before yielding
-activation to the target; if that cannot be confirmed, or cooperative
-activation is unavailable, input stays fail-closed and the Viewer tells the
-Host user to click or reactivate MacRemoteApp Host. The request does not
-authorize input, and P6 process targeting never activates its selected app.
-Process posting cannot guarantee which window within the app receives an
-event; that limit is disclosed before pairing.
+AppKit activation request is allowed only for an explicit Viewer window
+selection, including negotiated P6. The Host must first confirm that it is
+frontmost before yielding activation to the target; if that cannot be
+confirmed, or cooperative activation is unavailable, input stays fail-closed
+and the Viewer tells the Host user to click or reactivate MacRemoteApp Host.
+The request does not authorize input. Ordinary admitted events use the public
+system Quartz event stream and its normal cursor/window hit-testing. A
+target-bound PID post is reserved for safe cleanup releases of already
+admitted pressed state during reset, selection change, focus loss, or
+revocation, using the original target identity; it is never an ordinary input
+route.
 Pausing closes input admission and invalidates queued work while video remains
 active. Unpairing removes the trusted peer record, closes clipboard/input
 authorization, and stops the authenticated session. A separate control
-generation is echoed on every negotiated
-P6 input/source request; missing or stale generations are rejected even if
-the bytes arrive only after a quick resume. Known inactive global and
-target-process AX inspection are required for background eligibility;
-unavailable or mismatched target inspection is not consent.
+generation is echoed on every negotiated P6 input/source request; missing or
+stale generations are rejected even if the bytes arrive only after a quick
+resume. Foreground P6 uses the same optional global secure-input signal as
+legacy foreground input: a detected active state blocks input, while an
+unknown signal follows the established foreground policy. Known-safe global
+and target-process AX inspection is required only to classify an inactive
+target for safe cleanup; it does not authorize inactive-process input.
 Only safe target-bound releases of already admitted pressed
 state may follow the stop. Delayed pairing or storage completion must never
 restore an unpaired or replaced session. Storage errors block control; failed
@@ -133,7 +145,7 @@ Those assumptions must be stated rather than implied.
 | Malformed peer | Oversized or adversarial frames | Incremental bounded parsing, rate limits, safe teardown, no unbounded allocation |
 | Stale input after reconnect | Buffered events reach a new session/window | Stop input on disconnect; bind events to session/window generation and reauthorize |
 | Clipboard leakage | Text is logged or synced without local user choice | Host pairing trust plus Viewer-local clipboard opt-in, bounded text-only contract, redacted diagnostics, explicit teardown |
-| Permission abuse | App injects input while not authorized | Check PostEvent permission, foreground eligibility or P6 process-target safety, and session authorization at use time |
+| Permission abuse | App injects input while not authorized | Check PostEvent permission, foreground eligibility, P6 pairing/control generation, exact target identity, and session authorization at use time |
 | UI confusion | Operator thinks input is disabled when it is active | Visible states for pairing, authorization, focus, permissions, and input readiness |
 | Local process compromise | Another local process reads app memory | Document as out of V1 protection scope; minimize retention and avoid unnecessary copies |
 
@@ -229,7 +241,8 @@ authenticated transport
   AND current session authorization
   AND selected-window generation matches
   AND required macOS permission is present
-  AND (foreground eligibility OR negotiated, Host-authorized P6 target safety)
+  AND foreground eligibility
+  AND (P6 absent OR negotiated and Host-authorized control generation)
   AND capability is negotiated and authorized for this session
 ```
 
@@ -238,15 +251,17 @@ input injection operation or bounded batch. The Viewer must disable its input
 surface when the state is not ready. A UI label such as "connected" must not
 be treated as equivalent to "authorized to control".
 
-On the legacy input path, an explicit Viewer selection may activate an
-eligible regular application and, when the Host already has Accessibility
+On explicit Viewer window selection, with or without P6, Host may activate the
+selected regular application and, when the Host already has Accessibility
 trust, request the public Accessibility raise action for the exact selected
 window. The AX window must match the selected window's global point geometry
 and, when known, its local title; ambiguity or a known-title mismatch fails
-closed. Negotiated P6 instead targets the authorized selected process without
-activating it. P6 process posting cannot guarantee which window within an app
-receives an event. Neither AXRaise nor P6 negotiation grants input authority;
-the applicable per-event predicate above must pass. The Host menu-bar icon
+closed. Ordinary events use the public system Quartz event stream and normal
+cursor/window hit-testing. P6's process identity and safety checks supplement
+the same foreground requirement; PID-targeted posting is reserved for safe
+cleanup releases of already admitted state after focus loss or revocation.
+Neither AXRaise nor P6 negotiation grants input authority; the applicable
+per-event predicate above must pass. The Host menu-bar icon
 shows an active shared session, while its status menu reports the app's
 foreground state locally; the app name is not logged or sent to the Viewer.
 
@@ -276,10 +291,10 @@ can complete. There is no background restoration of the Host's prior source. See
 
 - Screen Recording is required for Host-side ScreenCaptureKit capture.
 - PostEvent permission is required for Host-side Quartz keyboard, pointer, and
-  scroll injection. Accessibility is optional for legacy secure-input
-  inspection and best-effort exact-window raising. P6 background targeting
-  requires a known safe AX state for the selected process; Accessibility never
-  substitutes for PostEvent permission.
+  scroll injection. Accessibility is optional for ordinary foreground
+  secure-input inspection and best-effort exact-window raising. P6 uses known
+  safe AX process inspection only to classify an inactive target for safe
+  cleanup; Accessibility never substitutes for PostEvent permission.
 - Permission prompts are initiated by the owning app at a user-understandable
   point; a remote peer cannot approve them.
 - The implementation must detect permission revocation and stop the affected
@@ -314,9 +329,10 @@ can complete. There is no background restoration of the Host's prior source. See
 - Validate event type, coordinate range, modifier state, sequence, rate, and
   selected-window generation.
 - Disable or reject input if the Host loses PostEvent permission, the
-  selected window closes/changes, the legacy foreground path loses focus, P6
-  process-target safety becomes unknown/unsafe, or the session state becomes
-  uncertain.
+  selected window closes/changes, foreground eligibility is lost, global
+  secure-input is detected, or the session state becomes uncertain. Unknown
+  target-process inspection blocks inactive-target cleanup classification;
+  it does not add a stricter foreground P6 gate.
 - Never send or log passwords, secure-input contents, or authentication-dialog
   interaction as a V1 feature.
 - A malformed input event must fail closed without partially applying a
@@ -328,18 +344,21 @@ M6 enforcement is split explicitly:
   current session and selected-window facts, and
   `InputCore.HostInputController` performs the final per-event check.
 - `CoreGraphicsAccessibilityContextProvider` rechecks PostEvent permission,
-  current bounds, on-screen window identity, foreground ordering, and lock
-  state. AX secure-input inspection is optional for the legacy path; P6
-  background eligibility requires known-safe global and target-process state.
+  exact live target identity and bounds, foreground eligibility, and
+  console/lock state. Foreground P6 uses the same global secure-input policy as
+  legacy foreground input; known-safe global and target-process state is needed
+  only for safe inactive-target cleanup.
 - Each typed command carries the target window, owning application
   identifier, process, and generation.
   `CoreGraphicsAccessibilityInputAdapter` repeats the complete
-  target/focus/permission check immediately before posting and never
-  activates a background window.
-- A known secure-input field is rejected. When the optional legacy
+  target/focus/permission check immediately before posting ordinary events to
+  the system Quartz event stream. Only safe cleanup releases may use
+  target-bound PID posting after focus changes.
+- A known secure-input field is rejected. When the optional global
   Accessibility signal is unavailable, independent foreground/window checks
-  still protect the base PostEvent path; P6 background input fails closed on
-  unknown inspection. No private API or bypass is used.
+  still protect the base PostEvent path for both legacy and P6 sessions.
+  Unknown target-process inspection blocks only inactive-target cleanup
+  classification. No private API or bypass is used.
 
 Held-input cleanup (release-before-clear, target-bound release after
 revocation, selection-change ordering, permission-loss pending cleanup,

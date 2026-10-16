@@ -47,7 +47,7 @@ func withTemporarySystemWideMessagingTimeout<Result>(
 }
 
 /// The real macOS context source. It checks the PostEvent permission required
-/// for Quartz event posting, the current on-screen window identity, foreground
+/// for Quartz event posting, the exact live WindowServer target, foreground
 /// ordering, and the console/lock state for every snapshot. Accessibility is
 /// an optional local signal for secure-input detection; it is not the base
 /// event-posting gate. This provider never attempts to activate a background
@@ -149,6 +149,50 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             case .unknown: return .unknown
             }
         }
+    }
+
+    static func foregroundProcessTargetFocusState(
+        foregroundFocus: HostInputFocusState,
+        globalSecureInputState: HostInputSecureInputState
+    ) -> HostInputFocusState {
+        switch globalSecureInputState {
+        case .active:
+            return .secureInput
+        case .inactive, .unknown:
+            // Foreground P6 uses the same optional global secure-input signal
+            // as the established foreground path. Target-process AX is only
+            // required to classify inactive-target cleanup safety.
+            return foregroundFocus
+        }
+    }
+
+    /// Classifies the P6 path from the selected process's live WindowServer
+    /// identity and process-specific safety facts. This intentionally does
+    /// not depend on ordered foreground-window classification: a separate
+    /// foreground signal remains responsible for the legacy path.
+    static func backgroundProcessTargetFocusState(
+        for selection: HostInputWindowSelection,
+        targetWindows: [WindowServerWindow],
+        frontmostProcessIdentifier: Int32?,
+        consoleState: HostInputFocusState?,
+        globalSecureInputState: HostInputSecureInputState,
+        targetSecureInputState: HostInputSecureInputState
+    ) -> HostInputFocusState {
+        if let consoleState { return consoleState }
+        guard let frontmostProcessIdentifier,
+              frontmostProcessIdentifier != selection.processIdentifier else {
+            return .unknown
+        }
+        guard let selected = liveTarget(for: selection, windows: targetWindows),
+              selected.layer == 0,
+              selected.isRegularApplication,
+              selected.bounds.isValid else {
+            return .windowUnavailable
+        }
+        return classifyBackgroundSecureInput(
+            global: globalSecureInputState,
+            target: targetSecureInputState
+        )
     }
 
     private static func focusedSecureInputState(
@@ -287,7 +331,11 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         }
 
         let windows = Self.onScreenApplicationWindows()
-        let selectedTarget = Self.liveTarget(for: selection, windows: windows)
+        let targetWindows = Self.targetWindowSnapshot(
+            windowIdentifier: selection.windowIdentifier,
+            windows: windows
+        )
+        let selectedTarget = Self.liveTarget(for: selection, windows: targetWindows)
         return HostInputContext(
             sessionAuthorized: session.authorized,
             authorizedWindowGeneration: session.authorizedWindowGeneration,
@@ -295,11 +343,12 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             currentWindowIdentifier: selectedTarget?.windowIdentifier,
             currentProcessIdentifier: selectedTarget?.processIdentifier,
             currentApplicationIdentifier: selectedTarget?.applicationIdentifier,
-            currentWindowBounds: currentWindowBounds(for: selection, windows: windows),
+            currentWindowBounds: currentWindowBounds(for: selection, windows: targetWindows),
             permission: Self.permissionState(),
             focus: focusState(
                 for: selection,
                 windows: windows,
+                targetWindows: targetWindows,
                 allowsBackgroundTargeting: session.processTargetingAuthorized
             ),
             mouseInputEnabled: session.mouseInputEnabled,
@@ -311,7 +360,11 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
     public func currentReleaseContext(for target: HostInputTarget) -> HostInputContext? {
         let session = sessionStateProvider()
         let windows = Self.onScreenApplicationWindows()
-        guard let liveWindow = Self.liveTarget(for: target, windows: windows) else {
+        let targetWindows = Self.targetWindowSnapshot(
+            windowIdentifier: target.windowIdentifier,
+            windows: windows
+        )
+        guard let liveWindow = Self.liveTarget(for: target, windows: targetWindows) else {
             return nil
         }
 
@@ -338,6 +391,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             focus: focusState(
                 for: selection,
                 windows: windows,
+                targetWindows: targetWindows,
                 allowsBackgroundTargeting: session.processTargetingAuthorized
             ),
             mouseInputEnabled: session.mouseInputEnabled,
@@ -355,7 +409,8 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
 
     private func focusState(
         for selection: HostInputWindowSelection,
-        windows: [OnScreenWindow],
+        windows: [WindowServerWindow],
+        targetWindows: [WindowServerWindow],
         allowsBackgroundTargeting: Bool = false
     ) -> HostInputFocusState {
         let deadline = Self.makeSecureInputProbeDeadline()
@@ -377,29 +432,37 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             return consoleState
         }
 
+        let frontmostProcessIdentifier = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let focus = Self.selectedWindowFocusState(
             for: selection,
             windows: windows,
-            frontmostProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier
+            targetWindows: targetWindows,
+            frontmostProcessIdentifier: frontmostProcessIdentifier
         )
         if allowsBackgroundTargeting {
-            let targetSecureInputState = targetSecureInputStateProvider?(selection.processIdentifier) ??
-                Self.detectTargetSecureInputState(
-                    processIdentifier: selection.processIdentifier,
-                    deadline: deadline
-                )
-            if focus == .notForeground {
-                // Background P6 requires both a known global safe signal and
-                // a target-specific safe AX result. Foreground legacy control
-                // continues to use independent WindowServer focus checks.
-                return Self.classifyBackgroundSecureInput(
-                    global: globalSecureInputState,
-                    target: targetSecureInputState
+            if frontmostProcessIdentifier != selection.processIdentifier {
+                let targetSecureInputState = targetSecureInputStateProvider?(selection.processIdentifier) ??
+                    Self.detectTargetSecureInputState(
+                        processIdentifier: selection.processIdentifier,
+                        deadline: deadline
+                    )
+                // P6 retains its strict process-safe secure-input check, but
+                // an inactive target is cleanup/readiness information only.
+                // Ordinary input still requires the selected process to be
+                // frontmost.
+                return Self.backgroundProcessTargetFocusState(
+                    for: selection,
+                    targetWindows: targetWindows,
+                    frontmostProcessIdentifier: frontmostProcessIdentifier,
+                    consoleState: nil,
+                    globalSecureInputState: globalSecureInputState,
+                    targetSecureInputState: targetSecureInputState
                 )
             }
-            if targetSecureInputState == .active {
-                return .secureInput
-            }
+            return Self.foregroundProcessTargetFocusState(
+                foregroundFocus: focus,
+                globalSecureInputState: globalSecureInputState
+            )
         }
         return focus
     }
@@ -437,8 +500,8 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
 
     static func liveTarget(
         for selection: HostInputWindowSelection,
-        windows: [OnScreenWindow]
-    ) -> OnScreenWindow? {
+        windows: [WindowServerWindow]
+    ) -> WindowServerWindow? {
         liveTarget(
             windowIdentifier: selection.windowIdentifier,
             processIdentifier: selection.processIdentifier,
@@ -449,8 +512,8 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
 
     static func liveTarget(
         for target: HostInputTarget,
-        windows: [OnScreenWindow]
-    ) -> OnScreenWindow? {
+        windows: [WindowServerWindow]
+    ) -> WindowServerWindow? {
         liveTarget(
             windowIdentifier: target.windowIdentifier,
             processIdentifier: target.processIdentifier,
@@ -463,8 +526,8 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         windowIdentifier: UInt64,
         processIdentifier: Int32,
         applicationIdentifier: String,
-        windows: [OnScreenWindow]
-    ) -> OnScreenWindow? {
+        windows: [WindowServerWindow]
+    ) -> WindowServerWindow? {
         windows.first(where: {
             $0.windowIdentifier == windowIdentifier &&
                 $0.processIdentifier == processIdentifier &&
@@ -472,44 +535,58 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         })
     }
 
-    /// Classifies a deterministic WindowServer snapshot and active workspace
-    /// process. An unresolved layer-0 window ahead of the selection blocks
-    /// focus only if its bounds overlap the selected window; invalid geometry
-    /// remains a blocker because its occlusion cannot be ruled out. Nonzero
-    /// layers do not participate. The first regular layer-0 application
-    /// window must belong to the selected process and bundle. It may be a
-    /// child window with a different WindowServer identifier.
+    /// Classifies ordered onscreen focus facts plus an exact target snapshot.
+    /// An unresolved layer-0 window ahead of an onscreen selection blocks
+    /// focus when its bounds overlap. For an offscreen target, any unresolved
+    /// overlapping onscreen window blocks because no z-order comparison is
+    /// available. The selected target must remain an exact regular,
+    /// layer-0 WindowServer record.
     static func selectedWindowFocusState(
         for selection: HostInputWindowSelection,
-        windows: [OnScreenWindow],
+        windows: [WindowServerWindow],
+        targetWindows: [WindowServerWindow]? = nil,
         frontmostProcessIdentifier: Int32?
     ) -> HostInputFocusState {
-        guard !windows.isEmpty else { return .windowUnavailable }
-        guard let selectedIndex = windows.firstIndex(where: {
+        let targetCatalog = targetWindows ?? windows
+        guard let selected = liveTarget(for: selection, windows: targetCatalog),
+              selected.layer == 0,
+              selected.isRegularApplication else {
+            return .windowUnavailable
+        }
+        guard selected.bounds.isValid else { return .windowUnavailable }
+
+        let selectedOnScreenIndex = windows.firstIndex(where: {
             $0.windowIdentifier == selection.windowIdentifier &&
                 $0.processIdentifier == selection.processIdentifier &&
                 $0.applicationIdentifier == selection.applicationIdentifier &&
-                $0.layer == 0
-        }) else {
-            return .windowUnavailable
-        }
-
-        let selected = windows[selectedIndex]
-        guard selected.bounds.isValid else { return .windowUnavailable }
+                $0.layer == 0 && $0.isRegularApplication
+        })
 
         // Nonzero-layer surfaces are outside this classifier. A layer value
         // we cannot read remains conservative because it may be a layer-0
         // overlay. An unresolved owner at layer 0 blocks only when it may
         // cover the selected target.
-        if windows[..<selectedIndex].contains(where: { window in
+        if let selectedOnScreenIndex {
+            if windows[..<selectedOnScreenIndex].contains(where: { window in
+                (window.layer == 0 || window.layer == nil) &&
+                    window.applicationIdentifier == nil &&
+                    Self.mayOverlap(window.bounds, selected.bounds)
+            }) {
+                return .unknown
+            }
+        } else if windows.contains(where: { window in
             (window.layer == 0 || window.layer == nil) &&
                 window.applicationIdentifier == nil &&
                 Self.mayOverlap(window.bounds, selected.bounds)
         }) {
+            // The target is absent from the ordered onscreen list, so there is
+            // no safe z-order comparison. Any unresolved onscreen surface
+            // overlapping its live WindowServer bounds remains a blocker.
             return .unknown
         }
 
         guard let frontmostProcessIdentifier else { return .unknown }
+        guard selectedOnScreenIndex != nil else { return .notForeground }
         guard frontmostProcessIdentifier == selection.processIdentifier else {
             return .notForeground
         }
@@ -534,7 +611,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
 
     private func currentWindowBounds(
         for selection: HostInputWindowSelection,
-        windows: [OnScreenWindow]
+        windows: [WindowServerWindow]
     ) -> InputWindowBounds? {
         windows.first(where: {
             $0.windowIdentifier == selection.windowIdentifier &&
@@ -543,31 +620,50 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         })?.bounds
     }
 
-    struct OnScreenWindow: Sendable {
+    struct WindowServerWindow: Sendable {
         let windowIdentifier: UInt64
         let processIdentifier: Int32
         /// WindowServer layer. Missing metadata remains distinguishable so
         /// potentially overlapping unknown layers can fail closed.
         let layer: Int?
-        /// `nil` means WindowServer reported an on-screen owner that this
-        /// process could not resolve. Keep unknown windows in order so focus
-        /// classification can reject them when they may cover the selection.
+        /// `nil` means the owner could not be resolved. Keep unknown windows
+        /// in the ordered on-screen list so focus classification can reject
+        /// them when they may cover the selection.
         let applicationIdentifier: String?
         let isRegularApplication: Bool
         let bounds: InputWindowBounds
     }
 
     fileprivate static func frontmostApplicationWindow(
-        in windows: [OnScreenWindow]
-    ) -> OnScreenWindow? {
+        in windows: [WindowServerWindow]
+    ) -> WindowServerWindow? {
         windows.first(where: {
             $0.layer == 0 && $0.applicationIdentifier != nil && $0.isRegularApplication
         })
     }
 
-    fileprivate static func onScreenApplicationWindows() -> [OnScreenWindow] {
+    fileprivate static func onScreenApplicationWindows() -> [WindowServerWindow] {
+        applicationWindows(options: [.optionOnScreenOnly, .excludeDesktopElements])
+    }
+
+    private static func targetWindowSnapshot(
+        windowIdentifier: UInt64,
+        windows: [WindowServerWindow]
+    ) -> [WindowServerWindow] {
+        // Prefer the same ordered onscreen snapshot used for focus checks. If
+        // the exact ID is absent, resolve it from all current-session
+        // WindowServer windows so an inactive P6 target remains verifiable.
+        guard !windows.contains(where: { $0.windowIdentifier == windowIdentifier }) else {
+            return windows
+        }
+        return applicationWindows(options: [.optionAll, .excludeDesktopElements])
+    }
+
+    private static func applicationWindows(
+        options: CGWindowListOption
+    ) -> [WindowServerWindow] {
         guard let rawWindows = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements],
+            options,
             kCGNullWindowID
         ) as? [[String: Any]] else {
             return []
@@ -590,7 +686,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             let application = NSRunningApplication(
                 processIdentifier: processIdentifier
             )
-            return OnScreenWindow(
+            return WindowServerWindow(
                 windowIdentifier: windowNumber,
                 processIdentifier: processIdentifier,
                 layer: (info["kCGWindowLayer"] as? NSNumber)?.intValue,
@@ -833,10 +929,35 @@ public enum HostInputSecureInputState: Equatable, Sendable {
     case unknown
 }
 
-/// Posts only the typed commands produced by `HostInputMapper`. The adapter
-/// repeats the selected-window, focus, and PostEvent checks immediately before
-/// each event is posted, then routes the event to the validated target
-/// process rather than to the global frontmost application.
+enum HostInputEventDeliveryRoute: Equatable {
+    case system
+    case targetProcessCleanup
+
+    static func resolve(
+        focus: HostInputFocusState,
+        isCleanupRelease: Bool
+    ) -> Self? {
+        if isCleanupRelease {
+            switch focus {
+            case .eligible, .notForeground, .backgroundEligible:
+                return .targetProcessCleanup
+            case .windowUnavailable, .lockedScreen, .secureInput, .unknown:
+                return nil
+            }
+        }
+        switch focus {
+        case .eligible:
+            return .system
+        case .notForeground, .backgroundEligible, .windowUnavailable, .lockedScreen, .secureInput, .unknown:
+            return nil
+        }
+    }
+}
+
+/// Posts only typed commands produced by `HostInputMapper`. Ordinary input
+/// uses the public system event stream, where the cursor and normal hit-testing
+/// select the recipient. PID-targeted posting is reserved for safe state
+/// cleanup after foreground eligibility or authorization has been lost.
 public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdapter, @unchecked Sendable {
     private let contextProvider: any HostInputContextProvider
 
@@ -887,7 +1008,7 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
             // Focus is an eligibility precondition, not a remote command to
             // activate a background app. The next real event must pass the
             // same foreground check again.
-            try validateTarget(
+            _ = try validateTarget(
                 target,
                 requiredCapability: .mouse,
                 location: nil,
@@ -992,25 +1113,29 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
         allowUnauthorizedStateRelease: Bool,
         allowNotForegroundStateRelease: Bool = false
     ) throws {
-        try validateTarget(
+        let context = try validateTarget(
             target,
             requiredCapability: requiredCapability,
             location: location,
             allowUnauthorizedStateRelease: allowUnauthorizedStateRelease,
             allowNotForegroundStateRelease: allowNotForegroundStateRelease
         )
-        // Re-read the foreground/target facts as the last operation before the
-        // OS post. Target-bound posting prevents redirection to another PID,
-        // while this final fail-closed check preserves the foreground-only
-        // policy as far as the public CoreGraphics API permits.
-        try validateTarget(
-            target,
-            requiredCapability: requiredCapability,
-            location: location,
-            allowUnauthorizedStateRelease: allowUnauthorizedStateRelease,
-            allowNotForegroundStateRelease: allowNotForegroundStateRelease
-        )
-        event.postToPid(target.processIdentifier)
+        // This is the final live target, permission, generation, capability,
+        // and focus check before dispatch. A normal event is never directed
+        // to a PID: Quartz hit-tests it at its actual cursor location.
+        let cleanupRelease = allowUnauthorizedStateRelease && allowNotForegroundStateRelease
+        guard let route = HostInputEventDeliveryRoute.resolve(
+            focus: context.focus,
+            isCleanupRelease: cleanupRelease
+        ) else {
+            throw HostInputAdapterError.targetUnavailable
+        }
+        switch route {
+        case .system:
+            event.post(tap: .cghidEventTap)
+        case .targetProcessCleanup:
+            event.postToPid(target.processIdentifier)
+        }
     }
 
     private func validateTarget(
@@ -1043,7 +1168,7 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
             requiredCapability = .mouse
             location = nil
         }
-        try validateTarget(
+        _ = try validateTarget(
             target,
             requiredCapability: requiredCapability,
             location: location,
@@ -1058,7 +1183,7 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
         location: InputScreenPoint?,
         allowUnauthorizedStateRelease: Bool,
         allowNotForegroundStateRelease: Bool
-    ) throws {
+    ) throws -> HostInputContext {
         var context = contextProvider.currentContext()
         if allowUnauthorizedStateRelease,
            !selectedTargetMatches(context, target) {
@@ -1076,20 +1201,26 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
         }
 
         guard selectedTargetMatches(context, target),
+              context.currentWindowIdentifier == target.windowIdentifier,
+              context.currentProcessIdentifier == target.processIdentifier,
+              context.currentApplicationIdentifier == target.applicationIdentifier,
               let currentBounds = context.currentWindowBounds,
               currentBounds.isValid else {
             throw HostInputAdapterError.targetUnavailable
         }
 
-        if context.focus == .eligible ||
-            (context.focus == .backgroundEligible && context.processTargetingAuthorized) {
-            guard context.currentWindowIdentifier == target.windowIdentifier,
-                  context.currentProcessIdentifier == target.processIdentifier,
-                  context.currentApplicationIdentifier == target.applicationIdentifier else {
+        if context.focus != .eligible {
+            guard allowUnauthorizedStateRelease, allowNotForegroundStateRelease else {
                 throw HostInputAdapterError.targetUnavailable
             }
-        } else if !(allowNotForegroundStateRelease && context.focus == .notForeground) {
-            throw HostInputAdapterError.targetUnavailable
+            switch context.focus {
+            case .notForeground:
+                break
+            case .backgroundEligible where context.processTargetingAuthorized:
+                break
+            default:
+                throw HostInputAdapterError.targetUnavailable
+            }
         }
 
         if !allowUnauthorizedStateRelease {
@@ -1110,6 +1241,7 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
            !locationIsInsideCurrentBounds(location, bounds: currentBounds) {
             throw HostInputAdapterError.targetUnavailable
         }
+        return context
     }
 
     private func locationIsInsideCurrentBounds(

@@ -2,13 +2,17 @@
 
 ## P6 status: active extension; physical acceptance pending
 
-[P6 Host-controlled input](P6_BACKGROUND_CONTROL.md) allows a trusted Viewer to
-control the selected app process while it is inactive. Host acceptance of the
-pairing is the durable local authorization; no separate per-session control
-prompt is used. The security contract still requires capability negotiation,
-current target and generation checks, valid permissions and geometry, and
-fail-closed secure-input and console-state checks. Peers without P6 retain the
-foreground-only path. P6 does not authorize locked-screen control.
+[P6 Host-controlled input](P6_BACKGROUND_CONTROL.md) adds pairing trust,
+control-generation, and exact target-identity checks for a trusted Viewer.
+Target-process Accessibility inspection is used only to classify inactive
+targets for safe cleanup. P6 does not permit inactive-process input: explicit
+Viewer window selection cooperatively
+foregrounds the selected regular app, and every ordinary event requires it to
+remain foreground. Host acceptance of the pairing is the durable local
+authorization; no separate per-session control prompt is used. The security
+contract also requires capability negotiation, current target and generation
+checks, valid permissions and geometry, and fail-closed secure-input and
+console-state checks. P6 does not authorize locked-screen control.
 
 P6 deterministic implementation checks are part of the current validation;
 physical P6 input/IME acceptance and Intel-Host-to-Apple-Silicon-Viewer M10
@@ -203,16 +207,16 @@ or WebRTC.
 - Verify no protected content is sent before authorization.
 
 M3 cannot claim its dependency is complete while any M2 security gate remains
-open. M2's code gates and repeatable physical-test harness are complete; lack
-of an Intel machine may be recorded as an environment exception for the final
-cross-hardware LAN evidence, but it is not an exception for peer-authentication,
-consent, authorization, queue, or teardown correctness.
+open. M2's code gates and repeatable physical-test harness are complete, and
+the operator confirms physical Bonjour/TLS communication works. Detailed
+pairing and teardown checks remain part of the broader M10 acceptance.
 
 ## M3 — Host window discovery and capture
 
-The CaptureCore implementation and deterministic tests are complete. A live
-ScreenCaptureKit frame has been verified on the current M5; other machines
-still require their own logged-in window-server and Screen Recording evidence.
+The CaptureCore implementation and deterministic tests are complete. The
+operator's physical Viewer screenshot confirms a selected Host window frame
+reached the Viewer. Physical Screen Recording revocation and selected-window
+change/close behavior are not separately recorded and remain manual checks.
 
 ### Scope
 
@@ -250,8 +254,10 @@ Complete for the deterministic M4 gate. `CodecCore` now owns the bounded
 VideoToolbox adapters, H.264 decoder configuration payload, generation/keyframe
 rules, and frame queue. `Apps/Viewer/MetalVideoRenderer.swift` owns the
 Viewer-side Metal/Core Image presentation path and aspect-fit layout. The
-hardware encode/decode smoke is opt-in because it requires a local VideoToolbox
-and window/display environment.
+operator confirms a live Host frame was displayed by the physical Viewer,
+exercising the real codec and presentation path. The fixture-based
+encode/decode smoke remains opt-in; physical resize/aspect-ratio and sustained
+frame-pacing checks are not separately recorded.
 
 ### Scope
 
@@ -326,7 +332,7 @@ handling, no clipboard, and no arbitrary serialized `CGEvent` transport.
   backpressure.
 - Manual Viewer test with a local synthetic stream fixture.
 
-## M6 — Host foreground and process-target input injection
+## M6 — Host foreground input injection with P6 safety checks
 
 ### Status
 
@@ -344,21 +350,24 @@ has not been run automatically.
 - Implement Host-side InputCore mapping and the CoreGraphics/Accessibility
   adapter.
 - Require current session authorization, selected-window generation, required
-  permission, and applicable foreground or negotiated P6 process-target
-  eligibility before each input injection.
+  permission, and selected-app foreground eligibility before every ordinary
+  input injection. Foreground P6 uses the same global secure-input policy as
+  the legacy path; P6 target-process inspection is required only to classify
+  an inactive target for safe cleanup.
   The exact selected target must remain a valid layer-0 window. Foreground
   eligibility requires an active-PID match and a top regular layer-0
   WindowServer window owned by the selected PID and bundle; its identifier
   may differ from the selected window, allowing app-owned sheets or popovers.
   Potentially overlapping unresolved layer-0 windows remain blockers.
 - Limit cooperative foreground activation to explicit window selection on
-  macOS 14 or later. Host must confirm it is frontmost before
-  yielding activation to the target for peers without P6. If that confirmation
+  macOS 14 or later, including negotiated P6. Host must confirm it is
+  frontmost before yielding activation to the target. If that confirmation
   fails or the API is unavailable, foreground input stays fail-closed and the
   Viewer asks the Host user to click or reactivate MacRemoteApp Host. Activation
-  does not authorize input. Negotiated P6 instead requires Host-accepted
-  pairing trust and safe process-target checks while the selected app may
-  remain inactive.
+  does not authorize input. Negotiated P6 also requires Host-accepted pairing
+  trust and a valid control generation, while retaining the same foreground
+  requirement. Target-process inspection is reserved for safe inactive-target
+  cleanup classification.
 - Add explicit failure states and stop-input behavior for window/focus/
   permission changes.
 
@@ -370,19 +379,24 @@ authentication-dialog automation, or privilege escalation.
 
 ### Exit criteria
 
-- Authorized pointer, button, scroll, keyboard, and modifier events affect
-  only the selected target. Legacy peers require foreground eligibility;
-  negotiated P6 requires trusted pairing and safe process-target state while
-  allowing the selected app to remain inactive.
-- Losing permission, applicable focus or P6 target safety, window identity, or
-  session state disables/rejects input immediately and visibly.
+- Authorized pointer, button, scroll, keyboard, and modifier events are
+  dispatched through the system event stream only while the selected app is
+  confirmed foreground. P6 additionally requires trusted pairing and a valid
+  control generation; target-process inspection is reserved for safe cleanup.
+- The final foreground check cannot make system dispatch atomic with focus or
+  overlay changes. Physical receipt by the selected app remains a two-Mac
+  acceptance item.
+- Losing permission, foreground eligibility, window identity, or session state
+  disables/rejects input immediately and visibly. Unknown target-process
+  inspection prevents inactive-target cleanup but does not add a stricter
+  foreground-input gate.
 - No arbitrary event archive or unvalidated remote event reaches the OS API.
 
 ### Tests and verification
 
 - Unit tests with fake injection adapters and authorization matrices.
 - Manual test against a safe test application for pointer and keyboard events.
-- Tests for permission revocation, focus loss, P6 process-target eligibility,
+- Tests for permission revocation, focus loss, P6 process-target safety,
   stale window generation, malformed events, and reconnect.
 - Verify secure-input and locked-screen scenarios are rejected/documented.
 
@@ -518,8 +532,10 @@ role-specific local Keychain identity and peer-trust service on each endpoint,
 TLS bootstrap, two-sided code
 confirmation, and an explicit Viewer window picker; an optional peer
 certificate remains available only for pinned migration and diagnostics. The
-actual Intel Host to Apple Silicon Viewer run cannot be claimed until it is
-executed on both physical Macs.
+operator confirms physical Bonjour/TLS communication works and a selected Host
+window frame reached the Viewer. Full Intel Host to Apple Silicon Viewer
+acceptance remains open for input, recovery, clipboard, performance, and UI
+lifecycle behaviors.
 
 The app-shell implementation includes native menu commands for both roles,
 shared release metadata, same-window Viewer Settings, and a retained Host

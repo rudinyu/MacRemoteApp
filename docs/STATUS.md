@@ -14,29 +14,67 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 
 The public source snapshot at commit `a63222e`
 is included in the signed and notarized `0.2.1011` RC; both app bundle plists
-use Build `1011`. The latest completed in-house Debug diagnostic pair is Build
-`1024`; both role apps, ZIPs, and DMGs were signed, notarized, stapled, and
-Gatekeeper verified on 2026-10-15. These are diagnostic artifacts, not a public
-release. Build `1025` is the current M10 source candidate. Its complete local
+use Build `1011`. Build `1032` is the current M6 global system-event input
+candidate; both role plists identify Version `0.2`, Build `1032`. The M6
+implementation passed `.codex/ci.sh` on 2026-10-16 after the build-number
+update. Its in-house Debug Host and Viewer apps and DMGs are Developer ID
+signed, Apple notarized, stapled, and passed Gatekeeper/package audits. Apple
+accepted all four submissions: Host app ZIP `82dcb863-4a7c-44b7-8537-51c44f9dba27`,
+Viewer app ZIP `90896cc5-18c8-41f6-ba82-da22b81c15ab`, Host DMG
+`4043def5-28d8-4587-9f9f-370807284366`, and Viewer DMG
+`671645e8-caae-4863-8698-9ef4ab0569de`. The DMGs are in
+`build/debug-diagnostic/`: Host SHA-256
+`74e7129d3707f66d3b54e208c710ed5f68c97826979f17321587c0b1722baefb`; Viewer
+SHA-256 `c9c5420a2789e58e2030006c67e7ad01095a90971f219d87efea12e0933cd4c1`.
+Physical two-Mac input-receipt acceptance remains pending. Build `1031` is the
+previous signed and notarized in-house Debug artifact. Build `1030` is
+superseded. Its Dropbox
+Viewer log copy records `attempted=0` through `05:45:49Z`; the local Viewer log
+continues with 18 locally accepted `mouse_move` events at `06:04:12Z`,
+`06:04:37Z`, and `06:05:48Z`, with no button or keyboard events. The Dropbox
+Host log has no matching input summaries for those later attempts and ends at
+`05:46:07Z`, so these logs do not establish that the target app received a
+click. They do show Host readiness alternating between
+`background_target_ready` and `focus_unavailable`. Build `1029` passed its code
+gate before its metadata update; Apple accepted its
+notarization and its Debug DMG was promoted, but the build is withheld after
+source review found an input-rejection provenance recovery gap. Do not use
+Build `1029` for physical acceptance. Build `1028` is the previous locally
+audited, Developer ID signed Debug pair; it was not submitted to Apple for
+notarization. Build `1027` was the previous unwithheld notarized in-house
+Debug build. These are diagnostic artifacts, not a public release. Build
+`1025`'s complete local
 `.codex/ci.sh` validation passed on 2026-10-15, including Host arm64/x86_64 and
 Viewer arm64 builds, deterministic package/app tests, and local testing-channel
-packaging/audit. The separate signed/notarized Debug diagnostic pair has not
-been built, and no physical retest has been performed. Build `1025` targets the
-reproducible Viewer `incoming_message_backpressure` disconnect during video
+packaging/audit. Build `1025` signed/notarized Debug apps, ZIPs, and DMGs were
+present in `build/debug-diagnostic/`; the package audit and stapled-ticket
+checks passed on 2026-10-15. The operator tested Build `1025` on both Macs, confirming
+physical Bonjour/TLS communication and a Host window frame reaching the Viewer
+before the disconnect; the broader M10 retest remains incomplete. Build `1025`
+targets the reproducible Viewer `incoming_message_backpressure` disconnect during video
 streaming. Build `1021` added an ordered Viewer-receipt barrier for authorization
 transitions to address an identified immediate-disconnect race. Build `1022`
 adds selected-window capture continuity when the app is inactive,
 transient-catalog protection, and bounded same-owner stream recovery. Its full
 `.codex/ci.sh` validation passed on 2026-10-14. The reported two-Mac symptom
-still requires manual retest. The [Debug log guide](DEBUG_LOG_COLLECTION.md)
+was reproduced in that physical retest. The [Debug log guide](DEBUG_LOG_COLLECTION.md)
 records the fixed disconnect fields as available starting with Build `1019`.
 Build `1017` exposed a Viewer watchdog crash and a Host clipboard consent sheet
 that appeared only when Host quit. Build `1018` fixes both watchdog timing
 paths and the consent sheet lifecycle. The prior
 `0.2.1010` RC was built from commit
 `1e422da8799f183487276e2295008c6ebe499ec8` and is superseded. Physical
-acceptance remains pending operator-recorded evidence for the exact installed
-build. Historical Build `1018` includes the negotiated P6 process-target path
+full M10 acceptance remains pending; the latest operator evidence for Build
+`1025` confirms connection and a frame but not the remaining acceptance rows.
+The latest Build `1025` click run recorded 66 locally accepted input events,
+then two Viewer input-send failures in its second input window
+(`authorization_not_ready` and `held_state_release_failure`) before reconnect
+sequence 4. Host logged `transport_eof`; its delayed aggregate reported 66
+received, 64 injected, and two rejected (one authorization and one invalid
+event). Redacted records do not identify either rejected event. The deployed
+Viewer log lacks the underlying failure and boundary fields, so the exact cause
+of the held-state failure is unknown.
+Historical Build `1018` includes the negotiated P6 process-target path
 with separate Host control approval and a per-session Host clipboard prompt.
 Build `1022` uses Host acceptance of the authenticated
 Viewer pairing as durable input trust and negotiated Host clipboard authority,
@@ -48,6 +86,244 @@ adds fixed Viewer input-failure categories. Build `1024` records the actual
 refreshes input readiness without resetting the authenticated video session;
 failures after the call remain delivery-uncertain and end the session to
 release Host-held state. Physical acceptance remains pending.
+
+Build `1026` passed the full `.codex/ci.sh` validation on 2026-10-15, including
+Host arm64/x86_64 and Viewer arm64 builds, deterministic tests, and testing-
+channel packaging/audit. Its in-house Debug Host and Viewer apps, ZIPs, and DMGs
+were Developer ID signed, accepted by Apple, stapled, and passed signature,
+Gatekeeper, and notarized-ticket audits. The four Apple submissions were
+accepted (Host app ZIP `8dc351c0-3183-4aca-bbe0-40da8e3dc769`, Viewer app ZIP
+`43a9575e-edd2-4f25-ae1c-94b920c73de3`, Host DMG
+`bd7b12a6-a7c2-4599-a33b-eb27975c7966`, Viewer DMG
+`6db9aa92-18b1-46d6-8deb-798bde5c9e02`). The artifacts were then in
+`build/debug-diagnostic/`; later diagnostic builds replaced that channel.
+Physical Build `1026` retesting remains pending.
+
+Build `1026` preserves the authenticated video session after a held-state
+release failure only when Viewer positively identifies an authorization
+change rejected before transport invocation. Host fences input admissions,
+discards pending input, and resets held state before each wire authorization
+change; the fence remains closed until the authorization receipt is confirmed.
+The local input-admission transition also fences and resets. Generic readiness,
+reconnect, fallback, and uncertain-delivery failures remain terminal when held
+state may remain. Focused `HostRuntimeTests` passed 40/40 and
+`ViewerRuntimeTests` passed 53/53. The full `.codex/ci.sh` validation and
+notarized Debug artifact checks passed. Physical Build `1026` logs were
+reviewed below; the latest Host file does not include the Viewer click test.
+
+The Build `1026` M10 diagnostic summary reported Viewer connection 2 made 54
+input attempts: 22 were locally accepted and 32 were rejected as
+`authorization_not_ready` before transport. The paired Host summary reported
+22 received and 22 calls to the PID-targeted event-post API, with no Host
+rejections. A newer Dropbox Host log (server modified
+`2026-10-15T07:53:14Z`, final event `07:53:06.747Z`) shows connection 4
+selected at `07:33:47Z`. The local Viewer recorded three input events accepted
+with no send failures at `07:36:21.241Z`; Host recorded three received,
+admitted, and injected events at `07:36:21.021Z`, with zero rejections or
+permission, authorization, focus, and target failures. The Host's `injected`
+count confirms that its PID-targeted posting API was called, not that the target
+app consumed the events. Video continued on connection 4 until `07:45:57Z`.
+At that time Viewer logged `stopping`, received a peer `close`, and cleared the
+selection; it reconnected about one second later. The new session connected but
+had no selected window or video. Since this orderly stop occurred about nine
+and a half minutes after the click, and the click's three events had no Host
+rejections, these logs do not support attributing that later stop to the click.
+They do not record why the Host sent the close, and actual target-app response
+to the injected events remains unverified. Repeated Viewer main-actor stalls
+around 0.8–1.1 seconds were also present during the session.
+
+### 0.2.1032 M6 in-house Debug diagnostic artifacts
+
+Build `1032` adds system-queue Quartz delivery for ordinary Host input after
+the selected app has been foregrounded and its live window, permission,
+pairing, capability, and authorization generation pass validation. P6 remains
+a pairing/generation extension; it does not grant inactive-process input.
+The full `.codex/ci.sh` gate passed after the version update. Host and Viewer
+Debug apps and DMGs were Developer ID signed, accepted by Apple, stapled, and
+passed Gatekeeper, ticket, and final package audits. Apple submission IDs:
+Host app ZIP `82dcb863-4a7c-44b7-8537-51c44f9dba27`, Viewer app ZIP
+`90896cc5-18c8-41f6-ba82-da22b81c15ab`, Host DMG
+`4043def5-28d8-4587-9f9f-370807284366`, Viewer DMG
+`671645e8-caae-4863-8698-9ef4ab0569de`. The DMGs are in
+`build/debug-diagnostic/`:
+
+| Delivered DMG | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1032.dmg` | `74e7129d3707f66d3b54e208c710ed5f68c97826979f17321587c0b1722baefb` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1032.dmg` | `c9c5420a2789e58e2030006c67e7ad01095a90971f219d87efea12e0933cd4c1` |
+
+Physical two-Mac input-receipt acceptance remains pending. These artifacts are
+for in-house diagnostics, not a public release.
+
+### 0.2.1031 M10 in-house Debug diagnostic artifacts
+
+Both role plists identify Version `0.2`, Build `1031`. At artifact generation,
+this build included the M10 P6 background-target correction: eligibility
+followed the exact live WindowServer target and process-specific safety checks
+without depending on unrelated foreground-window overlap classification. Its
+source kept the foreground-only path separately checked and allowed background
+input without activating the selected app. The current source policy supersedes
+that behavior: explicit window selection foregrounds the selected regular app
+for every peer, and ordinary input requires it to remain foreground.
+
+The full `.codex/ci.sh` gate passed on 2026-10-16, including Host `arm64` and
+`x86_64`, Viewer `arm64`, deterministic tests, the M8 benchmark, and M9
+testing-channel audit. Host and Viewer Debug apps and DMGs were Developer ID
+signed, accepted by Apple, stapled, and passed signature, Gatekeeper, ticket,
+and final package audits. Apple submission IDs: Host app ZIP
+`2639e1b3-1b9a-4a2f-a757-fef3c00ba664`, Viewer app ZIP
+`dba324da-7c24-40d8-a748-b5bd2407b28f`, Host DMG
+`0b6bb1a3-7959-46bf-803b-0faff58e629b`, Viewer DMG
+`0236bb9b-1ae7-4315-bc91-894cfc9488fd`. The signed and notarized artifacts
+are in `build/debug-diagnostic/`:
+
+| Delivered DMG | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1031.dmg` | `9f09baa380ab650e0df1f0e6741ef3dc1a6a13520e669deb8a4d1c713d83cd84` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1031.dmg` | `d2ef32ae9d96d72e3aa0038489130247ea9cd4d334d5a08db390ffa452945dce` |
+
+Physical two-Mac foreground input-delivery acceptance remains pending. Local
+validation and Apple notarization do not establish that the selected app
+consumes system-dispatched mouse or keyboard events.
+
+### 0.2.1030 M10 in-house Debug diagnostic artifacts
+
+Build `1030` is historical and superseded by the Build `1031` source
+candidate. At artifact generation, both role source plists identified Version
+`0.2`, Build `1030`. This source preserved authorization-epoch recovery only
+when a send observation positively identifies
+`authorizationEpochChangedAfterAdmission`.
+An admission-token mismatch, an expected-epoch mismatch rejected before
+admission, and a post-admission authorization rejection without recognized
+provenance do not receive that held-state recovery exemption; if a key or
+button may remain held, those failures end the session. When no held state may
+remain, known pre-transport failures still invalidate the old input scope and
+allow readiness to be checked again. Delivery-uncertain failures remain
+session-ending when held state may remain.
+
+The full `.codex/ci.sh` gate passed on 2026-10-16, including Host `arm64` and
+`x86_64` builds, Viewer `arm64`, deterministic tests, the M8 benchmark, and M9
+testing-channel artifact audit. Host and Viewer Debug apps and DMGs were
+Developer ID signed, accepted by Apple, stapled, and passed signature,
+Gatekeeper, notarization-ticket, and final package audits. Apple submission
+IDs: Host app ZIP `db3c53ab-9b58-4fef-bc63-aa016580bd61`, Viewer app ZIP
+`d9edf258-5643-4330-979c-1e486a8a096b`, Host DMG
+`5f80c94f-24e5-4d58-aa36-a33c501ff7e2`, Viewer DMG
+`a28327e2-5ee4-4813-b558-d2b691e265d8`. The Build `1030` DMGs were
+superseded and replaced in `build/debug-diagnostic/` by Build `1031`; their
+hashes below are the historical generation record:
+
+| Delivered DMG | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1030.dmg` | `c362f52beb713ee9559ff32b572a4167c0fd52fee5552d9f5bd01c99cd41b86c` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1030.dmg` | `354b80884ca99fd3d4a695aa8c9335561878facdd79235147620242dd2618dd3` |
+
+These are historical internal diagnostic artifacts, not a public release or
+the current test pair. The Dropbox Viewer copy records `attempted=0` through
+`05:45:49Z`; the local Viewer log later records 18 locally accepted mouse
+moves across three input windows, with no button or keyboard events. The
+Dropbox Host copy has no matching input summaries for those later attempts and
+ends at `05:46:07Z`. The logs identify Host readiness instability and
+Viewer-side readiness suppression but do not establish a click reaching the
+Host or target app. Physical two-Mac acceptance and the documented end-to-end
+Viewer send-race path remain unverified. Build `1031` was the prior validated
+and notarized in-house Debug pair before Build `1032` superseded it.
+
+### 0.2.1029 M10 authorization-epoch recovery candidate — withheld
+
+Both role source plists identify Version `0.2`, Build `1029`. The fix binds an
+input admission token to the complete required capability set and retains the
+authorization-generation fences before admission and after the outbound
+mutex. This removes dependence on selecting an arbitrary member from an
+unordered set. The Viewer also reports bounded, privacy-safe categories that
+separate an admission-token mismatch from an authorization epoch that changed
+after admission, both before transport invocation. The old-scope event is
+rejected and discarded; a refreshed authorization scope can resume input.
+Errors after transport invocation remain delivery-uncertain and session-ending
+when held input state may remain. The Build `1028` logs do not distinguish
+these rejection sites and do not establish which one caused its failures.
+
+The full `.codex/ci.sh` gate passed for the code before the Build `1029`
+metadata update. Focused TransportCore input-admission, Viewer recovery, and
+Viewer diagnostic-classification tests passed. Apple accepted Build `1029`'s
+notarization and its Debug DMG was promoted. A later source review found that
+the Viewer treated an admission-token mismatch and an authorization epoch
+change after admission as the same recoverable typed failure. Build `1029` is
+therefore withheld and must not be used for physical acceptance. Build `1030`
+contained the source correction; its complete `.codex/ci.sh` gate, Developer
+ID signing, Apple notarization, stapling, Gatekeeper checks, and artifact audit
+passed on 2026-10-16. Build `1030` is now superseded by the validated and
+notarized Build `1031` in-house Debug pair. Its logs do not establish
+target-app input. Physical two-Mac acceptance remains pending.
+
+### 0.2.1028 M10 previous in-house Debug diagnostic artifacts
+
+Both role source plists identify Version `0.2`, Build `1028`. This Debug
+diagnostic build keeps the production bundle identifiers and adds bounded
+Viewer subcategories for authorization failures before transport, plus fixed
+input-event-kind aggregates on both Viewer and Host. The summaries contain no
+key or pointer values, coordinates, window titles, clipboard text, or raw error
+messages.
+
+The full `.codex/ci.sh` gate passed on 2026-10-15 with Xcode at
+`/Applications/Xcode.app/Contents/Developer`. Host `arm64`/`x86_64` and Viewer
+`arm64` Debug apps were Developer ID signed with hardened runtime and empty
+Debug entitlements. The package and final DMG audits passed. These artifacts
+were previously staged in `build/debug-diagnostic/`; the channel directory
+now contains Build `1031`:
+
+| Delivered DMG | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1028.dmg` | `7af5a6ecbf603357660b7bd46c30333edeec656ed4265124de7269f052a7c6af` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1028.dmg` | `188ae0f9577772b564726a88159593d45fa18f2a3d1af3f58cf9ffc65a18324d` |
+
+No Apple notarization or physical two-Mac test was performed for Build `1028`.
+The Dropbox Host log available during this review is Build `1027`, last
+modified at `2026-10-15T08:51:25Z` and ending at `08:51:20Z`. The Viewer log
+records 211 input attempts at `09:10:11Z`–`09:10:21Z`: 99 were locally
+accepted and 112 failed before transport as `authorization_not_ready`, even
+though readiness had reported `ready` at `09:10:07.976Z`. The Host log ends
+before that Viewer interval, so those accepted attempts cannot be correlated
+with Host receipt. In the earlier interval, Host recorded three
+received/admitted/injected events with no rejection; an injected count only
+confirms that the posting API was called, not that the target app consumed the
+events. Build `1028` recorded a broad pre-transport authorization category but
+did not distinguish the rejection sites. Build `1029` adds that distinction;
+physical input delivery remains unverified pending a correlated retest.
+
+### 0.2.1027 M10 in-house Debug diagnostic artifacts
+
+Both role source plists identify Version `0.2`, Build `1027`. The picker stays
+limited to eligible windows ScreenCaptureKit reports on-screen. An inactive
+app window occluded by another app can be selected when it remains on-screen;
+minimized, hidden, and off-space windows are not newly selectable. After an
+exact target has been authorized, CaptureCore can revalidate that same window
+while inactive/offscreen, and InputCore falls back to the full current-session
+WindowServer list only when the selected ID is absent from the ordered onscreen
+list. Input admission still requires exact window/PID/bundle identity, layer-0
+safe geometry, the authorized generation, pairing trust, PostEvent permission,
+known-safe global and target secure-input checks, and an unlocked console
+session. An offscreen target is classified only as non-foreground and can pass
+only the existing P6 background-safety gate.
+
+Focused CaptureCore and InputCore regression checks cover the onscreen picker
+boundary, exact full-list target resolution, overlapping unresolved-window
+rejection, and target-bound background mouse-button mapping. The complete
+`.codex/ci.sh` gate passed on 2026-10-15, including Host arm64/x86_64 and
+Viewer arm64 builds, package and app tests, M8 benchmark, and M9 local
+packaging audit. Build `1027` Host and Viewer apps, ZIPs, and DMGs were
+Developer ID signed, accepted by Apple, stapled, and passed the final
+signature, Gatekeeper, and ticket audits. Apple submission IDs: Host app ZIP
+`87d6a242-57cc-4516-b219-09185d532de8`, Viewer app ZIP
+`1e3d09e4-12b2-4476-b804-197a70ea2c2f`, Host DMG
+`cfeb2c5f-0230-4194-ac51-17c7ec850590`, Viewer DMG
+`9e070db3-1f96-4e48-a518-e24ec5c13ecd`. At the time these hashes were
+recorded, both DMGs were in `build/debug-diagnostic/`; Build `1031` has since
+replaced the channel directory. SHA-256: Host
+`9d5bb85fbbb484c9436777fd5652e08f250fe1a61a1f1a42ec293491f04780b4`, Viewer
+`6051b97878f140ae75a3266f63fbc7f1f55c4a0aabb07e0428822f306ef7ac62`.
+Physical Build `1027` acceptance, including background selection and actual
+mouse/keyboard delivery to a disposable app, remains pending.
 
 Build `1024` passed the full `.codex/ci.sh` gate on 2026-10-15. The universal
 Host Debug app and arm64 Viewer Debug app, their ZIPs, and both DMGs were
@@ -61,6 +337,24 @@ and `MacRemoteApp-Viewer-debug-diagnostic-0.2.1024.dmg`.
 Build `1024` Viewer launched on the local workstation and wrote its startup
 diagnostic entry, but its Host picker remained empty. No session or remote
 input was exercised in that run. Two-Mac physical testing remains pending.
+
+### 0.2.1026 M10 in-house Debug diagnostic artifacts
+
+The Host and Viewer source plists identify Version `0.2`, Build `1026`. This
+in-house test build narrows Viewer input-only recovery to a typed authorization
+change known to be rejected before transport invocation. When a held-state
+release could leave input down, the Viewer invalidates the stale input scope
+while retaining the authenticated video session only for that proven case.
+The Host holds its input-admission fence and resets pressed state through the
+authorization receipt; local input-admission pause/resume retains its
+fence-and-reset ordering. Generic readiness, reconnect-required, local
+preflight, send fallback, and unknown or post-transport boundaries remain
+terminal if held state may remain. Focused Host and Viewer test suites passed
+40/40 and 53/53. Full `.codex/ci.sh` validation, four Apple notarization
+submissions, stapling, Gatekeeper checks, and the final artifact audit passed
+on 2026-10-15. Host and Viewer app bundles, ZIPs, and DMGs were then in
+`build/debug-diagnostic/`; later diagnostic builds replaced that channel.
+Physical Build `1026` retesting remains pending.
 
 ### 0.2.1025 M10 diagnostic test candidate
 
@@ -78,23 +372,27 @@ the corresponding Host logs recorded Viewer-initiated transport EOF. The
 Viewer receive/presentation path also showed roughly 0.8–1.0 second main-actor
 stalls. The focused TransportCore regression, canonical `.codex/ci.sh`
 validation, and local testing-channel packaging/audit passed on 2026-10-15.
-The separate Build `1025` Debug diagnostic package has not been built or
-signed. No physical retest has been performed; Build `1025` remains a source
-candidate, not an installed diagnostic artifact or public release.
+Build `1025` Host/Viewer Debug apps, ZIPs, and DMGs were previously in
+`build/debug-diagnostic/` and were replaced by Build `1026`. The signed
+hardened app/DMG audit passed, as did
+stapled-ticket validation for both apps and both DMGs on 2026-10-15. The
+operator tested Build `1025` on both Macs: Bonjour/TLS communication worked
+and a Host frame appeared before the disconnect recurred. These are in-house
+diagnostic artifacts, not a public release.
 
 | Milestone | Implementation / deterministic gate | Evidence still pending |
 | --- | --- | --- |
 | M0 | Complete | — |
 | M1 | Complete | — |
-| M2 | Code gates complete; real loopback mutual-TLS/session smoke passed | Physical Intel Host to Apple Silicon Viewer Bonjour/TLS pass |
-| M3 | CaptureCore foundation and deterministic tests complete; live frame verified on the current M5 | Logged-in window-server and Screen Recording evidence on other machines |
-| M4 | Deterministic gate complete | VideoToolbox encode/decode hardware smoke is opt-in |
+| M2 | Code gates and loopback smoke complete; operator confirms physical Bonjour/TLS works | Detailed run record not captured; no known M2 blocker |
+| M3 | Code/tests complete; operator confirms a physical Host frame appeared in Viewer | Physical permission-revocation and selected-window lifecycle checks |
+| M4 | Deterministic gate complete; operator confirms a physical Host frame displayed | Physical resize/aspect and frame-pacing checks; codec fixture smoke is optional |
 | M5 | Viewer input transport gate complete | — |
 | M6 | Implementation/test gate complete | Real OS event posting (manual disposable-application test) |
 | M7 | Implementation/test gate complete | Physical two-machine clipboard walkthrough |
 | M8 | Deterministic measurement/resilience gate implemented | Physical clock-synchronized performance report |
 | M9 | Release-audit gate implemented; current `0.2.1011` notarized RC artifacts verified | Physical acceptance remains separate |
-| M10 | Production composition, pairing UI, deterministic capture/pairing recovery checks, and Build `1025` full local validation complete; signed/notarized Debug artifacts through Build `1024` | Build `1025` Debug diagnostic package and artifact retest; physical Intel-to-Apple-Silicon acceptance, including background stream, connected UI, and disconnect retest |
+| M10 | Production composition and pairing UI complete; Build `1032` is the current validated, Developer ID signed and notarized in-house Debug pair and includes the M6 global system-event input route; Build `1030` is superseded and its logs identify readiness instability but do not establish a click reaching the Host; Build `1029` was Apple accepted and promoted but is withheld; Build `1028` is the previous locally audited Developer ID signed pair; Build `1027` is an earlier unwithheld notarized pair | Physical background-selection with foreground input-delivery test; full background-stream, connected-UI, clipboard, performance, and disconnect-recovery acceptance on the physical pair; the deterministic end-to-end Viewer send-race path remains unverified |
 
 ### 0.2.1024 in-house Debug diagnostic artifacts
 
@@ -284,9 +582,11 @@ notarization and local CI do not establish it.
 ## Authorized source follow-ups (2026-10-08)
 
 - **P6 / M6 input extension:** the Host-authorized, negotiated process-target
-  path is active for supported peers. It keeps secure-input, target identity,
+  safety extension is active for supported peers. Explicit window selection
+  foregrounds the selected regular app; ordinary input always requires that
+  app to remain foreground. P6 also keeps secure-input, target identity,
   permission, generation, and console-state checks fail-closed. Physical P6
-  input/IME acceptance remains pending; see [the P6 contract](P6_BACKGROUND_CONTROL.md).
+  foreground input/IME acceptance remains pending; see [the P6 contract](P6_BACKGROUND_CONTROL.md).
 - **M9 signing adapter:** both canonical release entry points now resolve the
   shared owner-only Codex configuration, preserve explicit project profile
   overrides, and support the existing external API-key reference. Focused
@@ -333,28 +633,34 @@ additional post-V1 feature was performed.
 - The secure LAN session implementation, local Keychain identity enrollment,
   PKCS#12 diagnostic provisioning, and real loopback mutual-TLS/session smoke
   test are complete. M2 code gates are complete.
-- The M5 environment has passed real loopback mutual-TLS/session startup with
-  temporary identities; that is not evidence of physical Intel Host to Apple
-  Silicon Viewer Bonjour/TLS interoperability.
+- The operator confirms that the physical Host and Viewer communicate through
+  Bonjour/TLS. This closes the physical M2 interoperability gap; pairing
+  recovery and the broader M10 workflow remain separate acceptance items.
 - The repository includes a repeatable physical Intel Host to Apple Silicon
   Viewer Bonjour/TLS/capability smoke harness, signed app/DMG packaging, and
-  role-specific install/uninstall scripts. The actual two-machine run remains
-  an environment evidence gate.
+  role-specific install/uninstall scripts. The operator confirms physical
+  Bonjour/TLS communication works; the runbook remains available for
+  collecting a detailed, repeatable M2 test record.
 
 ### M3 — Host capture
 
 - The Host window catalog and ScreenCaptureKit capture foundation are complete
   with deterministic fake-provider tests.
-- A successful M5 live frame smoke test verified live frame evidence on the
-  current M5 logged-in window-server session. Other machines still require
-  their own logged-in window-server and Screen Recording evidence.
+- The operator's physical Viewer screenshot shows a selected Host app window,
+  confirming that the tested Host produced and delivered a real capture frame.
+- Physical Screen Recording revocation and selected-window close/change
+  behavior have not been recorded as separate checks; deterministic lifecycle
+  tests pass, and the remaining manual items are listed below.
 
 ### M4 — Codec and presentation
 
 - Bounded H.264 VideoToolbox encode/decode adapters, decoder-generation
   recovery rules, and a Viewer Metal presentation surface with deterministic
   layout/queue tests are in place. The deterministic gates are complete.
-- The VideoToolbox encode/decode smoke is an explicit opt-in hardware check.
+- The operator's physical Viewer screenshot confirms that a Host video frame
+  traversed the live codec/presentation path. Physical resize/aspect-ratio and
+  frame-pacing checks are not separately recorded. The isolated VideoToolbox
+  encode/decode fixture smoke remains opt-in.
 
 ### M5 — Viewer input
 
@@ -368,14 +674,21 @@ additional post-V1 feature was performed.
   authorization/mapping implementation gate is complete with deterministic
   fake-adapter tests. M6 deterministic authorization and adapter gates pass.
 - Real OS event posting remains an environment evidence item. It requires the
-  documented disposable test application and PostEvent permission; P6
-  background input also requires known-safe Accessibility inspection.
+  documented disposable test application and PostEvent permission. Ordinary
+  system-dispatched input requires the selected app to remain foreground, and
+  WindowServer hit-testing can still change the recipient if focus or an overlay
+  changes in the narrow check-to-dispatch gap. Physical receipt by the selected
+  app remains unverified. Foreground P6 uses the same global secure-input
+  policy as the legacy path: detected active input blocks, while an unknown
+  global signal follows legacy foreground behavior. Known-safe global and
+  target-process Accessibility inspection is required only to classify an
+  inactive target for safe cleanup.
   On an explicit Viewer window selection, Accessibility can also provide a
   best-effort exact-window raise when geometry uniquely matches; missing or
-  ambiguous matches remain blocked by the independent foreground check on the
-  legacy path. P6 background input is blocked when Accessibility inspection is
-  unavailable or reports an unsafe state; a detected secure field always
-  remains fail-closed.
+  ambiguous matches remain blocked by the independent foreground check on all
+  ordinary input paths. Target-process Accessibility inspection is required
+  only for safe cleanup of an inactive P6 target; a detected active global
+  secure-input state always remains fail-closed.
 
 ### M7 — Clipboard and session UX
 
@@ -417,8 +730,9 @@ additional post-V1 feature was performed.
 2026-10-08 handoff: `0.2.1010` implementation and canonical local validation
 are complete, and source commit `1038419` was pushed to `origin/main`.
 The operator explicitly owns manual physical acceptance. The updated
-[M10 checklist](M10_ACCEPTANCE.md) identifies the P6 background-control behavior,
-notarization configuration, support/evidence matrix, and manual run record.
+  [M10 checklist](M10_ACCEPTANCE.md) identifies P6 pairing/process-safety
+  behavior and background-stream acceptance, notarization configuration,
+  support/evidence matrix, and manual run record.
 This handoff does not close the physical acceptance or release decision.
 Documentation-only link/anchor, Bash-example syntax, milestone, and
 `git diff --check` validation passed. Codex self-review found no remaining
@@ -459,9 +773,10 @@ Implemented:
   status-menu action, and Bonjour readiness includes service registration.
 - The Metal presentation path reports the actual `MTLDrawable.presentedTime`
   display boundary.
-- The eligible window catalog refreshes during active sessions; the legacy
-  input path foregrounds an explicitly selected regular app while P6 preserves
-  its activation state. Both retain per-event input gates. The Viewer exposes
+- The eligible window catalog refreshes during active sessions; explicit
+  selection foregrounds the selected regular app with or without P6. Both
+  paths retain per-event input gates, and P6 adds pairing, generation, and
+  process-safety checks. The Viewer exposes
   truthful connection-button states, and both
   roles exchange short hostnames as display-only Hello metadata.
 - Explicit trust reset controls on both endpoints (Host status menu and Viewer
@@ -482,9 +797,15 @@ Implemented:
 
 Pending:
 
-- The actual Intel-to-Apple-Silicon run, OS Accessibility/input evidence, and
-  the physical two-machine acceptance remain environment gates until they are
-  executed on both Macs; see [M10 acceptance](M10_ACCEPTANCE.md).
+- The remaining full Intel-to-Apple-Silicon M10 acceptance, including OS
+  Accessibility/input evidence and disconnect recovery, remains open; see
+  [M10 acceptance](M10_ACCEPTANCE.md). Bonjour/TLS communication and display
+  of a Host frame have been confirmed by the operator.
+- M3 manual checks still to record: revoke Host Screen Recording during or
+  after capture, then change/close the selected window and confirm capture
+  stops with a clear state and no stale frame.
+- M4 manual checks still to record: resize the Viewer surface and confirm
+  aspect ratio is preserved, then observe sustained frame presentation/pacing.
 - The clock-synchronized performance report and the two-Mac
   clipboard/performance evidence remain unverified on this Apple Silicon
   workspace.
@@ -826,15 +1147,18 @@ The intentionally deferred capabilities are listed in
 
 ## Open evidence gaps
 
-Consolidated from the milestone detail above; none of these is verified:
+Consolidated remaining evidence gaps. Operator-confirmed physical
+Bonjour/TLS communication and one displayed Host frame are recorded above;
+the following checks remain:
 
-1. Physical Intel Host to Apple Silicon Viewer Bonjour/TLS interoperability
-   (M2 harness: [M2 physical smoke](M2_PHYSICAL_SMOKE.md)).
-2. Screen Recording and live-capture evidence on machines other than the
-   current M5 (M3).
-3. Real OS event posting against a disposable test app (M6): foreground legacy
-   behavior and Host-authorized inactive-app P6 behavior, including required
-   Accessibility safety inspection on both Macs (M10).
+1. M3 Host Screen Recording revocation, selected-window change/close, and
+   explicit capture-state behavior on the physical pair.
+2. M4 Viewer resize/aspect-ratio and sustained frame-pacing checks on the
+   physical Viewer; the isolated codec fixture smoke remains opt-in.
+3. Real OS event posting against a disposable test app (M6): foreground input
+   with and without P6, focus-loss shutdown and safe held-state cleanup,
+   including target-process Accessibility inspection for inactive-target P6
+   cleanup (M10).
 4. Two-machine clipboard walkthrough (M7).
 5. Clock-synchronized p50/p95 latency and 1080p/60 report from the physical
    run (M8, attached at M10).

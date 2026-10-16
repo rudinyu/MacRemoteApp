@@ -222,6 +222,7 @@ final class HostInputSessionLoop: @unchecked Sendable {
                 }
 #if DEBUG
                 M10HostInputDiagnostics.shared.recordReceived(
+                    kind: M10HostInputEventKind.forMessage(input),
                     connectionSequence: diagnosticConnectionSequence
                 )
 #endif

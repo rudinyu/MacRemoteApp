@@ -16,12 +16,14 @@ private enum ViewerPairingPromptOutcome: Sendable {
 enum ViewerProcessControlReadiness {
     static func blocker(
         hostPermissionGranted: Bool,
+        focusEligible: Bool,
         processTargetEligible: Bool?,
         controlGeneration: UInt64? = 1
     ) -> InputReadiness? {
         guard hostPermissionGranted else { return .hostPermissionUnavailable }
-        guard processTargetEligible == true else { return .hostProcessTargetUnavailable }
         guard controlGeneration != nil else { return .hostStateUnavailable }
+        guard focusEligible else { return .hostFocusUnavailable }
+        guard processTargetEligible == true else { return .hostProcessTargetUnavailable }
         return nil
     }
 }
@@ -29,26 +31,15 @@ enum ViewerProcessControlReadiness {
 enum ViewerInputStatusPresentation {
     static let hostFocusUnavailableStatus =
         "Connected — the selected app is not active on the Host. Click or reactivate MacRemoteApp Host, then select the window again"
-    static let backgroundControlReadyStatus =
-        "Connected — background control ready; selected app is not active on the Host"
-    static let backgroundControlReadySummary =
-        "Background control ready — selected app is not active on the Host"
-
-    static func readyStatus(
-        focusEligible: Bool,
-        backgroundControlActive: Bool = false
-    ) -> String {
+    static func readyStatus(focusEligible: Bool) -> String {
         if focusEligible {
             return "Connected — input ready"
-        }
-        if backgroundControlActive {
-            return backgroundControlReadyStatus
         }
         return hostFocusUnavailableStatus
     }
 
-    static func readyInputSummary(backgroundControlActive: Bool) -> String {
-        backgroundControlActive ? backgroundControlReadySummary : "Ready"
+    static func readyInputSummary() -> String {
+        "Ready"
     }
 }
 
@@ -2132,13 +2123,14 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             } else if processControlNegotiated,
                       let blocker = ViewerProcessControlReadiness.blocker(
                           hostPermissionGranted: hostInputPermission == .granted,
+                          focusEligible: hostInputFocusEligible,
                           processTargetEligible: hostProcessTargetEligible,
                           controlGeneration: hostControlGeneration
                       ) {
                 readiness = blocker
             } else if hostInputPermission != .granted {
                 readiness = .hostPermissionUnavailable
-            } else if !processControlNegotiated && !hostInputFocusEligible {
+            } else if !hostInputFocusEligible {
                 readiness = .hostFocusUnavailable
             } else if !availability.anyInputEnabled {
                 readiness = .awaitingAuthorization
@@ -2150,12 +2142,6 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 )
             }
         }
-        let backgroundControlReady = snapshot.negotiatedCapabilities.contains(.backgroundControl) &&
-            hostControlState == .active &&
-            hostInputPermission == .granted &&
-            hostInputFocusEligible == false &&
-            hostProcessTargetEligible == true &&
-            hostControlGeneration != nil
         if case let .ready(windowGeneration) = readiness,
            let sessionLifetimeID {
             updateInputSendScope(
@@ -2180,8 +2166,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         contentView?.updateStream(
             size: streamDimensions,
             readiness: readiness,
-            capabilities: inputCapabilities,
-            backgroundControlReady: backgroundControlReady
+            capabilities: inputCapabilities
         )
         updateInputSourceSyncAvailability(
             for: snapshot,
@@ -2192,8 +2177,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case .ready:
             setStatus(
                 ViewerInputStatusPresentation.readyStatus(
-                    focusEligible: hostInputFocusEligible,
-                    backgroundControlActive: backgroundControlReady
+                    focusEligible: hostInputFocusEligible
                 )
             )
         case .hostPermissionUnavailable:
@@ -2599,7 +2583,6 @@ private final class ViewerContentView: NSView {
     private var streamSize: CGSize = .zero
     private var readiness: InputReadiness = .awaitingAuthentication
     private var inputCapabilities: ViewerInputCapabilities = .none
-    private var backgroundControlReady = false
     private var inputSourceSyncStatus = "Waiting for remote keyboard"
     private(set) var inputSourceRetryAvailable = false
 
@@ -2717,13 +2700,11 @@ private final class ViewerContentView: NSView {
     func updateStream(
         size: CGSize,
         readiness: InputReadiness,
-        capabilities: ViewerInputCapabilities = .none,
-        backgroundControlReady: Bool = false
+        capabilities: ViewerInputCapabilities = .none
     ) {
         streamSize = size
         self.readiness = readiness
         inputCapabilities = capabilities
-        self.backgroundControlReady = readiness.isReady && backgroundControlReady
         updateConnectionDetails()
         needsLayout = true
     }
@@ -2892,9 +2873,7 @@ private final class ViewerContentView: NSView {
         case .hostProcessTargetUnavailable:
             return "Host target unavailable"
         case .ready:
-            return ViewerInputStatusPresentation.readyInputSummary(
-                backgroundControlActive: backgroundControlReady
-            )
+            return ViewerInputStatusPresentation.readyInputSummary()
         }
     }
 
@@ -2979,9 +2958,7 @@ private final class ViewerContentView: NSView {
 
     func markFramePresented() {
         if readiness.isReady {
-            statusLabel.stringValue = backgroundControlReady
-                ? ViewerInputStatusPresentation.backgroundControlReadyStatus
-                : "Connected — input ready"
+            statusLabel.stringValue = "Connected — input ready"
         }
     }
 

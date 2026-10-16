@@ -1,12 +1,10 @@
 # ADR-0005: M6 Host input admission, mapping, and cleanup binding
 
-**Current status:** P6 is an active negotiated exception to the default
-foreground path. Host acceptance of the authenticated Viewer pairing provides
-durable input trust and permits process-targeted input to the selected app
-while inactive; current target, permission, generation, secure-input, and
-console-state checks still apply. Pausing closes control for the session;
-unpairing revokes trust and ends the active session. Peers without P6 remain
-foreground-only.
+**Current status:** P6 adds Host-accepted pairing trust, a control generation,
+and process-safety checks, but ordinary input always requires the selected app
+to be foreground. Explicit Viewer window selection cooperatively activates
+the selected regular app before input is authorized. Pausing closes control
+for the session; unpairing revokes trust and ends the active session.
 
 - Milestone: M6
 - Status: Accepted
@@ -14,11 +12,15 @@ foreground-only.
 
 ## Context
 
-Host-side injection must affect only the authorized selected app target and
-must never leave an OS key or button pressed when authorization, applicable
-foreground or P6 target safety, permission, or selection changes. Legacy
-peers require foreground eligibility; negotiated P6 may target the app while
-inactive after Host pairing acceptance. The resulting admission and cleanup state
+Host-side input is admitted only for the authorized selected target while its
+PID is verified foreground, and must never leave an OS key or button pressed
+when authorization, foreground eligibility, P6 target safety, permission, or
+selection changes. Ordinary events enter the public Quartz system stream, where
+WindowServer hit-tests the cursor location. A focus or overlay change in the
+narrow interval between the final check and dispatch can alter the recipient;
+physical receipt by the selected app remains unverified. All peers require
+foreground eligibility; negotiated P6 also requires Host pairing acceptance
+and safe process checks. The resulting admission and cleanup state
 machine is documented in
 [Host input admission and cleanup](../ARCHITECTURE.md#host-input-admission-and-cleanup).
 Foreground eligibility is a local fact: the selected process must be the
@@ -38,7 +40,8 @@ remain blockers.
 - `InputCore.HostInputController` queries Host context for every event and
   requires session authorization, matching window generation and process/
   window identity, current window geometry, PostEvent permission, secure-input
-  inspection, applicable foreground or P6 process-target eligibility, and the negotiated
+  inspection, foreground eligibility, P6 process-target safety when negotiated,
+  and the negotiated
   mouse/keyboard capability. Commands retain the selected target identity so
   the OS adapter can repeat the check immediately before posting.
 - The Host may request bounded cooperative AppKit activation only after an
@@ -46,19 +49,21 @@ remain blockers.
   activates itself and confirms it is the frontmost process before yielding
   to the selected app. Failed confirmation or unsupported cooperative APIs
   leave input fail-closed and instruct the Host user to click or reactivate
-  MacRemoteApp Host. Activation is not authorization; the active PID and
-  layer-0 foreground checks gate legacy events. Negotiated P6 process-target
-  events instead require current Host pairing trust and safe target state.
+  MacRemoteApp Host. Activation is not authorization; active-PID and layer-0
+  foreground checks gate all ordinary events. Negotiated P6 also requires
+  current Host pairing trust and safe target state.
 - Normalized coordinates map to the selected window's current global screen
-  bounds. Only typed CoreGraphics commands are accepted; arbitrary `CGEvent`
-  archives, background activation, locked-screen control, and secure-input
-  bypass remain unsupported.
+  bounds. Ordinary events use public system Quartz dispatch and normal
+  hit-testing. Target-bound PID posting is reserved for safe cleanup releases
+  of already admitted pressed state during reset, selection change, focus loss,
+  or revocation, using the original target identity. Only typed CoreGraphics
+  commands are accepted; arbitrary `CGEvent` archives,
+  locked-screen control, and secure-input bypass remain unsupported.
 - Disconnect, authorization revocation, focus/permission loss, and selection
   changes reset Host input sequence/rate state and attempt safe release of
   admitted pressed state while the same target and permission remain valid.
-- A known not-foreground state is permitted for negotiated P6 input only when
-  the current process-target authorization and safety state pass; otherwise it is
-  permitted only for target-bound cleanup.
+- A known not-foreground state rejects ordinary input for every peer. It may
+  be permitted only for safe target-bound cleanup of already admitted state.
 - Host lifecycle code announces a selection change before replacing the
   CaptureCore selection.
 - A detected secure-input state or unknown console state is rejected.
@@ -70,7 +75,8 @@ remain blockers.
   target.
 - If permission is unavailable, cleanup remains pending and status stays
   unavailable until a safe snapshot allows a retry.
-- If the optional Accessibility secure-input query is unavailable, the
-  independent foreground/window checks still protect the legacy PostEvent
-  path. P6 background input is blocked unless global and target-process
-  inspection establishes known-safe state.
+- Foreground P6 follows the same optional global secure-input signal as legacy
+  peers; a detected active state is rejected, while an unknown signal keeps
+  the established foreground behavior. P6 requires known-safe global and
+  target-process inspection only when classifying an inactive target for safe
+  cleanup, which never admits ordinary input.

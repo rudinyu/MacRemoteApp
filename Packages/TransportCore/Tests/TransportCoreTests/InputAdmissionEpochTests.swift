@@ -15,7 +15,9 @@ final class InputAdmissionEpochTests: XCTestCase {
         try await pair.first.start()
         try await pair.second.start()
 
-        let capabilities: Set<Capability> = [.pingPong, .mouseInput]
+        let capabilities: Set<Capability> = [
+            .pingPong, .mouseInput, .keyboardInput, .backgroundControl
+        ]
         let host = SessionCoordinator(
             configuration: SessionConfiguration(
                 role: .host,
@@ -43,32 +45,92 @@ final class InputAdmissionEpochTests: XCTestCase {
             _ = try await waitForSnapshot(of: viewer) { $0.state == .capabilitiesNegotiated }
 
             let windowGeneration: UInt64 = 23
-            try await host.authorize(windowGeneration: windowGeneration, capabilities: [.mouseInput])
+            await host.setLocalInputAdmission(true, revision: 1)
+            let allInputCapabilities: Set<Capability> = [
+                .mouseInput, .keyboardInput, .backgroundControl
+            ]
+            try await host.authorize(
+                windowGeneration: windowGeneration,
+                capabilities: allInputCapabilities
+            )
             let firstAuthorization = try await waitForSnapshot(of: viewer) {
                 $0.authorized && $0.authorizedWindowGeneration == windowGeneration
             }
-
             let staleInput = InputEventMessage(
                 kind: .pointerMove,
                 windowGeneration: windowGeneration,
                 x: 12,
-                y: 34
+                y: 34,
+                controlGeneration: 1
             )
             let freshInput = InputEventMessage(
                 kind: .pointerMove,
                 windowGeneration: windowGeneration,
                 x: 56,
-                y: 78
+                y: 78,
+                controlGeneration: 1
+            )
+            let originalAdmission = try await viewer.makeInputAdmission(
+                for: staleInput,
+                expectedAuthorizationGeneration: firstAuthorization.authorizationGeneration
             )
 
             // Reauthorize the same window to advance the authorization epoch
-            // without changing the window-generation fence.
-            try await host.authorize(windowGeneration: windowGeneration, capabilities: [.mouseInput])
+            // while preserving the negotiated background-control capability.
+            try await host.authorize(
+                windowGeneration: windowGeneration,
+                capabilities: allInputCapabilities
+            )
             let currentAuthorization = try await waitForSnapshot(of: viewer) {
                 $0.authorizationGeneration > firstAuthorization.authorizationGeneration &&
                     $0.authorized &&
                     $0.authorizedWindowGeneration == windowGeneration
             }
+
+            let epochObservation = SessionInputSendObservation()
+            do {
+                try await viewer.sendInput(
+                    staleInput,
+                    using: originalAdmission,
+                    observation: epochObservation
+                )
+                XCTFail("an admission from an older epoch must be rejected after the outbound mutex")
+            } catch SessionError.authorizationChanged {
+                // Expected: the old record cannot enter the reauthorized session.
+            }
+            XCTAssertEqual(epochObservation.state, .notStarted)
+            XCTAssertEqual(
+                epochObservation.preTransportRejection,
+                .authorizationEpochChangedAfterAdmission
+            )
+
+            let currentMouseAdmission = try await viewer.makeInputAdmission(
+                for: freshInput,
+                expectedAuthorizationGeneration: currentAuthorization.authorizationGeneration
+            )
+            let keyboardInput = InputEventMessage(
+                kind: .keyDown,
+                windowGeneration: windowGeneration,
+                keyCode: 56,
+                modifiers: 0,
+                controlGeneration: 1
+            )
+            let tokenMismatchObservation = SessionInputSendObservation()
+            do {
+                try await viewer.sendInput(
+                    keyboardInput,
+                    using: currentMouseAdmission,
+                    observation: tokenMismatchObservation
+                )
+                XCTFail("an input admission must remain bound to the complete capability set")
+            } catch SessionError.authorizationChanged {
+                // Expected: mouse and keyboard admissions have different requirements.
+            }
+            XCTAssertEqual(tokenMismatchObservation.state, .notStarted)
+            XCTAssertEqual(
+                tokenMismatchObservation.preTransportRejection,
+                .admissionTokenMismatch
+            )
 
             var staleAdmission: SessionInputAdmissionToken?
             do {

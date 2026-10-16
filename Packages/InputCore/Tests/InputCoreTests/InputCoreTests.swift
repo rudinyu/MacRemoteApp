@@ -6,6 +6,42 @@ final class InputCoreTests: XCTestCase {
         XCTAssertEqual(InputCoreModule.name, "InputCore")
     }
 
+    func testOrdinaryInputUsesSystemRouteAndLostFocusUsesOnlyCleanupRoute() {
+        XCTAssertEqual(
+            HostInputEventDeliveryRoute.resolve(focus: .eligible, isCleanupRelease: false),
+            .system
+        )
+        XCTAssertEqual(
+            HostInputEventDeliveryRoute.resolve(focus: .eligible, isCleanupRelease: true),
+            .targetProcessCleanup,
+            "State-release cleanup always stays bound to the original admitted target."
+        )
+        XCTAssertNil(HostInputEventDeliveryRoute.resolve(
+            focus: .notForeground,
+            isCleanupRelease: false
+        ))
+        XCTAssertNil(HostInputEventDeliveryRoute.resolve(
+            focus: .backgroundEligible,
+            isCleanupRelease: false
+        ))
+        XCTAssertEqual(
+            HostInputEventDeliveryRoute.resolve(focus: .notForeground, isCleanupRelease: true),
+            .targetProcessCleanup
+        )
+        XCTAssertEqual(
+            HostInputEventDeliveryRoute.resolve(focus: .backgroundEligible, isCleanupRelease: true),
+            .targetProcessCleanup
+        )
+        XCTAssertNil(HostInputEventDeliveryRoute.resolve(
+            focus: .lockedScreen,
+            isCleanupRelease: true
+        ))
+        XCTAssertNil(HostInputEventDeliveryRoute.resolve(
+            focus: .secureInput,
+            isCleanupRelease: true
+        ))
+    }
+
     func testBackgroundControlRequiresKnownInactiveGlobalAndTargetSecureInput() {
         XCTAssertEqual(
             CoreGraphicsAccessibilityContextProvider.classifyBackgroundSecureInput(
@@ -41,6 +77,37 @@ final class InputCoreTests: XCTestCase {
                 target: .inactive
             ),
             .backgroundEligible
+        )
+    }
+
+    func testForegroundP6UsesLegacyGlobalSecureInputPolicyWithoutTargetAXRequirement() {
+        XCTAssertEqual(
+            CoreGraphicsAccessibilityContextProvider.foregroundProcessTargetFocusState(
+                foregroundFocus: .eligible,
+                globalSecureInputState: .inactive
+            ),
+            .eligible
+        )
+        XCTAssertEqual(
+            CoreGraphicsAccessibilityContextProvider.foregroundProcessTargetFocusState(
+                foregroundFocus: .eligible,
+                globalSecureInputState: .unknown
+            ),
+            .eligible
+        )
+        XCTAssertEqual(
+            CoreGraphicsAccessibilityContextProvider.foregroundProcessTargetFocusState(
+                foregroundFocus: .eligible,
+                globalSecureInputState: .active
+            ),
+            .secureInput
+        )
+        XCTAssertEqual(
+            CoreGraphicsAccessibilityContextProvider.foregroundProcessTargetFocusState(
+                foregroundFocus: .notForeground,
+                globalSecureInputState: .unknown
+            ),
+            .notForeground
         )
     }
 
@@ -704,6 +771,240 @@ final class InputCoreTests: XCTestCase {
         )
     }
 
+    func testBackgroundFocusRequiresExactFullWindowServerTargetAndKeepsItNonForeground() {
+        let selectedBounds = InputWindowBounds(originX: 100, originY: 100, width: 800, height: 600)
+        let selection = focusSelection(bounds: selectedBounds)
+        let foreground = onScreenWindow(
+            identifier: 300,
+            processIdentifier: 301,
+            applicationIdentifier: "com.example.foreground",
+            isRegularApplication: true,
+            bounds: InputWindowBounds(originX: 1_000, originY: 100, width: 400, height: 300)
+        )
+        let offscreenTarget = onScreenWindow(
+            identifier: selection.windowIdentifier,
+            processIdentifier: selection.processIdentifier,
+            applicationIdentifier: selection.applicationIdentifier,
+            isRegularApplication: true,
+            bounds: selectedBounds
+        )
+
+        XCTAssertEqual(
+            CoreGraphicsAccessibilityContextProvider.selectedWindowFocusState(
+                for: selection,
+                windows: [foreground],
+                targetWindows: [offscreenTarget],
+                frontmostProcessIdentifier: foreground.processIdentifier
+            ),
+            .notForeground,
+            "A full-list target may support P6 only through the non-foreground path."
+        )
+
+        let replacedOwner = onScreenWindow(
+            identifier: selection.windowIdentifier,
+            processIdentifier: selection.processIdentifier + 1,
+            applicationIdentifier: selection.applicationIdentifier,
+            isRegularApplication: true,
+            bounds: selectedBounds
+        )
+        XCTAssertEqual(
+            CoreGraphicsAccessibilityContextProvider.selectedWindowFocusState(
+                for: selection,
+                windows: [foreground],
+                targetWindows: [replacedOwner],
+                frontmostProcessIdentifier: foreground.processIdentifier
+            ),
+            .windowUnavailable,
+            "Reused window IDs with a different PID must not resolve as the selected target."
+        )
+    }
+
+    func testBackgroundFocusRejectsUnknownOverlappingOnScreenWindow() {
+        let selectedBounds = InputWindowBounds(originX: 100, originY: 100, width: 800, height: 600)
+        let selection = focusSelection(bounds: selectedBounds)
+        let unresolvedOverlay = onScreenWindow(
+            identifier: 11,
+            processIdentifier: 11,
+            applicationIdentifier: nil,
+            isRegularApplication: false,
+            bounds: InputWindowBounds(originX: 150, originY: 150, width: 30, height: 30)
+        )
+        let offscreenTarget = onScreenWindow(
+            identifier: selection.windowIdentifier,
+            processIdentifier: selection.processIdentifier,
+            applicationIdentifier: selection.applicationIdentifier,
+            isRegularApplication: true,
+            bounds: selectedBounds
+        )
+
+        XCTAssertEqual(
+            CoreGraphicsAccessibilityContextProvider.selectedWindowFocusState(
+                for: selection,
+                windows: [unresolvedOverlay],
+                targetWindows: [offscreenTarget],
+                frontmostProcessIdentifier: 301
+            ),
+            .unknown
+        )
+    }
+
+    func testBackgroundProcessTargetEligibilityIgnoresUnrelatedForegroundOrdering() {
+        let selectedBounds = InputWindowBounds(originX: 100, originY: 100, width: 800, height: 600)
+        let selection = focusSelection(bounds: selectedBounds)
+        let unresolvedOverlay = onScreenWindow(
+            identifier: 11,
+            processIdentifier: 11,
+            applicationIdentifier: nil,
+            isRegularApplication: false,
+            bounds: InputWindowBounds(originX: 150, originY: 150, width: 30, height: 30)
+        )
+        let liveTarget = onScreenWindow(
+            identifier: selection.windowIdentifier,
+            processIdentifier: selection.processIdentifier,
+            applicationIdentifier: selection.applicationIdentifier,
+            isRegularApplication: true,
+            bounds: selectedBounds
+        )
+
+        XCTAssertEqual(
+            CoreGraphicsAccessibilityContextProvider.selectedWindowFocusState(
+                for: selection,
+                windows: [unresolvedOverlay],
+                targetWindows: [liveTarget],
+                frontmostProcessIdentifier: 301
+            ),
+            .unknown,
+            "The separate foreground classification must remain truthful."
+        )
+        XCTAssertEqual(
+            CoreGraphicsAccessibilityContextProvider.backgroundProcessTargetFocusState(
+                for: selection,
+                targetWindows: [liveTarget],
+                frontmostProcessIdentifier: 301,
+                consoleState: nil,
+                globalSecureInputState: .inactive,
+                targetSecureInputState: .inactive
+            ),
+            .backgroundEligible
+        )
+    }
+
+    func testBackgroundProcessTargetRequiresExactRegularLayerZeroTargetAndValidBounds() {
+        let selectedBounds = InputWindowBounds(originX: 100, originY: 100, width: 800, height: 600)
+        let selection = focusSelection(bounds: selectedBounds)
+        let mismatchedWindowID = onScreenWindow(
+            identifier: selection.windowIdentifier + 1,
+            processIdentifier: selection.processIdentifier,
+            applicationIdentifier: selection.applicationIdentifier,
+            isRegularApplication: true,
+            bounds: selectedBounds
+        )
+        let mismatchedProcess = onScreenWindow(
+            identifier: selection.windowIdentifier,
+            processIdentifier: selection.processIdentifier + 1,
+            applicationIdentifier: selection.applicationIdentifier,
+            isRegularApplication: true,
+            bounds: selectedBounds
+        )
+        let mismatchedBundle = onScreenWindow(
+            identifier: selection.windowIdentifier,
+            processIdentifier: selection.processIdentifier,
+            applicationIdentifier: "com.example.other",
+            isRegularApplication: true,
+            bounds: selectedBounds
+        )
+        let nonzeroLayer = onScreenWindow(
+            identifier: selection.windowIdentifier,
+            processIdentifier: selection.processIdentifier,
+            applicationIdentifier: selection.applicationIdentifier,
+            isRegularApplication: true,
+            layer: 1,
+            bounds: selectedBounds
+        )
+        let nonregularApplication = onScreenWindow(
+            identifier: selection.windowIdentifier,
+            processIdentifier: selection.processIdentifier,
+            applicationIdentifier: selection.applicationIdentifier,
+            isRegularApplication: false,
+            bounds: selectedBounds
+        )
+        let invalidBounds = onScreenWindow(
+            identifier: selection.windowIdentifier,
+            processIdentifier: selection.processIdentifier,
+            applicationIdentifier: selection.applicationIdentifier,
+            isRegularApplication: true,
+            bounds: InputWindowBounds(originX: .nan, originY: 100, width: 800, height: 600)
+        )
+        let invalidTargets: [(String, [CoreGraphicsAccessibilityContextProvider.WindowServerWindow])] = [
+            ("missing target", []),
+            ("mismatched window ID", [mismatchedWindowID]),
+            ("mismatched process ID", [mismatchedProcess]),
+            ("mismatched bundle ID", [mismatchedBundle]),
+            ("nonzero window layer", [nonzeroLayer]),
+            ("nonregular application", [nonregularApplication]),
+            ("invalid target bounds", [invalidBounds])
+        ]
+
+        for (description, targetWindows) in invalidTargets {
+            XCTAssertEqual(
+                CoreGraphicsAccessibilityContextProvider.backgroundProcessTargetFocusState(
+                    for: selection,
+                    targetWindows: targetWindows,
+                    frontmostProcessIdentifier: 301,
+                    consoleState: nil,
+                    globalSecureInputState: .inactive,
+                    targetSecureInputState: .inactive
+                ),
+                .windowUnavailable,
+                description
+            )
+        }
+    }
+
+    func testBackgroundProcessTargetFailsClosedForConsoleAndSecureInputUncertainty() {
+        let selectedBounds = InputWindowBounds(originX: 100, originY: 100, width: 800, height: 600)
+        let selection = focusSelection(bounds: selectedBounds)
+        let liveTarget = onScreenWindow(
+            identifier: selection.windowIdentifier,
+            processIdentifier: selection.processIdentifier,
+            applicationIdentifier: selection.applicationIdentifier,
+            isRegularApplication: true,
+            bounds: selectedBounds
+        )
+        let blockedStates: [(
+            String,
+            Int32?,
+            HostInputFocusState?,
+            HostInputSecureInputState,
+            HostInputSecureInputState,
+            HostInputFocusState
+        )] = [
+            ("locked console", 301, .lockedScreen, .inactive, .inactive, .lockedScreen),
+            ("unknown console", 301, .unknown, .inactive, .inactive, .unknown),
+            ("active global secure input", 301, nil, .active, .inactive, .secureInput),
+            ("unknown global secure input", 301, nil, .unknown, .inactive, .unknown),
+            ("active target secure input", 301, nil, .inactive, .active, .secureInput),
+            ("unknown target secure input", 301, nil, .inactive, .unknown, .unknown),
+            ("unknown frontmost process", nil, nil, .inactive, .inactive, .unknown),
+            ("selected process is frontmost", 200, nil, .inactive, .inactive, .unknown)
+        ]
+
+        for (description, frontmostPID, consoleState, globalState, targetState, expected) in blockedStates {
+            XCTAssertEqual(
+                CoreGraphicsAccessibilityContextProvider.backgroundProcessTargetFocusState(
+                    for: selection,
+                    targetWindows: [liveTarget],
+                    frontmostProcessIdentifier: frontmostPID,
+                    consoleState: consoleState,
+                    globalSecureInputState: globalState,
+                    targetSecureInputState: targetState
+                ),
+                expected,
+                description
+            )
+        }
+    }
+
     func testFocusTreatsInvalidUnresolvedWindowBoundsAsPotentiallyOverlapping() {
         let selectedBounds = InputWindowBounds(originX: 100, originY: 100, width: 800, height: 600)
         let selection = focusSelection(bounds: selectedBounds)
@@ -1147,7 +1448,7 @@ final class InputCoreTests: XCTestCase {
         XCTAssertEqual(bottomLocation, InputScreenPoint(x: 100, y: 700.0.nextDown))
     }
 
-    func testGrantedBackgroundProcessTargetDoesNotRequireForegroundEligibility() throws {
+    func testGrantedBackgroundProcessTargetDoesNotAdmitOrdinaryInput() throws {
         let context = authorizedHostContext(
             currentWindowIdentifier: 100,
             currentProcessIdentifier: 200,
@@ -1164,12 +1465,17 @@ final class InputCoreTests: XCTestCase {
             y: UInt16.max / 2
         )
 
-        XCTAssertNoThrow(try HostInputMapper.command(for: record, in: context))
+        XCTAssertThrowsError(try HostInputMapper.command(for: record, in: context)) { error in
+            XCTAssertEqual(error as? HostInputError, .focusUnavailable(.backgroundEligible))
+        }
         let controller = HostInputController(
             contextProvider: FakeHostInputContextProvider(context: context),
             injectionAdapter: RecordingHostInputAdapter()
         )
-        XCTAssertEqual(controller.status(), .backgroundTargetReady)
+        XCTAssertEqual(controller.status(), .focusUnavailable(.backgroundEligible))
+        XCTAssertThrowsError(try controller.inject(record)) { error in
+            XCTAssertEqual(error as? HostInputError, .focusUnavailable(.backgroundEligible))
+        }
 
         let withoutGrant = authorizedHostContext(
             currentWindowIdentifier: 100,
@@ -1181,6 +1487,42 @@ final class InputCoreTests: XCTestCase {
         XCTAssertThrowsError(try HostInputMapper.command(for: record, in: withoutGrant)) { error in
             XCTAssertEqual(error as? HostInputError, .focusUnavailable(.backgroundEligible))
         }
+    }
+
+    func testBackgroundMouseButtonPairIsRejectedBeforeTheAdapter() throws {
+        let context = authorizedHostContext(
+            focus: .backgroundEligible,
+            processTargetingAuthorized: true
+        )
+        let adapter = RecordingHostInputAdapter()
+        let controller = HostInputController(
+            contextProvider: FakeHostInputContextProvider(context: context),
+            injectionAdapter: adapter
+        )
+        let down = InputEventRecord(
+            sequence: 1,
+            timestampNanoseconds: 1_000,
+            windowGeneration: 9,
+            kind: .pointerButton,
+            x: UInt16.max / 2,
+            y: UInt16.max / 2,
+            button: 0,
+            pressed: true
+        )
+        let up = InputEventRecord(
+            sequence: 2,
+            timestampNanoseconds: 2_000,
+            windowGeneration: 9,
+            kind: .pointerButton,
+            x: UInt16.max / 2,
+            y: UInt16.max / 2,
+            button: 0,
+            pressed: false
+        )
+
+        XCTAssertThrowsError(try controller.inject(down))
+        XCTAssertThrowsError(try controller.inject(up))
+        XCTAssertTrue(adapter.commands.isEmpty)
     }
 
     func testHostMapsAgainstCurrentWindowGeometry() throws {
@@ -2045,8 +2387,8 @@ final class InputCoreTests: XCTestCase {
         isRegularApplication: Bool,
         layer: Int? = 0,
         bounds: InputWindowBounds
-    ) -> CoreGraphicsAccessibilityContextProvider.OnScreenWindow {
-        CoreGraphicsAccessibilityContextProvider.OnScreenWindow(
+    ) -> CoreGraphicsAccessibilityContextProvider.WindowServerWindow {
+        CoreGraphicsAccessibilityContextProvider.WindowServerWindow(
             windowIdentifier: identifier,
             processIdentifier: processIdentifier,
             layer: layer,

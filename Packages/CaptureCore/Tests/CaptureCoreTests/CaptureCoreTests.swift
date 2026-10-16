@@ -5,10 +5,67 @@ import Foundation
 import XCTest
 
 final class CaptureCoreTests: XCTestCase {
-    func testSelectedCaptureCanRemainActiveOffscreenAndInactiveTargetsAreNotNewSelections() {
-        XCTAssertTrue(SelectedWindowCaptureEligibility.permitsCapture(isOnScreen: true, isActive: false))
-        XCTAssertTrue(SelectedWindowCaptureEligibility.permitsCapture(isOnScreen: false, isActive: true))
-        XCTAssertFalse(SelectedWindowCaptureEligibility.permitsCapture(isOnScreen: false, isActive: false))
+    func testPickerRequiresOnscreenTargetWhileAuthorizedCaptureMayResolveOffscreen() {
+        XCTAssertTrue(WindowCandidateVisibility.permits(
+            isOnScreen: true,
+            isActive: false,
+            allowsActiveOffscreen: false,
+            allowsInactiveOffscreen: false
+        ))
+        XCTAssertFalse(WindowCandidateVisibility.permits(
+            isOnScreen: false,
+            isActive: true,
+            allowsActiveOffscreen: false,
+            allowsInactiveOffscreen: false
+        ))
+        XCTAssertTrue(WindowCandidateVisibility.permits(
+            isOnScreen: false,
+            isActive: true,
+            allowsActiveOffscreen: true,
+            allowsInactiveOffscreen: false
+        ))
+        XCTAssertFalse(WindowCandidateVisibility.permits(
+            isOnScreen: false,
+            isActive: false,
+            allowsActiveOffscreen: false,
+            allowsInactiveOffscreen: false
+        ))
+        XCTAssertTrue(WindowCandidateVisibility.permits(
+            isOnScreen: false,
+            isActive: false,
+            allowsActiveOffscreen: false,
+            allowsInactiveOffscreen: true
+        ))
+    }
+
+    func testPreviouslyAuthorizedOffscreenTargetRemainsBoundToCaptureIdentityAndGeometry() {
+        let selected = makeWindow(identifier: 16)
+        XCTAssertTrue(WindowCandidateVisibility.permits(
+            isOnScreen: false,
+            isActive: false,
+            allowsActiveOffscreen: false,
+            allowsInactiveOffscreen: true
+        ))
+        XCTAssertTrue(SelectedWindowCaptureTargetEligibility.permits(
+            expectedWindow: selected,
+            candidateWindow: selected,
+            windowLayer: 0,
+            configuration: .default
+        ))
+
+        let replacedOwner = CaptureWindow(
+            identifier: selected.identifier,
+            applicationIdentifier: "com.example.replaced",
+            bounds: selected.bounds,
+            processIdentifier: selected.processIdentifier + 1,
+            eligible: true
+        )
+        XCTAssertFalse(SelectedWindowCaptureTargetEligibility.permits(
+            expectedWindow: selected,
+            candidateWindow: replacedOwner,
+            windowLayer: 0,
+            configuration: .default
+        ))
     }
 
     func testCaptureRestartRevalidatesOwnerLayerAndGeometryWithoutForegroundState() {

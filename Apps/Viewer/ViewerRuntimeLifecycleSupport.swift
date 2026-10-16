@@ -39,6 +39,7 @@ enum ViewerInputSendBoundary: String, CaseIterable, Equatable, Hashable, Sendabl
 struct ViewerInputSendFailureDiagnostic: Equatable, Sendable {
     let underlyingCategory: ViewerInputFailureCategory
     let boundary: ViewerInputSendBoundary
+    let hasConfirmedAuthorizationEpochTransition: Bool
 }
 
 enum ViewerInputSendFailureClassifier {
@@ -50,13 +51,17 @@ enum ViewerInputSendFailureClassifier {
         if let error = error as? ViewerInputTransportError {
             return ViewerInputSendFailureDiagnostic(
                 underlyingCategory: error.failureCategory,
-                boundary: error.failureBoundary
+                boundary: error.failureBoundary,
+                hasConfirmedAuthorizationEpochTransition:
+                    error == .authorizationEpochChangedAfterAdmissionBeforeTransport &&
+                    error.failureBoundary == .beforeTransportInvocation
             )
         }
         if error is InputCoreError {
             return ViewerInputSendFailureDiagnostic(
                 underlyingCategory: .localPreflight,
-                boundary: .beforeTransportInvocation
+                boundary: .beforeTransportInvocation,
+                hasConfirmedAuthorizationEpochTransition: false
             )
         }
         if let error = error as? SessionError {
@@ -73,24 +78,38 @@ enum ViewerInputSendFailureClassifier {
             }
             return ViewerInputSendFailureDiagnostic(
                 underlyingCategory: category,
-                boundary: .unknown
+                boundary: .unknown,
+                hasConfirmedAuthorizationEpochTransition: false
             )
         }
         // Unknown operation errors may have crossed the transport boundary.
         return ViewerInputSendFailureDiagnostic(
             underlyingCategory: .unexpected,
-            boundary: .unknown
+            boundary: .unknown,
+            hasConfirmedAuthorizationEpochTransition: false
         )
     }
 
     static func effectiveCategory(
-        for underlyingCategory: ViewerInputFailureCategory,
+        for diagnostic: ViewerInputSendFailureDiagnostic,
         mayLeaveHeldInputState: Bool
     ) -> ViewerInputFailureCategory {
-        if underlyingCategory.disposition == .recheckInput && mayLeaveHeldInputState {
+        if diagnostic.underlyingCategory.disposition == .recheckInput && mayLeaveHeldInputState {
+            // ViewerInputTransport emits this exact error only when
+            // SessionCoordinator positively reports
+            // authorizationEpochChangedAfterAdmission before transport.
+            // HostInputSessionLoop fences that authorization transition and
+            // resets its controller before the receipt; retained cleanup can
+            // retry when the target becomes eligible. Keep every other
+            // held-state failure terminal because Host cleanup is not proven.
+            if diagnostic.hasConfirmedAuthorizationEpochTransition,
+               diagnostic.underlyingCategory == .authorizationNotReady,
+               diagnostic.boundary == .beforeTransportInvocation {
+                return .authorizationNotReady
+            }
             return .heldStateReleaseFailure
         }
-        return underlyingCategory
+        return diagnostic.underlyingCategory
     }
 }
 
@@ -707,7 +726,7 @@ final class ViewerInputSendQueue {
                         entry.mayEndHeldInputState ||
                         entries.contains(where: \.mayEndHeldInputState)
                     let category = ViewerInputSendFailureClassifier.effectiveCategory(
-                        for: diagnostic.underlyingCategory,
+                        for: diagnostic,
                         mayLeaveHeldInputState: mayLeaveHeldInputState
                     )
 #if DEBUG

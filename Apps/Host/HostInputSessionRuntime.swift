@@ -278,6 +278,32 @@ final actor HostInputSessionRuntime {
         await loop.endInputStop()
     }
 
+    /// Keeps Host input fenced while a wire authorization transition is sent
+    /// and its receipt is confirmed. The shared loop barrier is depth-counted,
+    /// so nested selection transitions and overlapping authorization calls
+    /// release only the fence they opened.
+    func withAuthorizationFence<Result: Sendable>(
+        session: SessionCoordinator,
+        operation: @Sendable () async throws -> Result
+    ) async rethrows -> Result {
+        await loop.beginInputStop()
+        await session.discardPendingInputMessages()
+        loop.reset()
+
+        do {
+            let result = try await operation()
+            await session.discardPendingInputMessages()
+            await loop.endInputStop()
+            return result
+        } catch {
+            // Input records received while the loop fence was held must not
+            // retain SessionCoordinator admission tokens after a failed send.
+            await session.discardPendingInputMessages()
+            await loop.endInputStop()
+            throw error
+        }
+    }
+
     func withSelectionReplacement(
         _ operation: @escaping @Sendable () async -> Void
     ) async {

@@ -1,6 +1,8 @@
 #if DEBUG
 import Foundation
 import XCTest
+import InputCore
+import TransportCore
 @testable import Viewer
 
 final class M10ViewerDebugDiagnosticsTests: XCTestCase {
@@ -253,18 +255,36 @@ final class M10ViewerDebugDiagnosticsTests: XCTestCase {
         recorder.start()
         let start: UInt64 = 80_000_000_000
         recorder.recordConnectionStarted(atUptimeNanoseconds: start)
-        recorder.recordViewerInputAttempt()
+        recorder.recordViewerInputAttempt(kind: .mouseMove)
         recorder.recordViewerInputLocallyAccepted()
-        recorder.recordViewerInputAttempt()
+        recorder.recordViewerInputAttempt(kind: .buttonDown)
         recorder.recordViewerInputSendFailure()
+        recorder.recordViewerInputFailureSubcategory(.transportDeliveryUncertain)
         recorder.recordViewerInputFailureCategory(.deliveryUncertain)
         recorder.recordViewerInputFailureContext(
             underlyingCategory: .deliveryUncertain,
             boundary: .transportSendStarted
         )
-        recorder.recordViewerInputAttempt()
+        recorder.recordViewerInputAttempt(kind: .keyDown)
         recorder.recordViewerInputSendFailure()
+        recorder.recordViewerInputFailureSubcategory(.expectedAuthorizationEpochMismatchBeforeAdmission)
         recorder.recordViewerInputFailureCategory(.heldStateReleaseFailure)
+        recorder.recordViewerInputFailureContext(
+            underlyingCategory: .authorizationNotReady,
+            boundary: .beforeTransportInvocation
+        )
+        recorder.recordViewerInputAttempt(kind: .focusIntent)
+        recorder.recordViewerInputSendFailure()
+        recorder.recordViewerInputFailureSubcategory(.inputAdmissionTokenMismatchBeforeTransport)
+        recorder.recordViewerInputFailureCategory(.authorizationNotReady)
+        recorder.recordViewerInputFailureContext(
+            underlyingCategory: .authorizationNotReady,
+            boundary: .beforeTransportInvocation
+        )
+        recorder.recordViewerInputAttempt(kind: .scroll)
+        recorder.recordViewerInputSendFailure()
+        recorder.recordViewerInputFailureSubcategory(.authorizationEpochChangedAfterAdmissionBeforeTransport)
+        recorder.recordViewerInputFailureCategory(.authorizationNotReady)
         recorder.recordViewerInputFailureContext(
             underlyingCategory: .authorizationNotReady,
             boundary: .beforeTransportInvocation
@@ -281,21 +301,47 @@ final class M10ViewerDebugDiagnosticsTests: XCTestCase {
         let records = try readJSONLines(at: url)
         XCTAssertEqual(records.count, 4)
         XCTAssertEqual(records[2]["event"] as? String, "input_window")
-        XCTAssertEqual(records[2]["attempted"] as? Int, 3)
+        XCTAssertEqual(records[2]["attempted"] as? Int, 5)
         XCTAssertEqual(records[2]["locally_accepted"] as? Int, 1)
-        XCTAssertEqual(records[2]["send_failures"] as? Int, 2)
+        XCTAssertEqual(records[2]["send_failures"] as? Int, 4)
+        let inputKinds = try XCTUnwrap(records[2]["input_event_kinds"] as? [String: Int])
+        XCTAssertEqual(Set(inputKinds.keys), Set(M10ViewerInputEventKind.allCases.map(\.rawValue)))
+        XCTAssertEqual(inputKinds[M10ViewerInputEventKind.mouseMove.rawValue], 1)
+        XCTAssertEqual(inputKinds[M10ViewerInputEventKind.buttonDown.rawValue], 1)
+        XCTAssertEqual(inputKinds[M10ViewerInputEventKind.keyDown.rawValue], 1)
+        XCTAssertEqual(inputKinds[M10ViewerInputEventKind.focusIntent.rawValue], 1)
+        XCTAssertEqual(inputKinds[M10ViewerInputEventKind.scroll.rawValue], 1)
+        let failureSubcategories = try XCTUnwrap(records[2]["failure_subcategories"] as? [String: Int])
+        XCTAssertEqual(Set(failureSubcategories.keys), Set(M10ViewerInputFailureSubcategory.allCases.map(\.rawValue)))
+        XCTAssertEqual(
+            failureSubcategories[M10ViewerInputFailureSubcategory.expectedAuthorizationEpochMismatchBeforeAdmission.rawValue],
+            1
+        )
+        XCTAssertEqual(
+            failureSubcategories[M10ViewerInputFailureSubcategory.transportDeliveryUncertain.rawValue],
+            1
+        )
+        XCTAssertEqual(
+            failureSubcategories[M10ViewerInputFailureSubcategory.inputAdmissionTokenMismatchBeforeTransport.rawValue],
+            1
+        )
+        XCTAssertEqual(
+            failureSubcategories[M10ViewerInputFailureSubcategory.authorizationEpochChangedAfterAdmissionBeforeTransport.rawValue],
+            1
+        )
         let failureCategories = try XCTUnwrap(records[2]["failure_categories"] as? [String: Int])
         XCTAssertEqual(Set(failureCategories.keys), Set(ViewerInputFailureCategory.allCases.map(\.rawValue)))
         XCTAssertEqual(failureCategories[ViewerInputFailureCategory.deliveryUncertain.rawValue], 1)
         XCTAssertEqual(failureCategories[ViewerInputFailureCategory.heldStateReleaseFailure.rawValue], 1)
+        XCTAssertEqual(failureCategories[ViewerInputFailureCategory.authorizationNotReady.rawValue], 2)
         XCTAssertEqual(failureCategories[ViewerInputFailureCategory.localPreflight.rawValue], 0)
         let underlyingCategories = try XCTUnwrap(records[2]["underlying_failure_categories"] as? [String: Int])
         XCTAssertEqual(Set(underlyingCategories.keys), Set(ViewerInputFailureCategory.allCases.map(\.rawValue)))
-        XCTAssertEqual(underlyingCategories[ViewerInputFailureCategory.authorizationNotReady.rawValue], 1)
+        XCTAssertEqual(underlyingCategories[ViewerInputFailureCategory.authorizationNotReady.rawValue], 3)
         XCTAssertEqual(underlyingCategories[ViewerInputFailureCategory.heldStateReleaseFailure.rawValue], 0)
         let boundaries = try XCTUnwrap(records[2]["failure_boundaries"] as? [String: Int])
         XCTAssertEqual(Set(boundaries.keys), Set(ViewerInputSendBoundary.allCases.map(\.rawValue)))
-        XCTAssertEqual(boundaries[ViewerInputSendBoundary.beforeTransportInvocation.rawValue], 1)
+        XCTAssertEqual(boundaries[ViewerInputSendBoundary.beforeTransportInvocation.rawValue], 3)
         XCTAssertEqual(boundaries[ViewerInputSendBoundary.transportSendStarted.rawValue], 1)
         XCTAssertEqual(boundaries[ViewerInputSendBoundary.unknown.rawValue], 0)
         let categoriesByBoundary = try XCTUnwrap(
@@ -310,7 +356,7 @@ final class M10ViewerDebugDiagnosticsTests: XCTestCase {
         )
         XCTAssertEqual(Set(preTransportCategories.keys), Set(ViewerInputFailureCategory.allCases.map(\.rawValue)))
         XCTAssertEqual(Set(postTransportCategories.keys), Set(ViewerInputFailureCategory.allCases.map(\.rawValue)))
-        XCTAssertEqual(preTransportCategories[ViewerInputFailureCategory.authorizationNotReady.rawValue], 1)
+        XCTAssertEqual(preTransportCategories[ViewerInputFailureCategory.authorizationNotReady.rawValue], 3)
         XCTAssertEqual(postTransportCategories[ViewerInputFailureCategory.deliveryUncertain.rawValue], 1)
         XCTAssertEqual(preTransportCategories[ViewerInputFailureCategory.heldStateReleaseFailure.rawValue], 0)
         XCTAssertNil(records[2]["error"])
@@ -336,11 +382,86 @@ final class M10ViewerDebugDiagnosticsTests: XCTestCase {
             "monotonic_process_ms", "run_sequence", "connection_sequence", "event",
             "attempted", "locally_accepted", "send_failures", "failure_categories",
             "underlying_failure_categories", "failure_boundaries",
-            "underlying_failure_categories_by_boundary", "duration_ms"
+            "underlying_failure_categories_by_boundary", "input_event_kinds",
+            "failure_subcategories", "duration_ms"
         ]
         XCTAssertTrue(Set(records[2].keys).isSubset(of: allowed))
-        XCTAssertFalse(String(data: try Data(contentsOf: url), encoding: .utf8)!.contains("key_code"))
-        XCTAssertFalse(String(data: try Data(contentsOf: url), encoding: .utf8)!.contains("coordinates"))
+        let encoded = String(data: try Data(contentsOf: url), encoding: .utf8)!
+        for prohibited in ["key_code", "coordinates", "clipboard", "window_title", "process_name", "authorization_generation"] {
+            XCTAssertFalse(encoded.contains(prohibited), "Unexpected private input detail: \(prohibited)")
+        }
+    }
+
+    func testInputFailureSubcategoriesSeparateAdmissionAndSendRaces() {
+        XCTAssertEqual(
+            M10ViewerInputFailureSubcategory.admissionFailure(
+                .authorizationChanged,
+                isAuthorizedForWindow: false
+            ),
+            .expectedAuthorizationEpochMismatchBeforeAdmission
+        )
+        XCTAssertEqual(
+            M10ViewerInputFailureSubcategory.admissionFailure(
+                .unauthorizedMessage(.inputEvent),
+                isAuthorizedForWindow: true
+            ),
+            .capabilityDenied
+        )
+        XCTAssertEqual(
+            M10ViewerInputFailureSubcategory.admissionFailure(
+                .reconnectRequired,
+                isAuthorizedForWindow: false
+            ),
+            .reconnectOrReadinessRejected
+        )
+        XCTAssertEqual(
+            M10ViewerInputFailureSubcategory.postAdmissionFailure(
+                SessionError.authorizationChanged,
+                transportSendStarted: false
+            ),
+            .authorizationChangedAfterAdmissionBeforeTransport
+        )
+        XCTAssertEqual(
+            M10ViewerInputFailureSubcategory.postAdmissionFailure(
+                SessionError.authorizationChanged,
+                transportSendStarted: false,
+                preTransportRejection: .admissionTokenMismatch
+            ),
+            .inputAdmissionTokenMismatchBeforeTransport
+        )
+        XCTAssertEqual(
+            M10ViewerInputFailureSubcategory.postAdmissionFailure(
+                SessionError.authorizationChanged,
+                transportSendStarted: false,
+                preTransportRejection: .authorizationEpochChangedAfterAdmission
+            ),
+            .authorizationEpochChangedAfterAdmissionBeforeTransport
+        )
+        XCTAssertEqual(
+            M10ViewerInputFailureSubcategory.postAdmissionFailure(
+                SessionError.reconnectRequired,
+                transportSendStarted: false
+            ),
+            .reconnectOrReadinessRejected
+        )
+    }
+
+    func testViewerEventKindsClassifyOnlyFixedInputKinds() {
+        let records = [
+            InputEventRecord(sequence: 1, timestampNanoseconds: 1, windowGeneration: 1, kind: .pointerMove, x: 10, y: 20),
+            InputEventRecord(sequence: 2, timestampNanoseconds: 2, windowGeneration: 1, kind: .pointerButton, x: 10, y: 20, button: 2, pressed: true),
+            InputEventRecord(sequence: 3, timestampNanoseconds: 3, windowGeneration: 1, kind: .pointerButton, x: 10, y: 20, button: 2, pressed: false),
+            InputEventRecord(sequence: 4, timestampNanoseconds: 4, windowGeneration: 1, kind: .scroll, deltaX: 12, deltaY: -4),
+            InputEventRecord(sequence: 5, timestampNanoseconds: 5, windowGeneration: 1, kind: .keyDown, keyCode: 42),
+            InputEventRecord(sequence: 6, timestampNanoseconds: 6, windowGeneration: 1, kind: .keyUp, keyCode: 42)
+        ]
+
+        XCTAssertEqual(records.map(M10ViewerInputEventKind.forRecord), [
+            .mouseMove, .buttonDown, .buttonUp, .scroll, .keyDown, .keyUp
+        ])
+        XCTAssertEqual(Set(M10ViewerInputEventKind.allCases.map(\.rawValue)), [
+            "mouse_move", "button_down", "button_up", "scroll", "key_down", "key_up", "focus_intent", "other"
+        ])
     }
 
     func testPendingInputSummaryKeepsItsPriorConnectionSequence() throws {

@@ -11,12 +11,15 @@ public enum HostInputPermissionState: Equatable, Sendable {
     case unknown
 }
 
-/// Foreground and process-target eligibility are distinct Host facts. The
-/// latter is accepted only when the local durable P6 grant is active.
+/// Foreground and process-target safety are distinct Host facts. A P6 target
+/// may pass its process safety checks while inactive, but ordinary input is
+/// admitted only while the selected application is foreground. Background
+/// eligibility is retained only to decide whether cleanup releases are safe.
 public enum HostInputFocusState: Equatable, Sendable {
     case eligible
-    /// The selected process is a live safe target, but is not frontmost. This
-    /// is available only after a separate durable Host control grant.
+    /// The selected process passes P6 safety checks, but is not frontmost.
+    /// This state never admits ordinary input; it can support safe cleanup of
+    /// state admitted while the target was foreground.
     case backgroundEligible
     case windowUnavailable
     case notForeground
@@ -203,7 +206,6 @@ public struct HostInputSelectionSnapshot: Equatable, Sendable {
 
 public enum HostInputStatus: Equatable, Sendable {
     case ready
-    case backgroundTargetReady
     case inputStateCleanupPending
     case sessionUnauthorized
     case selectionUnavailable
@@ -266,7 +268,7 @@ extension HostInputFocusState {
     public var label: String {
         switch self {
         case .eligible: return "eligible"
-        case .backgroundEligible: return "selected process is eligible for background control"
+        case .backgroundEligible: return "inactive target is safety-checked; ordinary input requires foreground"
         case .windowUnavailable: return "window unavailable"
         case .notForeground: return "selected window is not foreground"
         case .lockedScreen: return "screen is locked"
@@ -438,8 +440,7 @@ public enum HostInputMapper {
         guard context.permission == .authorized else {
             throw HostInputError.permissionUnavailable
         }
-        guard context.focus == .eligible ||
-                (context.focus == .backgroundEligible && context.processTargetingAuthorized) else {
+        guard context.focus == .eligible else {
             throw HostInputError.focusUnavailable(context.focus)
         }
 
@@ -560,8 +561,7 @@ public final class HostInputController: @unchecked Sendable {
         guard context.permission == .authorized else {
             return .permissionUnavailable
         }
-        guard context.focus == .eligible ||
-                (context.focus == .backgroundEligible && context.processTargetingAuthorized) else {
+        guard context.focus == .eligible else {
             return .focusUnavailable(context.focus)
         }
         guard context.currentWindowIdentifier == selectedWindow.windowIdentifier,
@@ -573,7 +573,7 @@ public final class HostInputController: @unchecked Sendable {
               currentBounds.isValid else {
             return .selectionUnavailable
         }
-        return context.focus == .backgroundEligible ? .backgroundTargetReady : .ready
+        return .ready
     }
 
     /// Returns the selection identity used by the lifecycle owner to detect a

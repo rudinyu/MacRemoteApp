@@ -1,6 +1,7 @@
 #if DEBUG
 import Foundation
 import XCTest
+import RemoteProtocol
 @testable import Host
 
 final class M10DebugDiagnosticsTests: XCTestCase {
@@ -183,6 +184,13 @@ final class M10DebugDiagnosticsTests: XCTestCase {
         ), at: date)
         writer.record(.inputTotals(
             received: 8,
+            inputEventKinds: [
+                .mouseMove: 3,
+                .buttonDown: 2,
+                .buttonUp: 1,
+                .scroll: 1,
+                .keyDown: 1
+            ],
             admitted: 5,
             queued: 2,
             injected: 4,
@@ -229,10 +237,27 @@ final class M10DebugDiagnosticsTests: XCTestCase {
         XCTAssertEqual(records[10]["observed_receive_generation"] as? Int, 5)
         XCTAssertEqual(records[11]["event"] as? String, "input_window")
         XCTAssertEqual(records[11]["received"] as? Int, 8)
+        let hostInputKinds = try XCTUnwrap(records[11]["input_event_kinds"] as? [String: Int])
+        XCTAssertEqual(Set(hostInputKinds.keys), Set(M10HostInputEventKind.allCases.map(\.rawValue)))
+        XCTAssertEqual(hostInputKinds[M10HostInputEventKind.mouseMove.rawValue], 3)
+        XCTAssertEqual(hostInputKinds[M10HostInputEventKind.buttonDown.rawValue], 2)
+        XCTAssertEqual(hostInputKinds[M10HostInputEventKind.buttonUp.rawValue], 1)
         XCTAssertEqual(records[11]["admitted"] as? Int, 5)
         XCTAssertEqual(records[11]["queued"] as? Int, 2)
         XCTAssertEqual(records[11]["queue_wait_max_ms"] as? Int, 7)
-        XCTAssertFalse(String(data: try Data(contentsOf: logURL), encoding: .utf8)!.contains("clipboard"))
+        let inputAllowedKeys: Set<String> = [
+            "schema_version", "role", "run_id", "app_version", "app_build", "timestamp_utc",
+            "monotonic_process_ms", "run_sequence", "connection_sequence", "event", "received",
+            "input_event_kinds", "admitted", "queued", "injected", "rejected", "selection_transition",
+            "authorization", "permission", "focus", "target", "invalid_event", "cleanup", "other",
+            "queue_wait_samples", "queue_wait_total_ms", "queue_wait_max_ms", "handler_samples",
+            "handler_total_ms", "handler_max_ms"
+        ]
+        XCTAssertTrue(Set(records[11].keys).isSubset(of: inputAllowedKeys))
+        let inputText = String(data: try Data(contentsOf: logURL), encoding: .utf8)!
+        for prohibited in ["key_code", "coordinates", "button_value", "clipboard_content", "window_title", "process_name"] {
+            XCTAssertFalse(inputText.contains(prohibited), "Unexpected private input detail: \(prohibited)")
+        }
     }
 
     func testEventSchemaHasOnlyWhitelistedFieldsAndSanitizesMetadata() throws {
@@ -384,11 +409,11 @@ final class M10DebugDiagnosticsTests: XCTestCase {
         let writer = M10HostDiagnosticFileLog(fileURL: url)
         let diagnostics = M10HostInputDiagnostics(fileLog: writer)
         let firstSequence = writer.recordConnectionStarted()
-        diagnostics.recordReceived(connectionSequence: firstSequence)
+        diagnostics.recordReceived(kind: .mouseMove, connectionSequence: firstSequence)
         diagnostics.recordRejected(.permission, connectionSequence: firstSequence)
 
         let secondSequence = writer.recordConnectionStarted()
-        diagnostics.recordReceived(connectionSequence: secondSequence)
+        diagnostics.recordReceived(kind: .buttonDown, connectionSequence: secondSequence)
         diagnostics.recordInjected(connectionSequence: secondSequence)
         diagnostics.finishConnection(connectionSequence: firstSequence)
         diagnostics.finishConnection(connectionSequence: secondSequence)
@@ -399,12 +424,38 @@ final class M10DebugDiagnosticsTests: XCTestCase {
         XCTAssertEqual(summaries.count, 2)
         XCTAssertEqual(summaries[0]["connection_sequence"] as? Int, 1)
         XCTAssertEqual(summaries[0]["received"] as? Int, 1)
+        XCTAssertEqual(
+            try XCTUnwrap(summaries[0]["input_event_kinds"] as? [String: Int])[M10HostInputEventKind.mouseMove.rawValue],
+            1
+        )
         XCTAssertEqual(summaries[0]["permission"] as? Int, 1)
         XCTAssertEqual(summaries[0]["injected"] as? Int, 0)
         XCTAssertEqual(summaries[1]["connection_sequence"] as? Int, 2)
         XCTAssertEqual(summaries[1]["received"] as? Int, 1)
+        XCTAssertEqual(
+            try XCTUnwrap(summaries[1]["input_event_kinds"] as? [String: Int])[M10HostInputEventKind.buttonDown.rawValue],
+            1
+        )
         XCTAssertEqual(summaries[1]["permission"] as? Int, 0)
         XCTAssertEqual(summaries[1]["injected"] as? Int, 1)
+    }
+
+    func testHostInputEventKindsClassifyOnlyFixedInputKinds() {
+        let messages = [
+            InputEventMessage(kind: .pointerMove, windowGeneration: 1, x: 10, y: 20),
+            InputEventMessage(kind: .pointerButton, windowGeneration: 1, x: 10, y: 20, button: 2, pressed: true),
+            InputEventMessage(kind: .pointerButton, windowGeneration: 1, x: 10, y: 20, button: 2, pressed: false),
+            InputEventMessage(kind: .scroll, windowGeneration: 1, deltaX: 12, deltaY: -4),
+            InputEventMessage(kind: .keyDown, windowGeneration: 1, keyCode: 42),
+            InputEventMessage(kind: .keyUp, windowGeneration: 1, keyCode: 42)
+        ]
+
+        XCTAssertEqual(messages.map(M10HostInputEventKind.forMessage), [
+            .mouseMove, .buttonDown, .buttonUp, .scroll, .keyDown, .keyUp
+        ])
+        XCTAssertEqual(Set(M10HostInputEventKind.allCases.map(\.rawValue)), [
+            "mouse_move", "button_down", "button_up", "scroll", "key_down", "key_up", "focus_intent", "other"
+        ])
     }
 
     func testRotatesWithinOneCurrentAndOnePreviousFile() throws {

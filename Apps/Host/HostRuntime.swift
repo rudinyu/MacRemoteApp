@@ -33,7 +33,6 @@ enum HostRuntimeForegroundRestorationPolicy {
         requestGeneration: UInt64?,
         selectedWindowGeneration: UInt64?,
         authorizedWindowGeneration: UInt64?,
-        processTargetingNegotiated: Bool,
         requiresHostFrontmost: Bool,
         hostIsFrontmost: Bool
     ) -> Bool {
@@ -43,8 +42,7 @@ enum HostRuntimeForegroundRestorationPolicy {
               selectedWindowMatches,
               let requestGeneration,
               selectedWindowGeneration == requestGeneration,
-              authorizedWindowGeneration == requestGeneration,
-              !processTargetingNegotiated else {
+              authorizedWindowGeneration == requestGeneration else {
             return false
         }
         return !requiresHostFrontmost || hostIsFrontmost
@@ -54,14 +52,25 @@ enum HostRuntimeForegroundRestorationPolicy {
 enum HostRuntimeForegroundActivationPolicy {
     static func permits(
         explicitViewerSelection: Bool,
-        processTargetingNegotiated: Bool,
         targetApplicationAvailable: Bool,
         targetIsRegularApplication: Bool
     ) -> Bool {
         explicitViewerSelection &&
-            !processTargetingNegotiated &&
             targetApplicationAvailable &&
             targetIsRegularApplication
+    }
+
+    static func authorizedCapabilities(
+        _ capabilities: Set<Capability>,
+        afterForegroundConfirmation didConfirmForeground: Bool,
+        inputCapabilities: Set<Capability>
+    ) -> Set<Capability> {
+        guard !didConfirmForeground else { return capabilities }
+        var result = capabilities
+        result.subtract(inputCapabilities)
+        result.remove(.inputSourceSync)
+        result.remove(.backgroundControl)
+        return result
     }
 }
 
@@ -477,7 +486,7 @@ actor HostRuntime {
         case .unknown: permission = .unknown
         }
         let processTargetEligible: Bool? = snapshot.negotiatedCapabilities.contains(.backgroundControl)
-            ? (inputStatus == .ready || inputStatus == .backgroundTargetReady)
+            ? (inputStatus == .ready)
             : nil
         let wireState: ControlAuthorizationState
         switch status {
@@ -900,10 +909,6 @@ actor HostRuntime {
                     permission = .granted
                     focusEligible = true
                     processTargetEligible = snapshot.negotiatedCapabilities.contains(.backgroundControl) ? true : nil
-                case .backgroundTargetReady:
-                    permission = .granted
-                    focusEligible = false
-                    processTargetEligible = true
                 case .permissionUnavailable:
                     // A previously authorized input path lost its local TCC
                     // access. The Viewer must remain disabled until a fresh
@@ -1252,6 +1257,31 @@ actor HostRuntime {
     /// Records the exact authorization epoch returned by TransportCore for
     /// successful attempts. Failed attempts retain source and requested
     /// metadata without inventing a generation transition.
+    private func authorizeWithInputFence(
+        _ session: SessionCoordinator,
+        windowGeneration: UInt64?,
+        capabilities: Set<Capability>
+    ) async throws -> SessionAuthorizationTransition {
+        // Capture the runtime before the first suspension. If HostRuntime is
+        // re-entered while authorization waits for its receipt, this call must
+        // release the same input loop whose admissions it closed.
+        let inputRuntime = self.inputRuntime
+        guard let inputRuntime else {
+            // The initial connection cannot have admitted Host input before
+            // its input runtime is created.
+            return try await session.authorize(
+                windowGeneration: windowGeneration,
+                capabilities: capabilities
+            )
+        }
+        return try await inputRuntime.withAuthorizationFence(session: session) {
+            try await session.authorize(
+                windowGeneration: windowGeneration,
+                capabilities: capabilities
+            )
+        }
+    }
+
     private func authorizeSession(
         _ session: SessionCoordinator,
         source: M10HostAuthorizationSource,
@@ -1260,7 +1290,8 @@ actor HostRuntime {
     ) async throws {
         do {
 #if DEBUG
-            let transition = try await session.authorize(
+            let transition = try await authorizeWithInputFence(
+                session,
                 windowGeneration: windowGeneration,
                 capabilities: capabilities
             )
@@ -1273,7 +1304,8 @@ actor HostRuntime {
                 requestedCapabilities: capabilities
             )
 #else
-            _ = try await session.authorize(
+            _ = try await authorizeWithInputFence(
+                session,
                 windowGeneration: windowGeneration,
                 capabilities: capabilities
             )
@@ -1606,7 +1638,6 @@ actor HostRuntime {
             requestGeneration: requestGeneration,
             selectedWindowGeneration: selectedWindowGeneration,
             authorizedWindowGeneration: snapshot.authorizedWindowGeneration,
-            processTargetingNegotiated: snapshot.negotiatedCapabilities.contains(.backgroundControl),
             requiresHostFrontmost: requiresHostFrontmost,
             hostIsFrontmost: hostIsFrontmost
         ) else {
@@ -1615,8 +1646,7 @@ actor HostRuntime {
 
         let didRestore = await bringSelectedApplicationToForeground(
             window,
-            explicitViewerSelection: true,
-            processTargetingNegotiated: snapshot.negotiatedCapabilities.contains(.backgroundControl)
+            explicitViewerSelection: true
         )
         let currentSnapshot = await session.snapshot()
         guard HostRuntimeForegroundRestorationPolicy.permits(
@@ -1627,7 +1657,6 @@ actor HostRuntime {
             requestGeneration: requestGeneration,
             selectedWindowGeneration: selectedWindowGeneration,
             authorizedWindowGeneration: currentSnapshot.authorizedWindowGeneration,
-            processTargetingNegotiated: currentSnapshot.negotiatedCapabilities.contains(.backgroundControl),
             requiresHostFrontmost: false,
             hostIsFrontmost: true
         ) else {
@@ -1712,18 +1741,21 @@ actor HostRuntime {
             authorizedCapabilities.remove(.textClipboard)
         }
 
-        // P6 keeps the selected app in its current activation state and relies
-        // on Host-accepted pairing, negotiated P6, and the existing
-        // process-target safety checks. Peers without P6 keep the established
-        // explicit-selection foreground handoff.
-        let didForegroundSelectedApplication = processControlNegotiated
-            ? false
-            : await bringSelectedApplicationToForeground(selected)
-        if !processControlNegotiated && !didForegroundSelectedApplication {
+        // P6 is a pairing and control-generation extension; it does not
+        // enable inactive-process event delivery. Every explicit selection
+        // must foreground the selected regular app before input can be
+        // authorized, regardless of capability negotiation.
+        let didForegroundSelectedApplication = await bringSelectedApplicationToForeground(selected)
+        if !didForegroundSelectedApplication {
             startupLogger.error(
                 "Host could not confirm the selected application became foreground; input remains fail-closed"
             )
         }
+        authorizedCapabilities = HostRuntimeForegroundActivationPolicy.authorizedCapabilities(
+            authorizedCapabilities,
+            afterForegroundConfirmation: didForegroundSelectedApplication,
+            inputCapabilities: Self.inputCapabilities
+        )
 
         try await authorizeSession(
             session,
@@ -2175,21 +2207,18 @@ actor HostRuntime {
     private func bringSelectedApplicationToForeground(_ window: CaptureWindow) async -> Bool {
         await bringSelectedApplicationToForeground(
             window,
-            explicitViewerSelection: true,
-            processTargetingNegotiated: false
+            explicitViewerSelection: true
         )
     }
 
     @MainActor
     private func bringSelectedApplicationToForeground(
         _ window: CaptureWindow,
-        explicitViewerSelection: Bool,
-        processTargetingNegotiated: Bool
+        explicitViewerSelection: Bool
     ) async -> Bool {
         guard let application = NSRunningApplication(processIdentifier: window.processIdentifier),
               HostRuntimeForegroundActivationPolicy.permits(
                   explicitViewerSelection: explicitViewerSelection,
-                  processTargetingNegotiated: processTargetingNegotiated,
                   targetApplicationAvailable: true,
                   targetIsRegularApplication: application.activationPolicy == .regular
               ) else {
@@ -2213,9 +2242,10 @@ actor HostRuntime {
         }
 
         guard #available(macOS 14.0, *) else {
-            // The cooperative API is required for this explicit legacy
-            // foreground request. On macOS 13, leave control fail-closed and
-            // let the Viewer ask the Host user to reactivate the Host.
+            // This cooperative API supports every explicit selected-app
+            // foreground request, including negotiated P6. On macOS 13,
+            // leave control fail-closed and let the Viewer ask the Host user
+            // to reactivate the Host.
             return false
         }
 
@@ -2458,7 +2488,6 @@ actor HostRuntime {
         let state: M10HostInputReadiness
         switch status {
         case .ready: state = .ready
-        case .backgroundTargetReady: state = .backgroundTargetReady
         case .inputStateCleanupPending: state = .cleanupPending
         case .sessionUnauthorized: state = .sessionUnauthorized
         case .selectionUnavailable: state = .selectionUnavailable

@@ -23,9 +23,10 @@ builds, not a public release. On the negotiated P6 path, Host acceptance of
 the authenticated Viewer pairing establishes durable input trust and enables
 negotiated Host clipboard capability across reconnect without a second Host
 prompt. The Viewer still controls clipboard sharing through its own
-session-local opt-in. With negotiated P6, the Viewer can keep viewing and
-control the selected app while it is inactive. Peers without P6 retain
-foreground-only input.
+session-local opt-in. With negotiated P6, the Viewer can keep viewing the
+selected app while it is inactive. Before input is available, explicit window
+selection foregrounds the selected regular app; every input path remains
+foreground-only.
 The 1011 RC also includes the full-cleanup uninstaller in both DMGs, Viewer-led
 input-source following, and the earlier capture, input, reconnect, and
 presentation reliability fixes.
@@ -39,13 +40,14 @@ keeping video connected; ambiguous delivery still ends the session so Host
 held-input cleanup runs. Passing local tests does not replace the pending
 two-Mac acceptance run.
 
-P6 remains an explicit extension to foreground-only input; secure-input,
-system-authentication-dialog, lock, session, target, permission, and generation
-checks still apply. A selected window keeps streaming when its app becomes
-inactive or the window is occluded, without activating the app; brief catalog
-omissions and unexpected stream endings are recovered against the same window
-ID, bundle ID, and PID. Confirmed target loss or permission loss still fails
-closed. Host pairing trust can be paused for the active session or revoked by
+P6 remains an explicit extension to foreground-only input authorization;
+secure-input, system-authentication-dialog, lock, session, target, permission,
+and generation checks still apply. A selected window keeps streaming when its
+app becomes inactive or the window is occluded; video does not activate the
+app. Before control, explicit selection foregrounds the selected regular app,
+and focus loss disables input. Brief catalog omissions and unexpected stream
+endings are recovered against the same window ID, bundle ID, and PID.
+Confirmed target loss or permission loss still fails closed. Host pairing trust can be paused for the active session or revoked by
 unpairing the Viewer; negotiated Host clipboard authorization follows accepted
 pairing, while text transfer retains its separate Viewer-local opt-in. Physical
 background-stream, input, and clipboard acceptance is still pending. See the
@@ -327,11 +329,12 @@ capabilities are recorded in
 The Host discovers shareable applications/windows, lets the local user select
 one window, captures it with ScreenCaptureKit, encodes H.264 with VideoToolbox,
 and streams it over an authenticated LAN session. The selected stream remains
-active when the owning app loses foreground, while input continues to follow
-the separate foreground or P6 process-target safety policy. The Viewer discovers and
+active when the owning app loses foreground, while every input path requires
+the selected PID to remain frontmost. On explicit selection the Host may
+foreground that regular app before enabling input; P6 adds pairing and control
+generation checks without inactive-process delivery. The Viewer discovers and
 connects to the Host, renders the stream with Metal, and sends mouse and
-keyboard events to the selected app under the negotiated foreground or P6
-process-target policy. Host acceptance of pairing authorizes negotiated text
+keyboard events through normal system event dispatch. Host acceptance of pairing authorizes negotiated text
 clipboard capability without another Host dialog; the Viewer must still opt in
 locally before text flows. The initial target is 1080p at up to 60 fps with low
 measured latency.
@@ -348,9 +351,10 @@ measured latency.
 
 V1 does not include Internet NAT traversal, WebRTC, audio, file transfer, iPad
 support, simultaneous multi-window control, or locked-screen control. The
-separately specified P6 extension provides Host-authorized process-target
-control for an inactive selected app; it does not add locked-screen, login-
-window, secure-input, or system-authentication-dialog control.
+separately specified P6 extension adds Host-authorized pairing and control
+generation checks; it does not permit input to an inactive selected app or
+locked-screen, login-window, secure-input, or system-authentication-dialog
+control.
 
 ## Documents and authority
 

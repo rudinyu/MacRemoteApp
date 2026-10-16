@@ -1,5 +1,9 @@
 import Foundation
 import CaptureCore
+import InputCore
+import RemoteProtocol
+import SecurityCore
+import TransportCore
 import XCTest
 @testable import Host
 
@@ -77,7 +81,6 @@ final class HostRuntimeRecoveryPolicyTests: XCTestCase {
         XCTAssertFalse(permitsRestore(selectedWindowMatches: false))
         XCTAssertFalse(permitsRestore(requestGeneration: 8, selectedWindowGeneration: 9))
         XCTAssertFalse(permitsRestore(authorizedWindowGeneration: 8))
-        XCTAssertFalse(permitsRestore(processTargetingNegotiated: true))
     }
 
     func testForegroundRestorationCanRequireHostToRemainFrontmost() {
@@ -85,37 +88,54 @@ final class HostRuntimeRecoveryPolicyTests: XCTestCase {
         XCTAssertTrue(permitsRestore(requiresHostFrontmost: true, hostIsFrontmost: true))
     }
 
-    func testForegroundActivationRequiresExplicitLegacySelectionAndRegularTarget() {
+    func testForegroundActivationRequiresExplicitSelectionAndRegularTarget() {
         XCTAssertTrue(HostRuntimeForegroundActivationPolicy.permits(
             explicitViewerSelection: true,
-            processTargetingNegotiated: false,
             targetApplicationAvailable: true,
             targetIsRegularApplication: true
         ))
         XCTAssertFalse(HostRuntimeForegroundActivationPolicy.permits(
             explicitViewerSelection: false,
-            processTargetingNegotiated: false,
             targetApplicationAvailable: true,
             targetIsRegularApplication: true
         ))
         XCTAssertFalse(HostRuntimeForegroundActivationPolicy.permits(
             explicitViewerSelection: true,
-            processTargetingNegotiated: true,
-            targetApplicationAvailable: true,
-            targetIsRegularApplication: true
-        ))
-        XCTAssertFalse(HostRuntimeForegroundActivationPolicy.permits(
-            explicitViewerSelection: true,
-            processTargetingNegotiated: false,
             targetApplicationAvailable: false,
             targetIsRegularApplication: true
         ))
         XCTAssertFalse(HostRuntimeForegroundActivationPolicy.permits(
             explicitViewerSelection: true,
-            processTargetingNegotiated: false,
             targetApplicationAvailable: true,
             targetIsRegularApplication: false
         ))
+    }
+
+    func testUnconfirmedForegroundActivationRemovesEveryInputCapabilityIncludingP6() {
+        let capabilities: Set<Capability> = [
+            .mouseInput,
+            .keyboardInput,
+            .inputSourceSync,
+            .backgroundControl,
+            .textClipboard
+        ]
+        XCTAssertEqual(
+            HostRuntimeForegroundActivationPolicy.authorizedCapabilities(
+                capabilities,
+                afterForegroundConfirmation: false,
+                inputCapabilities: [.mouseInput, .keyboardInput]
+            ),
+            [.textClipboard],
+            "failed activation must not leave negotiated P6 or input-source authorization active"
+        )
+        XCTAssertEqual(
+            HostRuntimeForegroundActivationPolicy.authorizedCapabilities(
+                capabilities,
+                afterForegroundConfirmation: true,
+                inputCapabilities: [.mouseInput, .keyboardInput]
+            ),
+            capabilities
+        )
     }
 
     func testCooperativeActivationRequiresSupportedAPIAndConfirmedHostForeground() {
@@ -186,6 +206,402 @@ final class HostRuntimeRecoveryPolicyTests: XCTestCase {
         XCTAssertTrue(observedCallbackReturn)
     }
 
+    func testAuthorizationFenceDrainsInputAcrossFailedOverlappingTransition() async throws {
+        try await withInputFenceHarness { harness in
+            let initialAuthorization = await harness.viewer.snapshot()
+            try await sendKey(
+                56,
+                pressed: true,
+                authorizationGeneration: initialAuthorization.authorizationGeneration,
+                controlGeneration: 1,
+                through: harness.viewer
+            )
+            try await sendMarker(
+                1,
+                authorizationGeneration: initialAuthorization.authorizationGeneration,
+                through: harness.viewer
+            )
+            try await waitForMarker(1, recorder: harness.recorder)
+            XCTAssertTrue(harness.adapter.hasKey(56, pressed: true))
+
+            let firstEntered = HostInputTestSignal()
+            let releaseFirst = HostInputTestSignal()
+            let secondEntered = HostInputTestSignal()
+            let releaseSecond = HostInputTestSignal()
+            let failedFence = Task {
+                try await harness.runtime.withAuthorizationFence(session: harness.host) {
+                    await firstEntered.signal()
+                    await releaseFirst.wait()
+                    throw HostInputFenceTestError.expectedFailure
+                }
+            }
+            await firstEntered.wait()
+
+            XCTAssertTrue(
+                harness.adapter.hasKey(56, pressed: false),
+                "the first authorization fence must release Host-held state before its operation"
+            )
+
+            let successfulFence = Task {
+                try await harness.runtime.withAuthorizationFence(session: harness.host) {
+                    await secondEntered.signal()
+                    await releaseSecond.wait()
+                    return try await harness.host.authorize(
+                        windowGeneration: 7,
+                        capabilities: harness.capabilities
+                    )
+                }
+            }
+            await secondEntered.wait()
+
+            // The host authorization is still live here, so only the runtime's
+            // admission barrier prevents an event queued during the transition.
+            try await sendKey(
+                57,
+                pressed: true,
+                authorizationGeneration: initialAuthorization.authorizationGeneration,
+                controlGeneration: 1,
+                through: harness.viewer
+            )
+            try await sendMarker(
+                2,
+                authorizationGeneration: initialAuthorization.authorizationGeneration,
+                through: harness.viewer
+            )
+            try await waitForMarker(2, recorder: harness.recorder)
+            XCTAssertFalse(harness.adapter.hasKey(57, pressed: true))
+
+            await releaseFirst.signal()
+            do {
+                _ = try await failedFence.value
+                XCTFail("the first overlapping fence operation should fail")
+            } catch HostInputFenceTestError.expectedFailure {
+                // A failed transition must release only its own barrier depth.
+            }
+
+            XCTAssertFalse(
+                harness.adapter.hasKey(57, pressed: true),
+                "the remaining authorization fence must continue blocking stale input after the failure"
+            )
+            await releaseSecond.signal()
+            let transition = try await successfulFence.value
+            let currentAuthorization = try await waitForViewerAuthorization(
+                after: initialAuthorization.authorizationGeneration,
+                viewer: harness.viewer
+            )
+            XCTAssertEqual(transition.authorizationGeneration, currentAuthorization.authorizationGeneration)
+
+            try await sendPointerMove(
+                100,
+                authorizationGeneration: currentAuthorization.authorizationGeneration,
+                controlGeneration: 1,
+                through: harness.viewer
+            )
+            try await sendMarker(
+                3,
+                authorizationGeneration: currentAuthorization.authorizationGeneration,
+                through: harness.viewer
+            )
+            try await waitForMarker(3, recorder: harness.recorder)
+
+            let commands = harness.adapter.snapshot()
+            let releasedIndex = try XCTUnwrap(commands.firstIndex { command in
+                if case let .key(_, keyCode, _, pressed) = command {
+                    return keyCode == 56 && !pressed
+                }
+                return false
+            })
+            let nextInputIndex = try XCTUnwrap(commands.firstIndex { command in
+                if case .pointerMove = command { return true }
+                return false
+            })
+            XCTAssertLessThan(releasedIndex, nextInputIndex)
+            XCTAssertFalse(harness.adapter.hasKey(57, pressed: true))
+            XCTAssertTrue(harness.adapter.hasPointerMove)
+        }
+    }
+
+    func testLocalInputAdmissionFalseThenTrueResetsBeforeFreshInput() async throws {
+        try await withInputFenceHarness { harness in
+            let authorization = await harness.viewer.snapshot()
+            try await sendKey(
+                61,
+                pressed: true,
+                authorizationGeneration: authorization.authorizationGeneration,
+                controlGeneration: 1,
+                through: harness.viewer
+            )
+            try await sendMarker(
+                11,
+                authorizationGeneration: authorization.authorizationGeneration,
+                through: harness.viewer
+            )
+            try await waitForMarker(11, recorder: harness.recorder)
+            XCTAssertTrue(harness.adapter.hasKey(61, pressed: true))
+
+            await harness.runtime.setLocalInputAdmission(false, revision: 2, session: harness.host)
+            XCTAssertTrue(
+                harness.adapter.hasKey(61, pressed: false),
+                "local pause must release held state before completing its transition"
+            )
+            await harness.runtime.setLocalInputAdmission(true, revision: 3, session: harness.host)
+
+            try await sendKey(
+                62,
+                pressed: true,
+                authorizationGeneration: authorization.authorizationGeneration,
+                controlGeneration: 1,
+                through: harness.viewer
+            )
+            try await sendMarker(
+                12,
+                authorizationGeneration: authorization.authorizationGeneration,
+                through: harness.viewer
+            )
+            try await waitForMarker(12, recorder: harness.recorder)
+            XCTAssertFalse(
+                harness.adapter.hasKey(62, pressed: true),
+                "a message from the pre-pause local control epoch must not be admitted after resume"
+            )
+
+            try await sendKey(
+                63,
+                pressed: true,
+                authorizationGeneration: authorization.authorizationGeneration,
+                controlGeneration: 3,
+                through: harness.viewer
+            )
+            try await sendMarker(
+                13,
+                authorizationGeneration: authorization.authorizationGeneration,
+                through: harness.viewer
+            )
+            try await waitForMarker(13, recorder: harness.recorder)
+            let commands = harness.adapter.snapshot()
+            let releasedIndex = try XCTUnwrap(commands.firstIndex { command in
+                if case let .key(_, keyCode, _, pressed) = command {
+                    return keyCode == 61 && !pressed
+                }
+                return false
+            })
+            let resumedInputIndex = try XCTUnwrap(commands.firstIndex { command in
+                if case let .key(_, keyCode, _, pressed) = command {
+                    return keyCode == 63 && pressed
+                }
+                return false
+            })
+            XCTAssertLessThan(releasedIndex, resumedInputIndex)
+            XCTAssertTrue(harness.adapter.hasKey(63, pressed: true))
+        }
+    }
+
+    private func withInputFenceHarness(
+        _ operation: (HostInputFenceHarness) async throws -> Void
+    ) async throws {
+        let harness = try await makeInputFenceHarness()
+        do {
+            try await operation(harness)
+        } catch {
+            await stop(harness)
+            throw error
+        }
+        await stop(harness)
+    }
+
+    private func stop(_ harness: HostInputFenceHarness) async {
+        await harness.runtime.stop()
+        await harness.host.stop()
+        await harness.viewer.stop()
+    }
+
+    private func makeInputFenceHarness() async throws -> HostInputFenceHarness {
+        let hostIdentity = try PeerIdentity(publicKeyRepresentation: Data("host-fence-test-host".utf8))
+        let viewerIdentity = try PeerIdentity(publicKeyRepresentation: Data("host-fence-test-viewer".utf8))
+        let transports = InMemoryTransport.makePair(
+            firstAuthentication: .trusted(viewerIdentity),
+            secondAuthentication: .trusted(hostIdentity)
+        )
+        try await transports.first.start()
+        try await transports.second.start()
+
+        let capabilities: Set<Capability> = [
+            .pingPong,
+            .h264Video,
+            .receiverReport,
+            .mouseInput,
+            .keyboardInput,
+            .backgroundControl
+        ]
+        let host = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .host,
+                implementationIdentifier: "host-fence-test-host",
+                capabilities: capabilities
+            ),
+            transport: transports.first
+        )
+        let viewer = SessionCoordinator(
+            configuration: SessionConfiguration(
+                role: .viewer,
+                implementationIdentifier: "host-fence-test-viewer",
+                capabilities: capabilities
+            ),
+            transport: transports.second
+        )
+        async let hostStart: Void = host.start()
+        async let viewerStart: Void = viewer.start()
+        try await hostStart
+        try await viewerStart
+        _ = try await waitForHostSnapshot(of: host) { $0.state == .capabilitiesNegotiated }
+        _ = try await waitForHostSnapshot(of: viewer) { $0.state == .capabilitiesNegotiated }
+
+        let bounds = InputWindowBounds(originX: 0, originY: 0, width: 100, height: 100)
+        let selection = HostInputWindowSelection(
+            windowIdentifier: 7,
+            processIdentifier: 70,
+            applicationIdentifier: "com.example.input-target",
+            generation: 7,
+            bounds: bounds
+        )
+        let context = HostInputContext(
+            sessionAuthorized: true,
+            authorizedWindowGeneration: 7,
+            selectedWindow: selection,
+            currentWindowIdentifier: 7,
+            currentProcessIdentifier: 70,
+            currentApplicationIdentifier: "com.example.input-target",
+            currentWindowBounds: bounds,
+            permission: .authorized,
+            focus: .eligible,
+            mouseInputEnabled: true,
+            keyboardInputEnabled: true
+        )
+        let recorder = HostInputTestRecorder()
+        let adapter = HostInputCommandRecorder()
+        let runtime = HostInputSessionRuntime(
+            session: host,
+            contextProvider: FixedHostInputContextProvider(context: context),
+            injectionAdapter: adapter,
+            onNonInputMessage: { message in
+                if case let .receiverReport(report) = message {
+                    await recorder.recordMarker(report.receivedFrames)
+                }
+            }
+        )
+        let harness = HostInputFenceHarness(
+            host: host,
+            viewer: viewer,
+            runtime: runtime,
+            recorder: recorder,
+            adapter: adapter,
+            capabilities: capabilities
+        )
+        await runtime.start()
+        do {
+            await runtime.setLocalInputAdmission(true, revision: 1, session: host)
+            try await host.authorize(windowGeneration: 7, capabilities: capabilities)
+            _ = try await waitForViewerAuthorization(after: 0, viewer: viewer)
+            return harness
+        } catch {
+            await stop(harness)
+            throw error
+        }
+    }
+
+    private func waitForHostSnapshot(
+        of session: SessionCoordinator,
+        timeout: Duration = .seconds(5),
+        satisfying predicate: (SessionSnapshot) -> Bool
+    ) async throws -> SessionSnapshot {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while true {
+            let snapshot = await session.snapshot()
+            if predicate(snapshot) { return snapshot }
+            guard clock.now < deadline else { throw HostInputFenceTestError.timedOut }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    private func waitForViewerAuthorization(
+        after generation: UInt64,
+        viewer: SessionCoordinator
+    ) async throws -> SessionSnapshot {
+        try await waitForHostSnapshot(of: viewer) {
+            $0.authorizationGeneration > generation &&
+                $0.authorized &&
+                $0.authorizedWindowGeneration == 7
+        }
+    }
+
+    private func waitForMarker(
+        _ marker: UInt32,
+        recorder: HostInputTestRecorder
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while true {
+            if await recorder.hasMarker(marker) { return }
+            guard clock.now < deadline else { throw HostInputFenceTestError.timedOut }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    private func sendKey(
+        _ keyCode: UInt16,
+        pressed: Bool,
+        authorizationGeneration: UInt64,
+        controlGeneration: UInt64,
+        through viewer: SessionCoordinator
+    ) async throws {
+        let input = InputEventMessage(
+            kind: pressed ? .keyDown : .keyUp,
+            windowGeneration: 7,
+            keyCode: keyCode,
+            modifiers: 0,
+            controlGeneration: controlGeneration
+        )
+        _ = try await viewer.send(
+            .inputEvent(input),
+            expectedAuthorizationGeneration: authorizationGeneration
+        )
+    }
+
+    private func sendPointerMove(
+        _ sequence: UInt16,
+        authorizationGeneration: UInt64,
+        controlGeneration: UInt64,
+        through viewer: SessionCoordinator
+    ) async throws {
+        let input = InputEventMessage(
+            kind: .pointerMove,
+            windowGeneration: 7,
+            x: sequence,
+            y: sequence,
+            controlGeneration: controlGeneration
+        )
+        _ = try await viewer.send(
+            .inputEvent(input),
+            expectedAuthorizationGeneration: authorizationGeneration
+        )
+    }
+
+    private func sendMarker(
+        _ marker: UInt32,
+        authorizationGeneration: UInt64,
+        through viewer: SessionCoordinator
+    ) async throws {
+        _ = try await viewer.send(
+            .receiverReport(ReceiverReportMessage(
+                generation: 7,
+                queuingDelayMicroseconds: 0,
+                receivedFrames: marker,
+                discardedFrames: 0
+            )),
+            expectedAuthorizationGeneration: authorizationGeneration
+        )
+    }
+
     private func permitsRestore(
         activeSession: Bool = true,
         selectionTransitionInProgress: Bool = false,
@@ -194,7 +610,6 @@ final class HostRuntimeRecoveryPolicyTests: XCTestCase {
         requestGeneration: UInt64? = 9,
         selectedWindowGeneration: UInt64? = 9,
         authorizedWindowGeneration: UInt64? = 9,
-        processTargetingNegotiated: Bool = false,
         requiresHostFrontmost: Bool = false,
         hostIsFrontmost: Bool = false
     ) -> Bool {
@@ -206,12 +621,112 @@ final class HostRuntimeRecoveryPolicyTests: XCTestCase {
             requestGeneration: requestGeneration,
             selectedWindowGeneration: selectedWindowGeneration,
             authorizedWindowGeneration: authorizedWindowGeneration,
-            processTargetingNegotiated: processTargetingNegotiated,
             requiresHostFrontmost: requiresHostFrontmost,
             hostIsFrontmost: hostIsFrontmost
         )
     }
 
+}
+
+private struct HostInputFenceHarness {
+    let host: SessionCoordinator
+    let viewer: SessionCoordinator
+    let runtime: HostInputSessionRuntime
+    let recorder: HostInputTestRecorder
+    let adapter: HostInputCommandRecorder
+    let capabilities: Set<Capability>
+}
+
+private enum HostInputFenceTestError: Error, CustomStringConvertible {
+    case expectedFailure
+    case timedOut
+
+    var description: String {
+        switch self {
+        case .expectedFailure: "expected failure"
+        case .timedOut: "timed out"
+        }
+    }
+}
+
+private struct FixedHostInputContextProvider: HostInputContextProvider {
+    let context: HostInputContext
+
+    func currentContext() -> HostInputContext { context }
+
+    func currentReleaseContext(for target: HostInputTarget) -> HostInputContext? {
+        context
+    }
+}
+
+private final class HostInputCommandRecorder: HostInputInjectionAdapter, @unchecked Sendable {
+    private let lock = NSLock()
+    private var commands: [HostInputCommand] = []
+
+    func inject(_ command: HostInputCommand) throws {
+        lock.lock()
+        commands.append(command)
+        lock.unlock()
+    }
+
+    func release(_ command: HostInputCommand) throws {
+        lock.lock()
+        commands.append(command)
+        lock.unlock()
+    }
+
+    func snapshot() -> [HostInputCommand] {
+        lock.lock()
+        defer { lock.unlock() }
+        return commands
+    }
+
+    func hasKey(_ keyCode: UInt16, pressed: Bool) -> Bool {
+        snapshot().contains { command in
+            if case let .key(_, observedKeyCode, _, observedPressed) = command {
+                return observedKeyCode == keyCode && observedPressed == pressed
+            }
+            return false
+        }
+    }
+
+    var hasPointerMove: Bool {
+        snapshot().contains { command in
+            if case .pointerMove = command { return true }
+            return false
+        }
+    }
+}
+
+private actor HostInputTestRecorder {
+    private var markers: Set<UInt32> = []
+
+    func recordMarker(_ marker: UInt32) {
+        markers.insert(marker)
+    }
+
+    func hasMarker(_ marker: UInt32) -> Bool {
+        markers.contains(marker)
+    }
+}
+
+private actor HostInputTestSignal {
+    private var isSignaled = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func signal() {
+        isSignaled = true
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
+
+    func wait() async {
+        guard !isSignaled else { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
 }
 
 private actor DeferredTeardownProbe {

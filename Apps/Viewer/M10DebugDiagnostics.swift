@@ -2,6 +2,7 @@
 import Foundation
 import CoreFoundation
 import os
+import InputCore
 import TransportCore
 
 enum M10DebugRole: String {
@@ -106,6 +107,88 @@ enum M10ViewerInputReason: String, Equatable, Sendable {
     case capabilityUnavailable = "capability_unavailable"
 }
 
+enum M10ViewerInputEventKind: String, CaseIterable, Equatable, Hashable, Sendable {
+    case mouseMove = "mouse_move"
+    case buttonDown = "button_down"
+    case buttonUp = "button_up"
+    case scroll
+    case keyDown = "key_down"
+    case keyUp = "key_up"
+    case focusIntent = "focus_intent"
+    case other
+
+    static func forRecord(_ record: InputEventRecord) -> Self {
+        switch record.kind {
+        case .pointerMove: .mouseMove
+        case .pointerButton:
+            switch record.pressed {
+            case true?: .buttonDown
+            case false?: .buttonUp
+            case nil: .other
+            }
+        case .scroll: .scroll
+        case .keyDown: .keyDown
+        case .keyUp: .keyUp
+        case .focusIntent: .focusIntent
+        }
+    }
+}
+
+enum M10ViewerInputFailureSubcategory: String, CaseIterable, Equatable, Hashable, Sendable {
+    case expectedAuthorizationEpochMismatchBeforeAdmission = "expected_authorization_epoch_mismatch_before_admission"
+    case inputAdmissionTokenMismatchBeforeTransport = "input_admission_token_mismatch_before_transport"
+    case authorizationEpochChangedAfterAdmissionBeforeTransport = "authorization_epoch_changed_after_admission_before_transport"
+    case authorizationChangedAfterAdmissionBeforeTransport = "authorization_changed_after_admission_before_transport"
+    case reconnectOrReadinessRejected = "reconnect_or_readiness_rejected"
+    case capabilityDenied = "capability_denied"
+    case localPreflightRejected = "local_preflight_rejected"
+    case transportDeliveryUncertain = "transport_delivery_uncertain"
+    case otherPreTransportRejection = "other_pre_transport_rejection"
+    case unclassified
+
+    static func admissionFailure(
+        _ error: SessionError,
+        isAuthorizedForWindow: Bool
+    ) -> Self {
+        switch error {
+        case .authorizationChanged:
+            .expectedAuthorizationEpochMismatchBeforeAdmission
+        case .unauthorizedMessage(.inputEvent):
+            isAuthorizedForWindow ? .capabilityDenied : .reconnectOrReadinessRejected
+        case .reconnectRequired:
+            .reconnectOrReadinessRejected
+        default:
+            .reconnectOrReadinessRejected
+        }
+    }
+
+    static func postAdmissionFailure(
+        _ error: Error,
+        transportSendStarted: Bool,
+        preTransportRejection: SessionInputSendRejection? = nil
+    ) -> Self {
+        guard !transportSendStarted else { return .transportDeliveryUncertain }
+        guard let error = error as? SessionError else { return .reconnectOrReadinessRejected }
+        return switch error {
+        case .authorizationChanged:
+            switch preTransportRejection {
+            case .admissionTokenMismatch:
+                .inputAdmissionTokenMismatchBeforeTransport
+            case .authorizationEpochChangedAfterAdmission:
+                .authorizationEpochChangedAfterAdmissionBeforeTransport
+            case nil:
+                .authorizationChangedAfterAdmissionBeforeTransport
+            }
+        case .unauthorizedMessage(.inputEvent):
+            .capabilityDenied
+        case .reconnectRequired:
+            .reconnectOrReadinessRejected
+        default:
+            .reconnectOrReadinessRejected
+        }
+    }
+}
+
 struct M10ViewerVideoWindowSummary: Equatable {
     let received: UInt64
     let presented: UInt64
@@ -177,6 +260,8 @@ struct M10ViewerInputWindowSummary: Equatable {
     let underlyingFailureCategories: [ViewerInputFailureCategory: UInt64]
     let failureBoundaries: [ViewerInputSendBoundary: UInt64]
     let underlyingFailureCategoriesByBoundary: [ViewerInputSendBoundary: [ViewerInputFailureCategory: UInt64]]
+    let eventKinds: [M10ViewerInputEventKind: UInt64]
+    let failureSubcategories: [M10ViewerInputFailureSubcategory: UInt64]
     let durationMilliseconds: UInt64
 }
 
@@ -192,6 +277,8 @@ struct M10ViewerInputWindowAccumulator {
     private var underlyingFailureCategories: [ViewerInputFailureCategory: UInt64] = [:]
     private var failureBoundaries: [ViewerInputSendBoundary: UInt64] = [:]
     private var underlyingFailureCategoriesByBoundary: [ViewerInputSendBoundary: [ViewerInputFailureCategory: UInt64]] = [:]
+    private var eventKinds: [M10ViewerInputEventKind: UInt64] = [:]
+    private var failureSubcategories: [M10ViewerInputFailureSubcategory: UInt64] = [:]
 
     mutating func begin(at nanoseconds: UInt64) {
         startedAtNanoseconds = nanoseconds
@@ -202,11 +289,19 @@ struct M10ViewerInputWindowAccumulator {
         underlyingFailureCategories.removeAll(keepingCapacity: true)
         failureBoundaries.removeAll(keepingCapacity: true)
         underlyingFailureCategoriesByBoundary.removeAll(keepingCapacity: true)
+        eventKinds.removeAll(keepingCapacity: true)
+        failureSubcategories.removeAll(keepingCapacity: true)
     }
 
-    mutating func recordAttempt() { attempted &+= 1 }
+    mutating func recordAttempt(kind: M10ViewerInputEventKind) {
+        attempted &+= 1
+        eventKinds[kind, default: 0] &+= 1
+    }
     mutating func recordLocallyAccepted() { locallyAccepted &+= 1 }
     mutating func recordSendFailure() { sendFailures &+= 1 }
+    mutating func recordFailureSubcategory(_ subcategory: M10ViewerInputFailureSubcategory) {
+        failureSubcategories[subcategory, default: 0] &+= 1
+    }
     mutating func recordFailureCategory(_ category: ViewerInputFailureCategory) {
         failureCategories[category, default: 0] &+= 1
     }
@@ -228,7 +323,8 @@ struct M10ViewerInputWindowAccumulator {
         let isDue = nanoseconds - startedAtNanoseconds >= Self.intervalNanoseconds
         let hasPendingEvents = attempted > 0 || locallyAccepted > 0 || sendFailures > 0 ||
             !failureCategories.isEmpty || !underlyingFailureCategories.isEmpty ||
-            !failureBoundaries.isEmpty || !underlyingFailureCategoriesByBoundary.isEmpty
+            !failureBoundaries.isEmpty || !underlyingFailureCategoriesByBoundary.isEmpty ||
+            !eventKinds.isEmpty || !failureSubcategories.isEmpty
         guard isDue || (includingPending && hasPendingEvents) else { return nil }
         let summary = M10ViewerInputWindowSummary(
             attempted: attempted,
@@ -248,6 +344,12 @@ struct M10ViewerInputWindowAccumulator {
                 return ($0, Dictionary(uniqueKeysWithValues: ViewerInputFailureCategory.allCases.map {
                     ($0, values[$0, default: 0])
                 }))
+            }),
+            eventKinds: Dictionary(uniqueKeysWithValues: M10ViewerInputEventKind.allCases.map {
+                ($0, eventKinds[$0, default: 0])
+            }),
+            failureSubcategories: Dictionary(uniqueKeysWithValues: M10ViewerInputFailureSubcategory.allCases.map {
+                ($0, failureSubcategories[$0, default: 0])
             }),
             durationMilliseconds: (nanoseconds - startedAtNanoseconds) / 1_000_000
         )
@@ -311,6 +413,8 @@ enum M10ViewerDiagnosticEvent: Sendable {
         underlyingFailureCategories: [ViewerInputFailureCategory: UInt64],
         failureBoundaries: [ViewerInputSendBoundary: UInt64],
         underlyingFailureCategoriesByBoundary: [ViewerInputSendBoundary: [ViewerInputFailureCategory: UInt64]],
+        eventKinds: [M10ViewerInputEventKind: UInt64],
+        failureSubcategories: [M10ViewerInputFailureSubcategory: UInt64],
         durationMilliseconds: UInt64
     )
 
@@ -398,6 +502,8 @@ enum M10ViewerDiagnosticEvent: Sendable {
             underlyingFailureCategories,
             failureBoundaries,
             underlyingFailureCategoriesByBoundary,
+            eventKinds,
+            failureSubcategories,
             durationMilliseconds
         ):
             event = "input_window"
@@ -421,6 +527,12 @@ enum M10ViewerDiagnosticEvent: Sendable {
                     }))
                 }
             )
+            fields["input_event_kinds"] = Dictionary(uniqueKeysWithValues: M10ViewerInputEventKind.allCases.map {
+                ($0.rawValue, eventKinds[$0, default: 0])
+            })
+            fields["failure_subcategories"] = Dictionary(uniqueKeysWithValues: M10ViewerInputFailureSubcategory.allCases.map {
+                ($0.rawValue, failureSubcategories[$0, default: 0])
+            })
             fields["duration_ms"] = durationMilliseconds
         }
 
@@ -639,9 +751,9 @@ final class M10ViewerDiagnosticRecorder: @unchecked Sendable {
         lock.unlock()
     }
 
-    func recordViewerInputAttempt() {
+    func recordViewerInputAttempt(kind: M10ViewerInputEventKind = .other) {
         lock.lock()
-        inputWindow.recordAttempt()
+        inputWindow.recordAttempt(kind: kind)
         lock.unlock()
     }
 
@@ -654,6 +766,12 @@ final class M10ViewerDiagnosticRecorder: @unchecked Sendable {
     func recordViewerInputSendFailure() {
         lock.lock()
         inputWindow.recordSendFailure()
+        lock.unlock()
+    }
+
+    func recordViewerInputFailureSubcategory(_ subcategory: M10ViewerInputFailureSubcategory) {
+        lock.lock()
+        inputWindow.recordFailureSubcategory(subcategory)
         lock.unlock()
     }
 
@@ -700,6 +818,8 @@ final class M10ViewerDiagnosticRecorder: @unchecked Sendable {
             underlyingFailureCategories: summary.underlyingFailureCategories,
             failureBoundaries: summary.failureBoundaries,
             underlyingFailureCategoriesByBoundary: summary.underlyingFailureCategoriesByBoundary,
+            eventKinds: summary.eventKinds,
+            failureSubcategories: summary.failureSubcategories,
             durationMilliseconds: summary.durationMilliseconds
         ))
     }

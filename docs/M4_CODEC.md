@@ -49,11 +49,13 @@ layer remains responsible for carrying these bytes; CodecCore does not import
 
 Deterministic tests cover decoder-configuration round trips, malformed trailing
 data, keyframe-preserving queue replacement, and aspect-fit layout. The
-`MACREMOTEAPP_RUN_M4_CODEC_SMOKE=1` opt-in test creates 64x64 BGRA and `420v` fixtures,
-encodes one forced keyframe, decodes it, and checks generation, timestamps,
-dimensions, and output pixels. It is deliberately opt-in because VideoToolbox
-hardware availability is host-specific. Metal presentation still requires a
-Viewer window-server/manual check for drawable resize and frame pacing.
+operator's physical Viewer screenshot confirms a Host frame traversed the live
+codec and presentation path at least once. The
+`MACREMOTEAPP_RUN_M4_CODEC_SMOKE=1` opt-in test creates 64x64 BGRA and `420v`
+fixtures, encodes one forced keyframe, decodes it, and checks generation,
+timestamps, dimensions, and output pixels. It is deliberately opt-in because
+VideoToolbox hardware availability is host-specific. Physical Viewer resize,
+aspect-ratio, and sustained frame-pacing checks are not separately recorded.
 
 ## Boundary
 

@@ -22,6 +22,19 @@ private final class ViewerInputAdmissionObservation: @unchecked Sendable {
 
 enum ViewerInputTransportError: Error, Equatable, Sendable, CustomStringConvertible {
     case inputNotReady
+    /// Authorization changed before admission, or a send-stage authorization
+    /// rejection did not report a recognized pre-transport cause. This is not
+    /// sufficient provenance to preserve the session after a held-state release.
+    case authorizationChangedBeforeTransport
+    /// The admission token did not match the event's window or required
+    /// capabilities. This is a typed pre-transport failure, but does not prove
+    /// that Host held-input cleanup completed.
+    case inputAdmissionTokenMismatchBeforeTransport
+    /// SessionCoordinator positively identified an authorization epoch change
+    /// after admission and before invoking transport. This is the only
+    /// pre-transport authorization failure that can preserve a session after a
+    /// held-state release fails.
+    case authorizationEpochChangedAfterAdmissionBeforeTransport
     case capabilityUnavailable
     case inputSourceRequestNotAdmitted
     case localPreflightRejected
@@ -30,7 +43,10 @@ enum ViewerInputTransportError: Error, Equatable, Sendable, CustomStringConverti
 
     var failureCategory: ViewerInputFailureCategory {
         switch self {
-        case .inputNotReady, .inputSourceRequestNotAdmitted:
+        case .inputNotReady, .authorizationChangedBeforeTransport,
+             .inputAdmissionTokenMismatchBeforeTransport,
+             .authorizationEpochChangedAfterAdmissionBeforeTransport,
+             .inputSourceRequestNotAdmitted:
             return .authorizationNotReady
         case .capabilityUnavailable:
             return .capabilityUnavailable
@@ -47,7 +63,10 @@ enum ViewerInputTransportError: Error, Equatable, Sendable, CustomStringConverti
             return .transportSendStarted
         case .deliveryUncertainUnknownBoundary:
             return .unknown
-        case .inputNotReady, .capabilityUnavailable, .inputSourceRequestNotAdmitted, .localPreflightRejected:
+        case .inputNotReady, .authorizationChangedBeforeTransport,
+             .inputAdmissionTokenMismatchBeforeTransport,
+             .authorizationEpochChangedAfterAdmissionBeforeTransport,
+             .capabilityUnavailable, .inputSourceRequestNotAdmitted, .localPreflightRejected:
             return .beforeTransportInvocation
         }
     }
@@ -56,6 +75,12 @@ enum ViewerInputTransportError: Error, Equatable, Sendable, CustomStringConverti
         switch self {
         case .inputNotReady:
             return "authenticated input is not ready"
+        case .authorizationChangedBeforeTransport:
+            return "input authorization changed before admission or rejection provenance was unavailable"
+        case .inputAdmissionTokenMismatchBeforeTransport:
+            return "input admission token did not match the admitted event"
+        case .authorizationEpochChangedAfterAdmissionBeforeTransport:
+            return "input authorization epoch changed after admission and before transport"
         case .capabilityUnavailable:
             return "the negotiated session does not authorize this input kind"
         case .inputSourceRequestNotAdmitted:
@@ -66,6 +91,19 @@ enum ViewerInputTransportError: Error, Equatable, Sendable, CustomStringConverti
             return "input delivery status is uncertain"
         case .deliveryUncertainUnknownBoundary:
             return "input delivery status is uncertain"
+        }
+    }
+
+    static func postAdmissionAuthorizationChange(
+        rejection: SessionInputSendRejection?
+    ) -> Self {
+        switch rejection {
+        case .admissionTokenMismatch:
+            .inputAdmissionTokenMismatchBeforeTransport
+        case .authorizationEpochChangedAfterAdmission:
+            .authorizationEpochChangedAfterAdmissionBeforeTransport
+        case nil:
+            .authorizationChangedBeforeTransport
         }
     }
 }
@@ -88,13 +126,19 @@ final class ViewerInputTransport {
         controlGeneration: UInt64? = nil
     ) async throws {
 #if DEBUG
-        M10ViewerDiagnosticRecorder.shared.recordViewerInputAttempt()
+        M10ViewerDiagnosticRecorder.shared.recordViewerInputAttempt(
+            kind: M10ViewerInputEventKind.forRecord(record)
+        )
+        var failureSubcategory: M10ViewerInputFailureSubcategory?
         var locallyAccepted = false
         defer {
             if locallyAccepted {
                 M10ViewerDiagnosticRecorder.shared.recordViewerInputLocallyAccepted()
             } else {
                 M10ViewerDiagnosticRecorder.shared.recordViewerInputSendFailure()
+                M10ViewerDiagnosticRecorder.shared.recordViewerInputFailureSubcategory(
+                    failureSubcategory ?? .unclassified
+                )
             }
         }
 #endif
@@ -119,6 +163,9 @@ final class ViewerInputTransport {
                 )
             }
         } catch {
+#if DEBUG
+            failureSubcategory = .localPreflightRejected
+#endif
             throw ViewerInputTransportError.localPreflightRejected
         }
 
@@ -132,21 +179,45 @@ final class ViewerInputTransport {
             switch error {
             case .unauthorizedMessage(.inputEvent):
                 let snapshot = await session.snapshot()
+#if DEBUG
+                failureSubcategory = M10ViewerInputFailureSubcategory.admissionFailure(
+                    error,
+                    isAuthorizedForWindow: snapshot.authorized &&
+                        snapshot.authorizedWindowGeneration == record.windowGeneration
+                )
+#endif
                 if snapshot.authorized,
                    snapshot.authorizedWindowGeneration == record.windowGeneration {
                     throw ViewerInputTransportError.capabilityUnavailable
                 }
                 throw ViewerInputTransportError.inputNotReady
-            case .authorizationChanged, .reconnectRequired:
+            case .authorizationChanged:
+#if DEBUG
+                failureSubcategory = M10ViewerInputFailureSubcategory.admissionFailure(
+                    error,
+                    isAuthorizedForWindow: false
+                )
+#endif
+                throw ViewerInputTransportError.authorizationChangedBeforeTransport
+            case .reconnectRequired:
+#if DEBUG
+                failureSubcategory = .reconnectOrReadinessRejected
+#endif
                 throw ViewerInputTransportError.inputNotReady
             default:
                 // Admission is synchronous actor-side validation. No event has
                 // entered the transport, so the live session can be rechecked.
+#if DEBUG
+                failureSubcategory = .reconnectOrReadinessRejected
+#endif
                 throw ViewerInputTransportError.inputNotReady
             }
         } catch {
             // This call only creates an admission token. Any non-session error
             // here is likewise known to precede transport delivery.
+#if DEBUG
+            failureSubcategory = .otherPreTransportRejection
+#endif
             throw ViewerInputTransportError.localPreflightRejected
         }
 
@@ -161,11 +232,24 @@ final class ViewerInputTransport {
             locallyAccepted = true
 #endif
         } catch {
+#if DEBUG
+            failureSubcategory = M10ViewerInputFailureSubcategory.postAdmissionFailure(
+                error,
+                transportSendStarted: sendObservation.state == .transportSendStarted,
+                preTransportRejection: sendObservation.preTransportRejection
+            )
+#endif
             // Only failures after the actual transport invocation are
-            // ambiguous. Earlier session validation failures remain
-            // recoverable and can be retried after authorization is ready.
+            // ambiguous. Preserve authorization-change provenance only when
+            // SessionCoordinator rejected the admission before transport.
             if sendObservation.state == .transportSendStarted {
                 throw ViewerInputTransportError.deliveryUncertain
+            }
+            if let sessionError = error as? SessionError,
+               case .authorizationChanged = sessionError {
+                throw ViewerInputTransportError.postAdmissionAuthorizationChange(
+                    rejection: sendObservation.preTransportRejection
+                )
             }
             throw ViewerInputTransportError.inputNotReady
         }

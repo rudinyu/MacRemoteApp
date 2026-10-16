@@ -5,9 +5,11 @@ MacRemoteApp is a LAN-first remote view and control tool for two Macs:
 - The Intel Mac runs `MacRemoteApp-Host`.
 - The Apple Silicon Mac runs `MacRemoteApp-Viewer`.
 
-The Viewer controls one selected Host application window. With negotiated P6
-and Host-approved pairing trust, the selected app can remain inactive; peers
-without P6 require foreground eligibility. The V1 protocol is intentionally
+The Viewer can show one selected Host application window while its app is
+inactive. To control it, explicitly select the window in Viewer; Host then
+cooperatively brings the selected regular app to the foreground, and it must
+remain foreground while input is sent. P6 adds pairing and process-safety
+checks but does not enable inactive-app input. The V1 protocol is intentionally
 limited to one local-LAN session, mouse, keyboard, scroll, and bounded opt-in
 text clipboard synchronization. The
 production Viewer exposes the clipboard toggle only after Host pairing trust
@@ -118,11 +120,12 @@ paths.
 ## Select and control a window
 
 1. Use the Viewer window picker to select exactly one eligible Host window.
-2. Keep the Host unlocked. When both peers support P6 and the Host has
-   accepted this Viewer’s pairing, the selected app may stay in the background: the
-   Viewer continues showing its window and reports background control ready.
-   Without P6, the selected app must be active; explicit selection may briefly
-   activate Host and yield to the selected app before input becomes available.
+2. Keep the Host unlocked. The Viewer can continue showing the selected window
+   while its app is inactive. To control it, select the window explicitly;
+   Host activates itself, confirms it is frontmost, and cooperatively yields
+   activation to the selected regular app before input becomes available. P6
+   keeps its pairing and safety checks, but input still requires foreground
+   eligibility.
 3. Use the Viewer surface for pointer movement, button events, scrolling,
    keyboard input, and supported modifiers.
    If the session authorizes only mouse or only keyboard input, the Viewer
@@ -140,16 +143,18 @@ window on screen on the Host and refresh the session.
    text-only and bounded, and clipboard text is not written to diagnostics.
 
 Screen Recording or PostEvent revocation, unsafe target state, window
-replacement, disconnect, or failed reauthorization stops the affected
-operation. Accessibility loss removes only the optional AX enhancement from
-legacy foreground control, but blocks P6 background input because its
-known-safe process check cannot complete. Recheck the Host permission and
-select the window again before reconnecting. Accessibility checks do not
-replace foreground checks for legacy input. If P6 is unavailable and the
-Viewer reports that the selected app is not active, bring MacRemoteApp Host
-forward and retry selection.
+replacement, disconnect, focus loss, or failed reauthorization stops the
+affected operation. Accessibility loss removes the optional global
+secure-input and exact-window-raise signals. Foreground P6 follows the same
+policy as legacy input: detected secure input blocks control, while an unknown
+global signal follows the existing foreground checks. Target-process AX
+inspection is used only to classify an inactive target for safe cleanup; it
+does not authorize inactive-app input. Recheck the Host permission and select
+the window again before reconnecting. If Host cannot confirm foreground
+activation, click or reactivate MacRemoteApp Host locally, then explicitly
+select the window again.
 
-### P6 background control
+### P6 paired control safety
 
 Both endpoints must support P6. The Host’s local acceptance of the pairing is
 the durable trust decision for mouse and keyboard input; no separate control
@@ -161,18 +166,23 @@ active authenticated session; the Viewer must pair again before reconnecting.
 Keychain errors block control. If unpairing cannot be saved, retry before
 relying on revocation after a Host restart.
 
-P6 sends events to the selected app process without activating it. An app with
-several windows may route events to another window in that process, so
-exact-window delivery is not guaranteed. Keep a disposable test app available
-until physical behavior is verified. The Host must stay unlocked and retain
-PostEvent permission, a live safe target, and successful secure-input checks.
-Background P6 input also requires Host Accessibility permission to verify the
-selected process is safe; input remains blocked if that inspection is
-unavailable.
+P6 reuses Host-approved pairing trust and adds a control generation and exact
+target-identity checks. It does not send events to an inactive app. Ordinary
+events use macOS's system event dispatch and require the selected app to remain
+foreground; if focus changes, input stops until the window is explicitly
+selected again. Keep a disposable test app available until physical behavior
+is verified. The Host must stay unlocked and retain PostEvent permission, a
+live safe target, and the same optional global secure-input policy as legacy
+foreground input. A detected secure field blocks control; an unknown global
+signal follows the existing foreground checks. Target-process inspection is
+used only for safe cleanup classification after focus or authorization changes
+and never enables inactive-app input.
+
 Viewer Settings or an unfocused Viewer window does not send remote input.
-Background control does not change the Host's global input source; match it
-manually on the Host. Chinese composition and candidate panels remain Host-side.
-Input-source following can resume when the selected target is foreground.
+Input-source following does not activate or retarget the Host. Match the
+global input source manually if needed; Chinese composition and candidate
+panels remain Host-side. Input-source following can resume after explicit
+selection foregrounds the target.
 
 ### Chinese/English input-source following
 
@@ -337,7 +347,8 @@ Older `0.2.1008` DMGs do not contain this full-cleanup helper.
 ## Product boundaries
 
 The product does not provide Internet relay, WebRTC, audio, file transfer,
-simultaneous multi-window control, or locked-screen control. P6
-background control is process-targeted and does not guarantee which window of
-an app with multiple windows receives an event. Physical two-Mac acceptance
-remains pending.
+simultaneous multi-window control, inactive-process input, or locked-screen
+control. P6 adds pairing and target-safety checks. System event dispatch follows
+normal macOS hit-testing, so an app with multiple windows may route an event to
+a different window in that process. Physical two-Mac acceptance remains
+pending.

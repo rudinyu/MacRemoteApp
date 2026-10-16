@@ -115,6 +115,8 @@ is an environment limitation, not a passing capture evidence claim.
 ## Exit status
 
 The CaptureCore implementation and deterministic tests are complete. The
-current M5 logged-in window-server session produced a real frame. Physical
-Host capture evidence on other machines remains environment-dependent until
-their own Screen Recording smoke test produces a frame.
+operator's physical Viewer screenshot confirms a selected Host window frame
+reached the Viewer, so the tested Host's ScreenCaptureKit capture path has
+produced a real frame. Physical Screen Recording revocation and selected-window
+change/close lifecycle checks are not separately recorded; see the remaining
+M3 evidence in `docs/STATUS.md`.
