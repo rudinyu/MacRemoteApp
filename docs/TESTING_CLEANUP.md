@@ -117,7 +117,9 @@ app to the Trash. It rejects ad-hoc review bundles and does not reset TCC.
 The repository's `scripts/uninstall-device-apps.sh --clean-testing` is a
 broader, destructive development reset: it removes `build/testing/` and the
 whole repository `.build/`, invokes the legacy Keychain cleanup helper, and
-resets selected TCC services. Use its `--dry-run` before an explicitly intended
+resets selected TCC services. Do not run it concurrently with validation or
+other builds because it removes the entire `.build/` tree, including active
+validation caches and locks. Use its `--dry-run` before an explicitly intended
 broad reset. It does not invoke the current per-role `--remove-all-data` commands
 and is not a substitute for the scoped cleanup and verification above. Imported
 M2 identities require the separate, explicitly selected `--identities` workflow.

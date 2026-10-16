@@ -68,6 +68,7 @@ for channel in testing beta rc release; do
 done
 default_release_root="${repo_root}/build/${artifact_channel}"
 release_root="${MACREMOTEAPP_RELEASE_ROOT:-${default_release_root}}"
+release_build_root="${repo_root}/.build/notarized-release-build"
 
 if [[ "${release_root}" != /* ]]; then
     release_root="${repo_root}/${release_root}"
@@ -178,9 +179,17 @@ cleanup_on_success() {
             fi
         fi
     fi
-    if (( status == 0 )) && [[ -d "${repo_root}/.build" && ! -L "${repo_root}/.build" ]]; then
-        rm -rf -- "${repo_root}/.build"
-        echo "Cleared successful notarized-release build cache: ${repo_root}/.build"
+    if (( status == 0 )) && [[ -e "${release_build_root}" || -L "${release_build_root}" ]]; then
+        if [[ -L "${repo_root}/.build" || ! -d "${repo_root}/.build" ||
+              -L "${release_build_root}" || ! -d "${release_build_root}" ]]; then
+            echo "Refusing to clean an unexpected notarized-release build path: ${release_build_root}" >&2
+            status=1
+        elif ! rm -rf -- "${release_build_root}"; then
+            echo "Unable to clear the notarized-release build cache: ${release_build_root}" >&2
+            status=1
+        else
+            echo "Cleared successful notarized-release build cache: ${release_build_root}"
+        fi
     fi
     if (( status == 0 )) && [[ -n "${backup_release_root}" && -e "${backup_release_root}" ]]; then
         rm -rf -- "${backup_release_root}"
@@ -192,14 +201,6 @@ trap cleanup_on_success EXIT
 recover_orphaned_promotion
 mkdir -p -- "${release_root}"
 
-if [[ -L "${repo_root}/.build" || ( -e "${repo_root}/.build" && ! -d "${repo_root}/.build" ) ]]; then
-    echo "Refusing to clean an unexpected .build path: ${repo_root}/.build" >&2
-    exit 2
-fi
-if [[ -e "${repo_root}/.build" ]]; then
-    rm -rf -- "${repo_root}/.build"
-fi
-
 echo "Running deterministic CI before notarization"
 env \
     -u MACREMOTEAPP_SIGNING_IDENTITY \
@@ -210,19 +211,14 @@ env \
     -u MACOS_NOTARY_KEY_ID \
     -u MACOS_NOTARY_ISSUER \
     MACREMOTEAPP_ARTIFACT_CHANNEL=testing \
-    bash "${script_dir}/validate.sh"
-
-if [[ -d "${repo_root}/.build" && ! -L "${repo_root}/.build" ]]; then
-    rm -rf -- "${repo_root}/.build"
-    echo "Cleared successful validation build cache: ${repo_root}/.build"
-fi
+    bash "${script_dir}/validate.sh" --clean
 
 staging_release_root="$(mktemp -d "${staging_parent}/MacRemoteApp-${artifact_channel}.staging.XXXXXX")"
 echo "Building, notarizing, stapling, and validating ${artifact_channel} channel artifacts"
 env \
     MACREMOTEAPP_ARTIFACT_CHANNEL="${artifact_channel}" \
     MACREMOTEAPP_RELEASE_ROOT="${staging_release_root}" \
-    MACREMOTEAPP_RELEASE_BUILD_ROOT="${repo_root}/.build/notarized-release-build" \
+    MACREMOTEAPP_RELEASE_BUILD_ROOT="${release_build_root}" \
     MACREMOTEAPP_SIGNING_IDENTITY="${signing_identity}" \
     bash "${script_dir}/notarize-device-apps.sh"
 

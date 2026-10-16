@@ -182,7 +182,10 @@ also creates local signed role-specific DMGs under
 notarized distribution. `scripts/release-notarized.sh rc` is the required final
 test path: it runs the canonical `scripts/validate.sh` validation directly,
 then signs, submits, staples, and validates the
-notarized apps and DMGs. Without a channel argument it selects the formal
+notarized apps and DMGs. The release flow passes `--clean` to validation so
+only `.build/public-validation/` is reset under its own lock; after success it
+removes only `.build/notarized-release-build/`. Other `.build` caches and the
+incremental public-validation results remain intact. Without a channel argument it selects the formal
 `build/release/` directory, outside `.build`. Local artifacts are organized as
 `build/testing/`, `build/beta/`, `build/rc/`, and `build/release/`; the
 `build/` tree is excluded through the checkout-local `.git/info/exclude`
@@ -266,12 +269,26 @@ local identity and pair again. This preserves `build/beta/`,
 [`Resources/MacRemoteAppIcon.svg`](Resources/MacRemoteAppIcon.svg); generated
 `.icns`, app bundles, and test identities stay outside version control.
 
+Run `bash scripts/check-environment.sh` for a read-only report of the selected
+full Xcode and Swift toolchain, current architecture, Python requirement, and
+Git revision/worktree state. `DEVELOPER_DIR` is honored when set; otherwise
+the check prefers `/Applications/Xcode.app` and then the full Xcode selected by
+`xcode-select`. Full validation requires Swift 6.0 and Python 3.9 or newer.
+
 The public repository validation entry point is `bash scripts/validate.sh`.
-It builds both roles, tests all seven local packages (including AppSupport),
-and runs the deterministic M8/M9/M10 gates. Its scratch directory is
-`.build/public-validation/`; a successful run removes only that directory,
-while a failed run retains it for diagnosis. It does not uninstall apps or
-clear their settings. To validate an already notarized release directly, run
+No arguments and `--full` run the complete suite: both roles across the
+documented architectures, all seven local package tests (including
+AppSupport), and the deterministic M8/M9/M10 gates. `--quick` runs the package
+graph check, focused validation-tool fixtures, native Host and Viewer debug
+builds, and root smoke tests. It reuses its own SwiftPM and module caches and
+is not full CI. The default full suite also reuses its cache. Pass `--clean`
+with either mode to remove only `.build/public-validation/` before that run;
+the validation cache lock is `.build/.public-validation.lock`, outside the
+removable cache, and is never reclaimed automatically after an interrupted
+run. A compact environment and mode report is saved as
+`.build/public-validation/last-validation-report.txt`. The local
+`.codex/ci.sh` helper forwards these options when present. Validation does not
+uninstall apps or clear their settings. To validate an already notarized release directly, run
 `bash scripts/validate-notarized-release.sh <absolute-release-directory>`.
 `scripts/validate-notarized-release.sh` is read-only with respect to the
 release payload and never submits credentials or uploads artifacts.

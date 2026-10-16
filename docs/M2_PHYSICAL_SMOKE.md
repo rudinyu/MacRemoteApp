@@ -36,13 +36,16 @@ artifacts.
 That package-only command is a local signing step; use
 `scripts/release-notarized.sh` for the final CI-gated notarized artifacts used
 for distribution or TCC-stable installation. It writes the final artifacts to
-the repository-local `build/release/` directory, outside `.build`, and clears
-the repository `.build` cache after success. Local artifacts use
+the repository-local `build/release/` directory, outside `.build`; after
+success it removes only its dedicated `.build/notarized-release-build/` cache.
+Validation resets `.build/public-validation/` under its own lock before the
+release gate. Local artifacts use
 `build/testing/`, `build/beta/`, `build/rc/`, and `build/release/`; the whole
 `build/` tree is excluded through the checkout-local `.git/info/exclude`
 (configured automatically by the packaging script) and must not be staged or
-pushed. The release lock is acquired and the repository `.build` cache is
-removed before deterministic validation. The selected channel remains in place
+pushed. The release lock is acquired before deterministic validation; the
+validator owns cleanup of its public cache under a separate validation lock.
+The selected channel remains in place
 while the new release is built and notarized beside it; only after final
 validation is it promoted into the channel. A failure before promotion leaves
 the old channel intact, while a failure during promotion restores it.

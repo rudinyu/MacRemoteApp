@@ -17,14 +17,17 @@ the shared Codex configuration; package-only local builds remain ad-hoc unless
 a project identity is explicitly supplied. The Keychain profile defaults to
 `notarytool-profile` when no shared profile or complete API-key configuration
 is available. Credentials and private-key configuration stay outside the
-repository and are not printed in validation logs. Public validation packages are isolated under
-`.build/public-validation/` and only that cache is removed after a successful run;
-they are never treated as distributable release output. The complete local
+repository and are not printed in validation logs. Public validation packages
+are isolated under `.build/public-validation/`, retained for incremental reuse,
+and never treated as distributable release output. `scripts/validate.sh --clean`
+removes only that cache while holding its validation lock. The complete local
 release gate is `scripts/release-notarized.sh`: it acquires the release lock and
-removes the repository `.build` cache before deterministic validation, then
-writes final notarized artifacts to the repository-local
-`build/release/` directory by default, then removes the recreated `.build`
-cache after success. Local artifacts are organized under
+invokes `scripts/validate.sh --clean`, which resets only
+`.build/public-validation/` under the validation cache lock. It writes final
+notarized artifacts to the repository-local `build/release/` directory by
+default and, after success, removes only its dedicated
+`.build/notarized-release-build/` cache. Other `.build` caches and the public
+validation cache remain available. Local artifacts are organized under
 `build/testing/`, `build/beta/`, `build/rc/`, and `build/release/`; the whole
 `build/` tree is excluded through the checkout-local `.git/info/exclude`
 (configured automatically by the packaging script) and is never a GitHub
@@ -83,7 +86,8 @@ replace the same installed role apps and reuse their TCC and Keychain identity.
   `Documents`, or `/` cannot be recursively replaced. The release script also
   requires `MACREMOTEAPP_RELEASE_ROOT` to match the selected channel and holds
   a kernel-backed `lockf` repository-local file lock across CI, notarization,
-  `.build` cleanup, rollback, and promotion. The operating system releases the
+  release-owned build-cache cleanup, rollback, and promotion. Validation uses
+  a separate atomic lock while resetting its public cache. The operating system releases the
   advisory lock when the process ends, so an interrupted run cannot leave a
   PID/reclaim race; unexpected directory or symlink lock paths fail closed.
 - `scripts/create-device-dmgs.sh` creates one DMG per role, includes the

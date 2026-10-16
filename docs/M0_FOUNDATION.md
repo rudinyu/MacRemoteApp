@@ -59,17 +59,30 @@ milestones.
 
 ## Repeatable validation
 
-The public validation entry point for the current checkout is:
+The read-only environment preflight and public validation entry point are:
 
 ```sh
+bash scripts/check-environment.sh
 ./scripts/validate.sh
 ```
 
-It now builds Host arm64/x86_64 and Viewer arm64, runs root and all seven local
-package tests (including AppSupport), and checks the deterministic M8/M9/M10
-gates. This is broader than the original six-package M0/M2 checks. It owns only
-`.build/public-validation/` for scratch cleanup; it does not uninstall test
-apps or clear their settings. For the original M0-only foundation probe, run:
+The environment check reports the selected full Xcode, Swift compiler and
+versions, current architecture, Python 3.9 minimum for full validation, and
+Git revision/worktree state. It honors `DEVELOPER_DIR`, otherwise preferring
+`/Applications/Xcode.app` and then the full Xcode selected by `xcode-select`.
+The no-argument validator remains the full suite: it builds Host arm64/x86_64
+and Viewer arm64, runs root and all seven local package tests (including
+AppSupport), and checks the deterministic M8/M9/M10 gates. It reuses its
+`.build/public-validation/` cache and does not uninstall test apps or clear
+their settings. `--quick` reuses a separate cache for package graph checks,
+focused validation-tool fixtures, native Host/Viewer debug builds, and root
+smoke tests; it does not run full CI. `--clean` removes only the public
+validation cache before the selected run. The local `.codex/ci.sh` helper
+forwards these options when present, and each run writes a compact environment
+and mode report to `.build/public-validation/last-validation-report.txt`. An interrupted
+validation may leave `.build/.public-validation.lock`; it is never reclaimed
+automatically and must be inspected before manual removal. For the original
+M0-only foundation probe, run:
 
 ```sh
 swift package describe

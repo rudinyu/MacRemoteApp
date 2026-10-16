@@ -394,15 +394,18 @@ disconnect-recovery acceptance row open until Build `1026` is retested.
    `build/beta/`, `build/rc/`, and `build/release/`; the whole `build/` tree
    is excluded through `.git/info/exclude` and must never be staged or pushed.
    Use `bash scripts/release-notarized.sh beta` or `rc` for those channels.
-   The release lock is acquired through the macOS kernel-backed `lockf` utility
-   and the repository `.build` cache is removed before deterministic validation.
+   The release lock is acquired through the macOS kernel-backed `lockf` utility.
+   Validation receives `--clean` and removes only `.build/public-validation/`
+   under its validation lock; after a successful release, only the dedicated
+   `.build/notarized-release-build/` cache is removed. Other `.build` caches
+   and the public validation results remain available.
    The operating system releases the advisory lock after an interrupted run;
    unexpected directory or symlink lock paths fail closed. The existing selected channel remains in
    place while the new release is built, signed, and notarized beside it. The
    new channel is promoted only after final validation; a failure before
    promotion leaves the old channel intact, while a failure during promotion
    restores it.
-   The successful CI and notarization flow removes the repository `.build`
+   The successful CI and notarization flow removes only the release-owned build
    cache. The script reads the owner-only shared
    `~/.config/codex/notarization.env`; an explicit
    `MACREMOTEAPP_NOTARY_PROFILE` overrides it. With no shared default, the

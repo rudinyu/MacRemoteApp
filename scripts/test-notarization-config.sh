@@ -127,9 +127,20 @@ record_ci_environment() {
 case "${1:-}" in
     */scripts/validate.sh)
         record_ci_environment
+        if [ "${2:-}" != "--clean" ]; then
+            printf 'validation-arg=%s\n' "${2:-<missing>}" >>"${MACREMOTEAPP_TEST_BOUNDARY_LOG}"
+            echo "release wrapper did not request a clean public validation cache" >&2
+            exit 2
+        fi
+        printf 'validation-arg=%s\n' "$2" >>"${MACREMOTEAPP_TEST_BOUNDARY_LOG}"
+        rm -rf -- "${MACREMOTEAPP_TEST_PUBLIC_CACHE}"
+        mkdir -p -- "${MACREMOTEAPP_TEST_PUBLIC_CACHE}"
+        printf 'fixture validation report\n' >"${MACREMOTEAPP_TEST_PUBLIC_CACHE}/last-validation-report.txt"
         exit 0
         ;;
     */scripts/notarize-device-apps.sh)
+        mkdir -p -- "${MACREMOTEAPP_RELEASE_BUILD_ROOT}"
+        printf 'release-owned output\n' >"${MACREMOTEAPP_RELEASE_BUILD_ROOT}/sentinel"
         expected_identity="${MACREMOTEAPP_TEST_EXPECTED_DELEGATED_SIGNING_IDENTITY:-}"
         if [ -n "${expected_identity}" ] &&
            [ "${MACREMOTEAPP_SIGNING_IDENTITY:-}" = "${expected_identity}" ]; then
@@ -294,6 +305,16 @@ auth_capture="${fixture_root}/delegated-auth-modes.txt"
 boundary_capture="${fixture_root}/release-environment-boundaries.txt"
 : >"${auth_capture}"
 : >"${boundary_capture}"
+mkdir -p \
+    "${wrapper_root}/.build/public-validation" \
+    "${wrapper_root}/.build/m10-debug-diagnostic" \
+    "${wrapper_root}/.build/device-binaries" \
+    "${wrapper_root}/.build/notarized-release-build"
+printf 'old validation cache\n' >"${wrapper_root}/.build/public-validation/sentinel"
+printf 'diagnostic cache\n' >"${wrapper_root}/.build/m10-debug-diagnostic/sentinel"
+printf 'other build cache\n' >"${wrapper_root}/.build/device-binaries/sentinel"
+printf 'old release build cache\n' >"${wrapper_root}/.build/notarized-release-build/sentinel"
+export MACREMOTEAPP_TEST_PUBLIC_CACHE="${wrapper_root}/.build/public-validation"
 unset MACREMOTEAPP_TEST_AUTH_KIND MACREMOTEAPP_NOTARY_PROFILE
 export MACREMOTEAPP_TEST_AUTH_CAPTURE="${auth_capture}"
 export MACREMOTEAPP_TEST_BOUNDARY_LOG="${boundary_capture}"
@@ -311,6 +332,17 @@ MACREMOTEAPP_NOTARIZATION_HELPER="${fixture_helper}" \
 if [[ ! -s "${auth_capture}" ]] || grep -Evx 'api-key' "${auth_capture}" >/dev/null; then
     fail "release wrapper and low-level notarizer did not resolve the same API-key mode"
 fi
+contains 'validation-arg=--clean' "${boundary_capture}"
+[[ ! -e "${wrapper_root}/.build/public-validation/sentinel" ]] ||
+    fail "release validation did not reset the public-validation cache"
+[[ -s "${wrapper_root}/.build/public-validation/last-validation-report.txt" ]] ||
+    fail "release cleanup removed the public-validation cache after CI"
+[[ ! -e "${wrapper_root}/.build/notarized-release-build" ]] ||
+    fail "successful release did not clean its dedicated build cache"
+[[ -f "${wrapper_root}/.build/m10-debug-diagnostic/sentinel" ]] ||
+    fail "release cleanup removed the M10 diagnostic cache"
+[[ -f "${wrapper_root}/.build/device-binaries/sentinel" ]] ||
+    fail "release cleanup removed another build cache"
 for variable in \
     MACREMOTEAPP_SIGNING_IDENTITY \
     MACREMOTEAPP_NOTARY_PROFILE \
@@ -345,5 +377,13 @@ contains 'ambient-project-profile-fixture' "${arguments_log}"
 contains "ci:MACREMOTEAPP_NOTARY_PROFILE=unset" "${project_profile_boundary_capture}"
 contains "ci:MACOS_NOTARY_PROFILE=unset" "${project_profile_boundary_capture}"
 contains "delegated-signing-identity=preserved" "${project_profile_boundary_capture}"
+[[ -s "${wrapper_root}/.build/public-validation/last-validation-report.txt" ]] ||
+    fail "second release cleanup removed the public-validation cache"
+[[ ! -e "${wrapper_root}/.build/notarized-release-build" ]] ||
+    fail "second successful release did not clean its dedicated build cache"
+[[ -f "${wrapper_root}/.build/m10-debug-diagnostic/sentinel" ]] ||
+    fail "second release cleanup removed the M10 diagnostic cache"
+[[ -f "${wrapper_root}/.build/device-binaries/sentinel" ]] ||
+    fail "second release cleanup removed another build cache"
 
 echo "Shared notarization helper adapter fixtures passed"

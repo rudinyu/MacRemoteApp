@@ -2,29 +2,154 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "${script_dir}/.." && pwd)"
-build_root="${repo_root}/.build/public-validation"
-build_parent="${repo_root}/.build"
+repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
 
-if [[ -L "${build_parent}" || ( -e "${build_parent}" && ! -d "${build_parent}" ) ]]; then
-    echo "Refusing to use an unexpected build parent path: ${build_parent}" >&2
+validation_mode="full"
+mode_seen=0
+clean_cache=0
+while (( $# > 0 )); do
+    case "$1" in
+        --quick|--full)
+            if (( mode_seen )); then
+                echo "Choose only one validation mode: --quick or --full" >&2
+                exit 2
+            fi
+            mode_seen=1
+            if [[ "$1" == --quick ]]; then
+                validation_mode="quick"
+            else
+                validation_mode="full"
+            fi
+            shift
+            ;;
+        --clean)
+            clean_cache=1
+            shift
+            ;;
+        --help|-h)
+            cat <<'USAGE'
+Usage: bash scripts/validate.sh [--quick|--full] [--clean]
+
+Default and --full run the complete public validation suite. --quick reuses
+its own incremental cache for package graph checks, focused script fixtures,
+native Host/Viewer debug builds, and root smoke tests; it is not full CI.
+--clean removes only .build/public-validation before the selected mode runs.
+USAGE
+            exit 0
+            ;;
+        *)
+            echo "Usage: bash scripts/validate.sh [--quick|--full] [--clean]" >&2
+            exit 2
+            ;;
+    esac
+done
+
+source "${script_dir}/validation-support.sh"
+cd -- "${repo_root}"
+
+macremoteapp_prepare_validation_paths "${repo_root}"
+macremoteapp_acquire_validation_lock "${MACREMOTEAPP_VALIDATION_LOCK}"
+
+validation_cache_root="${MACREMOTEAPP_VALIDATION_CACHE}"
+build_root="${validation_cache_root}/${validation_mode}"
+report_path="${validation_cache_root}/last-validation-report.txt"
+validation_started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+validation_result="running"
+validation_finished_at="pending"
+
+finish_validation() {
+    local exit_code=$?
+    local final_result="passed"
+    trap - EXIT
+    if (( exit_code != 0 )); then
+        final_result="failed"
+    fi
+    validation_finished_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    if [[ -d "${validation_cache_root}" && ! -L "${validation_cache_root}" ]]; then
+        if ! macremoteapp_write_validation_report \
+            "${report_path}" "${validation_mode}" "${final_result}" \
+            "${exit_code}" "${validation_started_at}" "${validation_finished_at}"; then
+            echo "Unable to write the compact validation report: ${report_path}" >&2
+            if (( exit_code == 0 )); then
+                exit_code=1
+            fi
+        fi
+    fi
+    if ! macremoteapp_release_validation_lock; then
+        if (( exit_code == 0 )); then
+            exit_code=1
+        fi
+    fi
+    exit "${exit_code}"
+}
+trap finish_validation EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if (( clean_cache )); then
+    echo "Cleaning only the public validation cache: ${validation_cache_root}"
+    macremoteapp_clean_validation_cache "${repo_root}"
+fi
+
+if [[ -L "${validation_cache_root}" || ( -e "${validation_cache_root}" && ! -d "${validation_cache_root}" ) ]]; then
+    echo "Refusing to use an unexpected validation cache path: ${validation_cache_root}" >&2
     exit 2
 fi
-if [[ -L "${build_root}" || ( -e "${build_root}" && ! -d "${build_root}" ) ]]; then
-    echo "Refusing to clean an unexpected validation cache path: ${build_root}" >&2
+mkdir -p -- "${build_root}"
+if [[ -L "${validation_cache_root}" || ! -d "${validation_cache_root}" ||
+      -L "${build_root}" || ! -d "${build_root}" ]]; then
+    echo "Validation cache paths changed to an unexpected location." >&2
     exit 2
 fi
-echo "Removing only the previous validation build cache: ${build_root}"
-rm -rf -- "${build_root}"
 
-mkdir -p "${build_root}/clang-module-cache" "${build_root}/swift-module-cache"
+macremoteapp_check_environment "${validation_mode}"
+swift_tool_directory="$(dirname -- "${MACREMOTEAPP_SWIFT_TOOL}")"
+export PATH="${swift_tool_directory}:${PATH}"
+swift() {
+    "${MACREMOTEAPP_SWIFT_TOOL}" "$@"
+}
+
+mkdir -p -- "${build_root}/clang-module-cache" "${build_root}/swift-module-cache"
 export TMPDIR="${build_root}/tmp"
 export CLANG_MODULE_CACHE_PATH="${build_root}/clang-module-cache"
 export SWIFT_MODULECACHE_PATH="${build_root}/swift-module-cache"
 export SWIFT_DETERMINISTIC_HASHING=1
-mkdir -p "${TMPDIR}"
+mkdir -p -- "${TMPDIR}"
 
-cd "${repo_root}"
+if [[ "${validation_mode}" == quick ]]; then
+    echo "Validation mode: QUICK (incremental; this is not full CI)"
+    echo "Quick coverage: package graph, focused validation-tool fixtures, native Host/Viewer debug builds, and root smoke tests."
+    swift package describe >/dev/null
+    bash -n \
+        scripts/validate.sh \
+        scripts/check-environment.sh \
+        scripts/validation-support.sh \
+        scripts/test-validation-tools.sh
+    bash scripts/test-validation-tools.sh
+    native_architecture="${MACREMOTEAPP_ARCHITECTURE}"
+    case "${native_architecture}" in
+        arm64|x86_64) ;;
+        *)
+            echo "Quick validation requires arm64 or x86_64; current architecture is ${native_architecture}." >&2
+            exit 2
+            ;;
+    esac
+    echo "Building Host (${native_architecture}; incremental quick cache)"
+    swift build --configuration debug --arch "${native_architecture}" --target Host \
+        --scratch-path "${build_root}/host-native"
+    echo "Building Viewer (${native_architecture}; incremental quick cache)"
+    swift build --configuration debug --arch "${native_architecture}" --target Viewer \
+        --scratch-path "${build_root}/viewer-native"
+    echo "Testing root smoke target (quick mode)"
+    MACREMOTEAPP_RUN_M2_LOCAL_IDENTITY_SMOKE=1 \
+        swift test --configuration debug --scratch-path "${build_root}/root"
+    echo "Quick validation passed; full CI was not run."
+    echo "Environment report: ${report_path}"
+    exit 0
+fi
+
+echo "Validation mode: FULL public validation suite"
+echo "Cache: ${build_root} (incremental; pass --clean to reset public-validation cache)"
 
 echo "Validating Swift package graph"
 swift package describe >/dev/null
@@ -51,7 +176,12 @@ bash -n \
     scripts/test-artifact-naming.sh \
     scripts/test-debug-diagnostic-packaging.sh \
     scripts/test-notarization-config.sh \
-    scripts/test-uninstall-macremoteapp.sh
+    scripts/test-uninstall-macremoteapp.sh \
+    scripts/check-environment.sh \
+    scripts/validation-support.sh \
+    scripts/test-validation-tools.sh
+echo "Running validation environment and cache-ownership fixtures"
+bash scripts/test-validation-tools.sh
 echo "Running isolated artifact-naming fixtures"
 bash scripts/test-artifact-naming.sh
 echo "Running M10 Debug diagnostic packaging fixtures"
@@ -535,8 +665,6 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "${va
 test "$(/usr/libexec/PlistBuddy -c 'Print :NSScreenCaptureUsageDescription' "${validation_release_root}/MacRemoteApp-Host.app/Contents/Info.plist" 2>/dev/null)" != ""
 test "$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "${validation_release_root}/MacRemoteApp-Viewer.app/Contents/Info.plist" 2>/dev/null)" != ""
 
-echo "Public validation passed"
-if [[ -d "${build_root}" && ! -L "${build_root}" ]]; then
-    rm -rf -- "${build_root}"
-    echo "Cleared successful validation build cache: ${build_root}"
-fi
+echo "Full public validation passed."
+echo "Environment report: ${report_path}"
+echo "Retained incremental validation cache: ${build_root}"
