@@ -345,15 +345,23 @@ M6 enforcement is split explicitly:
   `InputCore.HostInputController` performs the final per-event check.
 - `CoreGraphicsAccessibilityContextProvider` rechecks PostEvent permission,
   exact live target identity and bounds, foreground eligibility, and
-  console/lock state. Foreground P6 uses the same global secure-input policy as
-  legacy foreground input; known-safe global and target-process state is needed
-  only for safe inactive-target cleanup.
+  console/lock state. Because `CGPreflightPostEventAccess` is a TCC round
+  trip on every call, per-event checks reuse a PostEvent result at most
+  500 ms old; Host status refreshes and permission requests always query
+  TCC. macOS still enforces the live TCC decision when the event is posted,
+  so a revocation inside that window cannot inject input. Foreground P6 uses
+  the same global secure-input policy as legacy foreground input; known-safe
+  global and target-process state is needed only for safe inactive-target
+  cleanup.
 - Each typed command carries the target window, owning application
   identifier, process, and generation.
   `CoreGraphicsAccessibilityInputAdapter` repeats the complete
-  target/focus/permission check immediately before posting ordinary events to
-  the system Quartz event stream. Only safe cleanup releases may use
-  target-bound PID posting after focus changes.
+  target/focus/permission check once, immediately before posting ordinary
+  events to the system Quartz event stream. Only safe cleanup releases may use
+  target-bound PID posting after focus changes. Pointer events carry Host-side
+  dragged type, multi-click count, movement delta, and the modifier flags
+  from the latest admitted keyboard event; this state is scoped to one target
+  and reset when the target changes.
 - A known secure-input field is rejected. When the optional global
   Accessibility signal is unavailable, independent foreground/window checks
   still protect the base PostEvent path for both legacy and P6 sessions.

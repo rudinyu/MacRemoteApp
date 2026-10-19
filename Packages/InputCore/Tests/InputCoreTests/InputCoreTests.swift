@@ -1,3 +1,4 @@
+import CoreGraphics
 @testable import InputCore
 import XCTest
 
@@ -5,6 +6,136 @@ final class InputCoreTests: XCTestCase {
     func testM0FoundationMarker() {
         XCTAssertEqual(InputCoreModule.name, "InputCore")
     }
+
+    func testPostEventPermissionCacheReusesFreshResultAndRequeriesWhenStale() {
+        let queries = LockedCounter()
+        let granted = LockedFlag(true)
+        let cache = PostEventPermissionCache(
+            maximumAgeNanoseconds: 500,
+            query: {
+                queries.increment()
+                return granted.value
+            }
+        )
+
+        XCTAssertTrue(cache.isAuthorized(nowUptimeNanoseconds: 1_000))
+        XCTAssertTrue(cache.isAuthorized(nowUptimeNanoseconds: 1_499))
+        XCTAssertEqual(queries.value, 1, "A result younger than the bound must be reused.")
+
+        granted.value = false
+        XCTAssertFalse(
+            cache.isAuthorized(nowUptimeNanoseconds: 1_500),
+            "A stale result must be re-queried so revocation is observed."
+        )
+        XCTAssertEqual(queries.value, 2)
+
+        granted.value = true
+        XCTAssertTrue(cache.refresh(nowUptimeNanoseconds: 1_501), "refresh always queries TCC.")
+        XCTAssertEqual(queries.value, 3)
+        XCTAssertTrue(
+            cache.isAuthorized(nowUptimeNanoseconds: 900),
+            "A clock value earlier than the cached sample must not be treated as fresh."
+        )
+        XCTAssertEqual(queries.value, 4)
+    }
+
+    func testPointerStateUsesDraggedTypeOnlyWhileAButtonIsHeld() {
+        var state = HostPointerEventState()
+        state.adopt(Self.pointerTarget)
+        let origin = InputScreenPoint(x: 100, y: 100)
+
+        XCTAssertEqual(state.moveEvent().type, .mouseMoved)
+        state.didPostButton(0, pressed: true, at: origin, uptime: 0, clickCount: 1)
+        XCTAssertEqual(state.moveEvent().type, .leftMouseDragged)
+        XCTAssertEqual(state.moveEvent().button, .left)
+        state.didPostButton(1, pressed: true, at: origin, uptime: 1, clickCount: 1)
+        XCTAssertEqual(state.moveEvent().type, .leftMouseDragged, "The earliest held button names the drag.")
+        state.didPostButton(0, pressed: false, at: origin, uptime: 2, clickCount: 1)
+        XCTAssertEqual(state.moveEvent().type, .rightMouseDragged)
+        state.didPostButton(1, pressed: false, at: origin, uptime: 3, clickCount: 1)
+        XCTAssertEqual(state.moveEvent().type, .mouseMoved)
+
+        state.didPostButton(2, pressed: true, at: origin, uptime: 4, clickCount: 1)
+        XCTAssertEqual(state.moveEvent().type, .otherMouseDragged)
+        XCTAssertEqual(state.moveEvent().button, .center)
+    }
+
+    func testPointerStateCountsMultiClicksWithinIntervalAndDistance() {
+        var state = HostPointerEventState()
+        state.adopt(Self.pointerTarget)
+        let interval: UInt64 = 500_000_000
+        let point = InputScreenPoint(x: 200, y: 200)
+
+        let first = state.clickCount(forDown: 0, at: point, uptime: 1_000, multiClickIntervalNanoseconds: interval)
+        XCTAssertEqual(first, 1)
+        state.didPostButton(0, pressed: true, at: point, uptime: 1_000, clickCount: first)
+        XCTAssertEqual(state.clickCount(forUp: 0), 1)
+        state.didPostButton(0, pressed: false, at: point, uptime: 1_100, clickCount: 1)
+
+        let nearby = InputScreenPoint(x: 203, y: 198)
+        let second = state.clickCount(forDown: 0, at: nearby, uptime: 200_000_000, multiClickIntervalNanoseconds: interval)
+        XCTAssertEqual(second, 2, "A nearby click inside the interval is a double click.")
+        state.didPostButton(0, pressed: true, at: nearby, uptime: 200_000_000, clickCount: second)
+        XCTAssertEqual(state.clickCount(forUp: 0), 2, "The button-up must repeat the button-down count.")
+        state.didPostButton(0, pressed: false, at: nearby, uptime: 200_000_100, clickCount: 2)
+
+        let third = state.clickCount(forDown: 0, at: nearby, uptime: 400_000_000, multiClickIntervalNanoseconds: interval)
+        XCTAssertEqual(third, 3)
+        state.didPostButton(0, pressed: true, at: nearby, uptime: 400_000_000, clickCount: third)
+        state.didPostButton(0, pressed: false, at: nearby, uptime: 400_000_100, clickCount: 3)
+
+        XCTAssertEqual(
+            state.clickCount(forDown: 0, at: nearby, uptime: 1_000_000_000, multiClickIntervalNanoseconds: interval),
+            1,
+            "A click after the interval starts a new sequence."
+        )
+        XCTAssertEqual(
+            state.clickCount(forDown: 0, at: InputScreenPoint(x: 260, y: 200), uptime: 400_000_200, multiClickIntervalNanoseconds: interval),
+            1,
+            "A distant click starts a new sequence."
+        )
+        XCTAssertEqual(
+            state.clickCount(forDown: 1, at: nearby, uptime: 400_000_200, multiClickIntervalNanoseconds: interval),
+            1,
+            "A different button starts a new sequence."
+        )
+    }
+
+    func testPointerStateTracksDeltaAndModifiersAndResetsForANewTarget() {
+        var state = HostPointerEventState()
+        state.adopt(Self.pointerTarget)
+        XCTAssertEqual(state.movementDelta(to: InputScreenPoint(x: 10, y: 10)).x, 0)
+        state.didPostMove(to: InputScreenPoint(x: 10, y: 10))
+        let delta = state.movementDelta(to: InputScreenPoint(x: 13.4, y: 6.6))
+        XCTAssertEqual(delta.x, 3)
+        XCTAssertEqual(delta.y, -3)
+
+        let shift = UInt64(CGEventFlags.maskShift.rawValue)
+        state.didPostKey(modifiers: shift)
+        XCTAssertEqual(state.modifierFlags, shift)
+        state.didPostButton(0, pressed: true, at: InputScreenPoint(x: 10, y: 10), uptime: 0, clickCount: 1)
+
+        state.adopt(Self.pointerTarget)
+        XCTAssertEqual(state.modifierFlags, shift, "Re-adopting the same target keeps its state.")
+
+        let replacement = HostInputTarget(
+            windowIdentifier: 99,
+            processIdentifier: 4_242,
+            applicationIdentifier: "com.example.other",
+            windowGeneration: 2
+        )
+        state.adopt(replacement)
+        XCTAssertEqual(state.modifierFlags, 0, "Modifiers must not leak into another target.")
+        XCTAssertEqual(state.moveEvent().type, .mouseMoved, "Held buttons must not leak into another target.")
+        XCTAssertNil(state.lastLocation)
+    }
+
+    private static let pointerTarget = HostInputTarget(
+        windowIdentifier: 7,
+        processIdentifier: 4_141,
+        applicationIdentifier: "com.example.selected",
+        windowGeneration: 1
+    )
 
     func testOrdinaryInputUsesSystemRouteAndLostFocusUsesOnlyCleanupRoute() {
         XCTAssertEqual(
@@ -2475,5 +2606,44 @@ private final class RecordingHostInputAdapter: HostInputInjectionAdapter, @unche
 
     func inject(_ command: HostInputCommand) throws {
         commands.append(command)
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+}
+
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag: Bool
+
+    init(_ flag: Bool) {
+        self.flag = flag
+    }
+
+    var value: Bool {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return flag
+        }
+        set {
+            lock.lock()
+            flag = newValue
+            lock.unlock()
+        }
     }
 }

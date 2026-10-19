@@ -295,7 +295,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
     /// consent prompt. Hosts use this to keep remote input capabilities in
     /// sync with macOS TCC state.
     public static func currentPermissionState() -> HostInputPermissionState {
-        permissionState()
+        PostEventPermissionCache.shared.refresh() ? .authorized : .missing
     }
 
     /// Requests the local PostEvent permission required for event posting and
@@ -309,7 +309,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
         let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         let options = [promptKey: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
-        return permissionState()
+        return currentPermissionState()
     }
 
     public func currentContext() -> HostInputContext {
@@ -401,7 +401,7 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
     }
 
     private static func permissionState() -> HostInputPermissionState {
-        guard CGPreflightPostEventAccess() else {
+        guard PostEventPermissionCache.shared.isAuthorized() else {
             return .missing
         }
         return .authorized
@@ -669,6 +669,9 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
             return []
         }
 
+        // Many windows share an owner. Resolve each PID once per snapshot so
+        // the per-event focus check does not repeat the same app lookup.
+        var applicationFacts: [Int32: (bundleIdentifier: String?, isRegular: Bool)] = [:]
         return rawWindows.compactMap { info in
             guard let windowNumber = (info["kCGWindowNumber"] as? NSNumber)?.uint64Value,
                   let processIdentifier = (info["kCGWindowOwnerPID"] as? NSNumber)?.int32Value,
@@ -683,15 +686,22 @@ public struct CoreGraphicsAccessibilityContextProvider: HostInputContextProvider
                   bounds.height > 0 else {
                 return nil
             }
-            let application = NSRunningApplication(
-                processIdentifier: processIdentifier
-            )
+            let facts: (bundleIdentifier: String?, isRegular: Bool)
+            if let resolved = applicationFacts[processIdentifier] {
+                facts = resolved
+            } else {
+                let application = NSRunningApplication(
+                    processIdentifier: processIdentifier
+                )
+                facts = (application?.bundleIdentifier, application?.activationPolicy == .regular)
+                applicationFacts[processIdentifier] = facts
+            }
             return WindowServerWindow(
                 windowIdentifier: windowNumber,
                 processIdentifier: processIdentifier,
                 layer: (info["kCGWindowLayer"] as? NSNumber)?.intValue,
-                applicationIdentifier: application?.bundleIdentifier,
-                isRegularApplication: application?.activationPolicy == .regular,
+                applicationIdentifier: facts.bundleIdentifier,
+                isRegularApplication: facts.isRegular,
                 bounds: InputWindowBounds(
                     originX: bounds.origin.x,
                     originY: bounds.origin.y,
@@ -929,6 +939,145 @@ public enum HostInputSecureInputState: Equatable, Sendable {
     case unknown
 }
 
+/// `CGPreflightPostEventAccess` performs a TCC round trip on every call
+/// (about 6–7 ms measured on Apple Silicon; slower on older Intel Hosts), and
+/// each injected event used to query it several times. Per-event checks reuse
+/// a result younger than `maximumAgeNanoseconds`. macOS still enforces the
+/// live TCC decision when an event is posted, so a revocation inside that
+/// window cannot inject input; the next refresh reports the loss.
+final class PostEventPermissionCache: @unchecked Sendable {
+    static let shared = PostEventPermissionCache(
+        maximumAgeNanoseconds: 500_000_000,
+        query: { CGPreflightPostEventAccess() }
+    )
+
+    private let lock = NSLock()
+    private let maximumAgeNanoseconds: UInt64
+    private let query: @Sendable () -> Bool
+    private var cached: (authorized: Bool, queriedAt: UInt64)?
+
+    init(maximumAgeNanoseconds: UInt64, query: @escaping @Sendable () -> Bool) {
+        self.maximumAgeNanoseconds = maximumAgeNanoseconds
+        self.query = query
+    }
+
+    func isAuthorized(nowUptimeNanoseconds now: UInt64 = DispatchTime.now().uptimeNanoseconds) -> Bool {
+        lock.lock()
+        if let cached,
+           now >= cached.queriedAt,
+           now - cached.queriedAt < maximumAgeNanoseconds {
+            lock.unlock()
+            return cached.authorized
+        }
+        lock.unlock()
+        return refresh(nowUptimeNanoseconds: now)
+    }
+
+    /// Always queries TCC. UI status refreshes and permission requests use
+    /// this so a newly granted or revoked permission is visible immediately.
+    @discardableResult
+    func refresh(nowUptimeNanoseconds now: UInt64 = DispatchTime.now().uptimeNanoseconds) -> Bool {
+        let authorized = query()
+        lock.lock()
+        cached = (authorized, now)
+        lock.unlock()
+        return authorized
+    }
+}
+
+/// Pointer facts the system event stream needs but a single wire event does
+/// not carry: the dragged event type while a button is held, the multi-click
+/// count, movement deltas, and the modifier flags the Viewer last reported on
+/// a keyboard event. State is scoped to one input target and is updated only
+/// after the corresponding event was actually posted.
+struct HostPointerEventState: Sendable {
+    /// Maximum cursor travel between clicks that still counts as a
+    /// double/triple click, in global points.
+    static let multiClickDistance: Double = 5
+
+    private(set) var target: HostInputTarget?
+    private(set) var heldButtons: [UInt8] = []
+    private(set) var lastLocation: InputScreenPoint?
+    private(set) var modifierFlags: UInt64 = 0
+    private var lastClick: (button: UInt8, location: InputScreenPoint, uptime: UInt64, count: Int64)?
+    private var pressedClickCounts: [UInt8: Int64] = [:]
+
+    /// Starts fresh state when events move to another target, so held buttons
+    /// or modifiers from an old window never shape events for a new one.
+    mutating func adopt(_ target: HostInputTarget) {
+        guard self.target != target else { return }
+        self = HostPointerEventState()
+        self.target = target
+    }
+
+    /// The event type for a move: dragged while any button is held, using the
+    /// earliest held button, as real hardware does.
+    func moveEvent() -> (type: CGEventType, button: CGMouseButton) {
+        guard let button = heldButtons.first else { return (.mouseMoved, .left) }
+        switch button {
+        case 0: return (.leftMouseDragged, .left)
+        case 1: return (.rightMouseDragged, .right)
+        default: return (.otherMouseDragged, .center)
+        }
+    }
+
+    func movementDelta(to location: InputScreenPoint) -> (x: Int64, y: Int64) {
+        guard let lastLocation else { return (0, 0) }
+        return (
+            Int64((location.x - lastLocation.x).rounded()),
+            Int64((location.y - lastLocation.y).rounded())
+        )
+    }
+
+    func clickCount(
+        forDown button: UInt8,
+        at location: InputScreenPoint,
+        uptime: UInt64,
+        multiClickIntervalNanoseconds: UInt64
+    ) -> Int64 {
+        guard let lastClick,
+              lastClick.button == button,
+              uptime >= lastClick.uptime,
+              uptime - lastClick.uptime <= multiClickIntervalNanoseconds,
+              abs(location.x - lastClick.location.x) <= Self.multiClickDistance,
+              abs(location.y - lastClick.location.y) <= Self.multiClickDistance else {
+            return 1
+        }
+        return lastClick.count + 1
+    }
+
+    /// A button-up reports the same count as its button-down.
+    func clickCount(forUp button: UInt8) -> Int64 {
+        pressedClickCounts[button] ?? 1
+    }
+
+    mutating func didPostMove(to location: InputScreenPoint) {
+        lastLocation = location
+    }
+
+    mutating func didPostButton(
+        _ button: UInt8,
+        pressed: Bool,
+        at location: InputScreenPoint,
+        uptime: UInt64,
+        clickCount: Int64
+    ) {
+        lastLocation = location
+        if pressed {
+            if !heldButtons.contains(button) { heldButtons.append(button) }
+            pressedClickCounts[button] = clickCount
+            lastClick = (button, location, uptime, clickCount)
+        } else {
+            heldButtons.removeAll { $0 == button }
+            pressedClickCounts.removeValue(forKey: button)
+        }
+    }
+
+    mutating func didPostKey(modifiers: UInt64) {
+        modifierFlags = modifiers
+    }
+}
+
 enum HostInputEventDeliveryRoute: Equatable {
     case system
     case targetProcessCleanup
@@ -960,6 +1109,8 @@ enum HostInputEventDeliveryRoute: Equatable {
 /// cleanup after foreground eligibility or authorization has been lost.
 public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdapter, @unchecked Sendable {
     private let contextProvider: any HostInputContextProvider
+    private let pointerStateLock = NSLock()
+    private var pointerState = HostPointerEventState()
 
     public init(contextProvider: any HostInputContextProvider) {
         self.contextProvider = contextProvider
@@ -989,20 +1140,15 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
         )
     }
 
+    /// Builds the OS event and hands it to `post`, which performs the single
+    /// final target/permission/focus/geometry check immediately before
+    /// dispatch. `HostInputController` has already checked the same facts when
+    /// it mapped the command, so no additional pre-check is repeated here.
     private func perform(
         _ command: HostInputCommand,
         allowUnauthorizedStateRelease: Bool,
         allowNotForegroundStateRelease: Bool = false
     ) throws {
-        try validateTarget(
-            for: command,
-            allowUnauthorizedStateRelease: allowUnauthorizedStateRelease,
-            allowNotForegroundStateRelease: allowNotForegroundStateRelease
-        )
-        guard CGPreflightPostEventAccess() else {
-            throw HostInputAdapterError.permissionUnavailable
-        }
-
         switch command {
         case let .focusIntent(target):
             // Focus is an eligibility precondition, not a remote command to
@@ -1017,14 +1163,20 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
             )
             return
         case let .pointerMove(target, location):
+            let state = adoptPointerState(for: target)
+            let move = state.moveEvent()
             guard let event = CGEvent(
                 mouseEventSource: nil,
-                mouseType: .mouseMoved,
+                mouseType: move.type,
                 mouseCursorPosition: CGPoint(x: location.x, y: location.y),
-                mouseButton: .left
+                mouseButton: move.button
             ) else {
                 throw HostInputAdapterError.eventCreationFailed
             }
+            let delta = state.movementDelta(to: location)
+            event.setIntegerValueField(.mouseEventDeltaX, value: delta.x)
+            event.setIntegerValueField(.mouseEventDeltaY, value: delta.y)
+            event.flags = CGEventFlags(rawValue: state.modifierFlags)
             try post(
                 event,
                 target: target,
@@ -1033,6 +1185,7 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
                 allowUnauthorizedStateRelease: allowUnauthorizedStateRelease,
                 allowNotForegroundStateRelease: allowNotForegroundStateRelease
             )
+            updatePointerState { $0.didPostMove(to: location) }
         case let .pointerButton(target, location, button, pressed):
             let mouseButton = try mouseButton(for: button)
             let mouseType: CGEventType
@@ -1054,6 +1207,18 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
             ) else {
                 throw HostInputAdapterError.eventCreationFailed
             }
+            let state = adoptPointerState(for: target)
+            let uptime = DispatchTime.now().uptimeNanoseconds
+            let clickCount = pressed
+                ? state.clickCount(
+                    forDown: button,
+                    at: location,
+                    uptime: uptime,
+                    multiClickIntervalNanoseconds: Self.multiClickIntervalNanoseconds()
+                )
+                : state.clickCount(forUp: button)
+            event.setIntegerValueField(.mouseEventClickState, value: clickCount)
+            event.flags = CGEventFlags(rawValue: state.modifierFlags)
             try post(
                 event,
                 target: target,
@@ -1062,6 +1227,15 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
                 allowUnauthorizedStateRelease: allowUnauthorizedStateRelease,
                 allowNotForegroundStateRelease: allowNotForegroundStateRelease
             )
+            updatePointerState {
+                $0.didPostButton(
+                    button,
+                    pressed: pressed,
+                    at: location,
+                    uptime: uptime,
+                    clickCount: clickCount
+                )
+            }
         case let .scroll(target, location, deltaX, deltaY):
             guard let event = CGEvent(
                 scrollWheelEvent2Source: nil,
@@ -1074,6 +1248,7 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
                 throw HostInputAdapterError.eventCreationFailed
             }
             event.location = CGPoint(x: location.x, y: location.y)
+            event.flags = CGEventFlags(rawValue: adoptPointerState(for: target).modifierFlags)
             try post(
                 event,
                 target: target,
@@ -1094,6 +1269,7 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
                 throw HostInputAdapterError.eventCreationFailed
             }
             event.flags = CGEventFlags(rawValue: UInt64(modifiers))
+            _ = adoptPointerState(for: target)
             try post(
                 event,
                 target: target,
@@ -1102,7 +1278,29 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
                 allowUnauthorizedStateRelease: allowUnauthorizedStateRelease,
                 allowNotForegroundStateRelease: allowNotForegroundStateRelease
             )
+            // Mouse events carry the modifier state the Viewer reported on its
+            // latest keyboard event, so Shift-click and Command-click work.
+            updatePointerState { $0.didPostKey(modifiers: UInt64(modifiers)) }
         }
+    }
+
+    private func adoptPointerState(for target: HostInputTarget) -> HostPointerEventState {
+        pointerStateLock.lock()
+        defer { pointerStateLock.unlock() }
+        pointerState.adopt(target)
+        return pointerState
+    }
+
+    private func updatePointerState(_ update: (inout HostPointerEventState) -> Void) {
+        pointerStateLock.lock()
+        defer { pointerStateLock.unlock() }
+        update(&pointerState)
+    }
+
+    private static func multiClickIntervalNanoseconds() -> UInt64 {
+        let seconds = NSEvent.doubleClickInterval
+        guard seconds.isFinite, seconds > 0 else { return 500_000_000 }
+        return UInt64(min(seconds, 5) * 1_000_000_000)
     }
 
     private func post(
@@ -1136,45 +1334,6 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
         case .targetProcessCleanup:
             event.postToPid(target.processIdentifier)
         }
-    }
-
-    private func validateTarget(
-        for command: HostInputCommand,
-        allowUnauthorizedStateRelease: Bool,
-        allowNotForegroundStateRelease: Bool = false
-    ) throws {
-        let target: HostInputTarget
-        let requiredCapability: HostInputCapability
-        let location: InputScreenPoint?
-        switch command {
-        case let .pointerMove(commandTarget, commandLocation):
-            target = commandTarget
-            requiredCapability = .mouse
-            location = commandLocation
-        case let .pointerButton(commandTarget, commandLocation, _, _):
-            target = commandTarget
-            requiredCapability = .mouse
-            location = commandLocation
-        case let .scroll(commandTarget, commandLocation, _, _):
-            target = commandTarget
-            requiredCapability = .mouse
-            location = commandLocation
-        case let .key(commandTarget, _, _, _):
-            target = commandTarget
-            requiredCapability = .keyboard
-            location = nil
-        case let .focusIntent(commandTarget):
-            target = commandTarget
-            requiredCapability = .mouse
-            location = nil
-        }
-        _ = try validateTarget(
-            target,
-            requiredCapability: requiredCapability,
-            location: location,
-            allowUnauthorizedStateRelease: allowUnauthorizedStateRelease,
-            allowNotForegroundStateRelease: allowNotForegroundStateRelease
-        )
     }
 
     private func validateTarget(

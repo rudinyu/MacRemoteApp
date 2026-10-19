@@ -496,8 +496,12 @@ final class MacRemoteAppSmokeTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(inputSource.contains("guard CGPreflightPostEventAccess() else"))
+        // PostEvent is the base permission. Per-event checks read it through a
+        // bounded cache whose only query is CGPreflightPostEventAccess.
+        XCTAssertTrue(inputSource.contains("query: { CGPreflightPostEventAccess() }"))
+        XCTAssertTrue(inputSource.contains("guard PostEventPermissionCache.shared.isAuthorized() else"))
         XCTAssertFalse(inputSource.contains("guard CGPreflightPostEventAccess(), AXIsProcessTrusted()"))
+        XCTAssertFalse(inputSource.contains("CGPreflightPostEventAccess() && AXIsProcessTrusted()"))
         XCTAssertTrue(inputSource.contains("Accessibility is optional for base Quartz event posting"))
         XCTAssertTrue(transportSource.contains("parameters.includePeerToPeer = false"))
         XCTAssertFalse(transportSource.contains("MultipeerConnectivity"))

@@ -380,6 +380,20 @@ lost, or when negotiated P6 process-safety checks fail. Ordinary events use
 the public system Quartz event stream so the cursor and system hit-testing
 determine the recipient.
 
+The wire model sends one pointer fact per event, so the adapter supplies what
+the system stream expects from real hardware: a move while a button is held
+is posted as the matching `*MouseDragged` type, button events carry a
+multi-click count computed from the Host double-click interval and a 5-point
+distance, moves carry deltas, and pointer/scroll events carry the modifier
+flags from the latest admitted keyboard event. That state belongs to one
+target and is discarded when commands move to another target.
+
+Per-event cost is bounded: the controller takes one context snapshot when it
+maps the command and the adapter takes one more immediately before posting.
+Each snapshot enumerates WindowServer windows once and resolves each owning
+PID once. The PostEvent preflight result is reused for at most 500 ms; macOS
+still enforces the live TCC decision at post time.
+
 ### Host input admission and cleanup
 
 M6 splits Host input handling across these owners:
