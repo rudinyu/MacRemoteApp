@@ -28,9 +28,40 @@ enum ViewerProcessControlReadiness {
     }
 }
 
+/// What pressing Select does for the window currently chosen in the picker.
+enum ViewerWindowSelectionAction: Equatable {
+    /// Nothing to send: a selection is already in flight or not yet confirmed.
+    case ignore
+    /// The window is already streaming. Re-send the explicit selection so the
+    /// Host can try to bring that same app forward, keeping the stream intact.
+    case restoreForeground
+    /// A different window: replace the selection and restart the stream.
+    case replaceSelection
+
+    static func resolve(
+        requestedWindowIdentifier: UInt64,
+        selectedWindowIdentifier: UInt64?,
+        streamGeneration: UInt64?,
+        selectionPending: Bool,
+        selectionInFlight: Bool
+    ) -> Self {
+        guard !selectionInFlight else { return .ignore }
+        guard requestedWindowIdentifier == selectedWindowIdentifier else {
+            return .replaceSelection
+        }
+        // The Host answers a same-window selection only with a foreground
+        // restore attempt, never with a new stream configuration, so it is
+        // meaningful only after the current stream has started.
+        guard streamGeneration != nil, !selectionPending else { return .ignore }
+        return .restoreForeground
+    }
+}
+
 enum ViewerInputStatusPresentation {
     static let hostFocusUnavailableStatus =
-        "Connected — the selected app is not active on the Host. Click or reactivate MacRemoteApp Host, then select the window again"
+        "Connected — the selected app is not active on the Host. Press Select to ask the Host to bring it forward; if that fails, click or reactivate MacRemoteApp Host locally"
+    static let restoreForegroundRequestedStatus =
+        "Asking the Host to bring the selected app forward"
     static func readyStatus(focusEligible: Bool) -> String {
         if focusEligible {
             return "Connected — input ready"
@@ -1380,8 +1411,27 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         generation: UInt64,
         catalogGeneration: UInt64
     ) {
-        guard !windowSelectionInFlight, let session else { return }
-        guard selectedWindowIdentifier != windowIdentifier else { return }
+        guard let session else { return }
+        switch ViewerWindowSelectionAction.resolve(
+            requestedWindowIdentifier: windowIdentifier,
+            selectedWindowIdentifier: selectedWindowIdentifier,
+            streamGeneration: selectedGeneration,
+            selectionPending: pendingWindowSelection != nil,
+            selectionInFlight: windowSelectionInFlight
+        ) {
+        case .ignore:
+            return
+        case .restoreForeground:
+            requestForegroundRestore(
+                windowIdentifier,
+                generation: generation,
+                catalogGeneration: catalogGeneration,
+                session: session
+            )
+            return
+        case .replaceSelection:
+            break
+        }
         Task { @MainActor [weak self] in
             guard let self else { return }
             let snapshot = await session.snapshot()
@@ -1458,6 +1508,90 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if self.session === session {
                 windowSelectionInFlight = false
             }
+        }
+    }
+
+    /// Re-sends the explicit selection for the window that is already
+    /// streaming. Host policy allows a cooperative foreground request only for
+    /// an explicit Viewer selection; this gives the operator that action after
+    /// focus was lost. The stream, decoder, and input scope stay as they are,
+    /// and input readiness changes only when the Host reports fresh status.
+    private func requestForegroundRestore(
+        _ windowIdentifier: UInt64,
+        generation: UInt64,
+        catalogGeneration: UInt64,
+        session: SessionCoordinator
+    ) {
+        windowSelectionInFlight = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.session === session {
+                    windowSelectionInFlight = false
+                }
+            }
+            let snapshot = await session.snapshot()
+            guard self.session === session else { return }
+            guard synchronizeAuthorization(for: session, snapshot: snapshot) else { return }
+            guard snapshot.authorizedWindowGeneration == generation,
+                  contentView?.windowSelectionCatalogGeneration == catalogGeneration,
+                  windowOptionsContain(windowIdentifier),
+                  selectedWindowIdentifier == windowIdentifier else {
+#if DEBUG
+                M10ViewerDiagnosticRecorder.shared.recordWindowSelection(.rejectedLocally)
+#endif
+                setStatus("Window list expired; waiting for Host")
+                return
+            }
+#if DEBUG
+            M10ViewerDiagnosticRecorder.shared.recordWindowSelection(.requested)
+#endif
+            do {
+                try await session.send(
+                    .windowSelection(
+                        WindowSelectionMessage(
+                            windowIdentifier: windowIdentifier,
+                            windowGeneration: generation,
+                            catalogGeneration: catalogGeneration
+                        )
+                    )
+                )
+                guard self.session === session else { return }
+#if DEBUG
+                M10ViewerDiagnosticRecorder.shared.recordWindowSelection(.sent)
+#endif
+                if !hostInputFocusEligible {
+                    setStatus(ViewerInputStatusPresentation.restoreForegroundRequestedStatus)
+                    scheduleForegroundRestoreFallback(for: session, generation: generation)
+                }
+            } catch {
+                guard self.session === session else { return }
+#if DEBUG
+                M10ViewerDiagnosticRecorder.shared.recordWindowSelection(.sendFailed)
+#endif
+                setStatus("Could not reach the Host to bring the app forward")
+            }
+        }
+    }
+
+    /// The Host sends nothing when a cooperative foreground request is
+    /// refused. Restore the actionable focus guidance if no ready status for
+    /// the same window generation has arrived after the Host's bounded attempt.
+    private func scheduleForegroundRestoreFallback(
+        for session: SessionCoordinator,
+        generation: UInt64
+    ) {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard let self,
+                  self.session === session,
+                  hostInputStatusGeneration == generation || hostInputStatusGeneration == nil,
+                  !hostInputFocusEligible else { return }
+            let snapshot = await session.snapshot()
+            guard self.session === session,
+                  snapshot.authorizedWindowGeneration == generation,
+                  !hostInputFocusEligible else { return }
+            setStatus(ViewerInputStatusPresentation.hostFocusUnavailableStatus)
         }
     }
 

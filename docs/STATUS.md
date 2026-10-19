@@ -132,6 +132,31 @@ They do not record why the Host sent the close, and actual target-app response
 to the injected events remains unverified. Repeated Viewer main-actor stalls
 around 0.8–1.1 seconds were also present during the session.
 
+### Unreleased source follow-ups (2026-10-19)
+
+Source-only changes after Build `1032`; no build number, signed artifact, or
+physical run is associated with them yet. `.codex/ci.sh` passed on 2026-10-19.
+
+- M6 Host input cost and pointer semantics. The Build `1031` logs (2026-10-16)
+  show the Host admitting and posting every received event (for example 94
+  received, 93 posted) with a mean handler time of about 52 ms and a maximum
+  of 111 ms. `CGPreflightPostEventAccess` measured about 6.5 ms per call on the
+  development Mac and was queried four times per event. Per-event checks now
+  reuse a PostEvent result at most 500 ms old, the adapter keeps only its final
+  pre-post validation, and each WindowServer snapshot resolves each owning PID
+  once. Pointer events now use the `*MouseDragged` type while a button is held,
+  carry a Host-computed multi-click count, movement deltas, and the modifier
+  flags from the latest admitted keyboard event.
+- M7 Viewer foreground recovery. Pressing Select for the window that is
+  already streaming now re-sends the explicit selection without restarting the
+  stream, reaching the Host's existing bounded foreground-restore path. It was
+  previously blocked in the Viewer.
+- Pending: physical evidence on the Intel Host for handler time, drag,
+  double-click, modifier-click, and same-window foreground recovery.
+  Not addressed: Host window resize (capture dimensions stay fixed per
+  selection), Viewer line-based wheel scaling, Host pointer-move coalescing,
+  Viewer main-actor stalls, and the Intel encode-failure rate.
+
 ### 0.2.1032 M6 in-house Debug diagnostic artifacts
 
 Build `1032` adds system-queue Quartz delivery for ordinary Host input after

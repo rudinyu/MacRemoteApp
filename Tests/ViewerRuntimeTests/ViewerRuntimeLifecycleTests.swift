@@ -829,6 +829,84 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         XCTAssertEqual(ViewerInputStatusPresentation.readyInputSummary(), "Ready")
     }
 
+    func testSelectingTheStreamingWindowAgainRequestsForegroundRestore() {
+        XCTAssertEqual(
+            ViewerWindowSelectionAction.resolve(
+                requestedWindowIdentifier: 7,
+                selectedWindowIdentifier: 7,
+                streamGeneration: 3,
+                selectionPending: false,
+                selectionInFlight: false
+            ),
+            .restoreForeground,
+            "Select on the already-streaming window must reach the Host restore path."
+        )
+        XCTAssertEqual(
+            ViewerWindowSelectionAction.resolve(
+                requestedWindowIdentifier: 8,
+                selectedWindowIdentifier: 7,
+                streamGeneration: 3,
+                selectionPending: false,
+                selectionInFlight: false
+            ),
+            .replaceSelection
+        )
+        XCTAssertEqual(
+            ViewerWindowSelectionAction.resolve(
+                requestedWindowIdentifier: 7,
+                selectedWindowIdentifier: nil,
+                streamGeneration: nil,
+                selectionPending: false,
+                selectionInFlight: false
+            ),
+            .replaceSelection
+        )
+    }
+
+    func testForegroundRestoreIsIgnoredUntilTheSelectedStreamHasStarted() {
+        XCTAssertEqual(
+            ViewerWindowSelectionAction.resolve(
+                requestedWindowIdentifier: 7,
+                selectedWindowIdentifier: 7,
+                streamGeneration: nil,
+                selectionPending: true,
+                selectionInFlight: false
+            ),
+            .ignore,
+            "The Host would not answer with a stream, so a pending selection must not be re-sent."
+        )
+        XCTAssertEqual(
+            ViewerWindowSelectionAction.resolve(
+                requestedWindowIdentifier: 7,
+                selectedWindowIdentifier: 7,
+                streamGeneration: 3,
+                selectionPending: true,
+                selectionInFlight: false
+            ),
+            .ignore
+        )
+        XCTAssertEqual(
+            ViewerWindowSelectionAction.resolve(
+                requestedWindowIdentifier: 8,
+                selectedWindowIdentifier: 7,
+                streamGeneration: 3,
+                selectionPending: false,
+                selectionInFlight: true
+            ),
+            .ignore,
+            "Only one selection or restore request may be in flight."
+        )
+    }
+
+    func testForegroundRestoreStatusesStayActionable() {
+        let status = ViewerInputStatusPresentation.hostFocusUnavailableStatus
+        XCTAssertTrue(status.localizedCaseInsensitiveContains("press select"))
+        XCTAssertNotEqual(
+            ViewerInputStatusPresentation.restoreForegroundRequestedStatus,
+            "Connected — input ready"
+        )
+    }
+
     func testForegroundActivationFailureAsksHostUserToReactivateHost() {
         let status = ViewerInputStatusPresentation.hostFocusUnavailableStatus
 

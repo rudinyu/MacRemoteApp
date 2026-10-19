@@ -543,6 +543,13 @@ The Viewer owns discovery results, pairing UX, session state, stream status,
 input enablement, clipboard consent, and errors. The UI must distinguish
 "connected but input disabled" from "fully authorized and controllable".
 
+Select on a different window replaces the selection and restarts the stream.
+Select on the window that is already streaming re-sends the same explicit
+selection without touching the stream, decoder, or input scope; the Host
+answers only with a bounded foreground-restore attempt for that generation,
+so readiness changes only when fresh Host input status arrives. If no eligible
+status arrives within 3 seconds, the Viewer restores the focus guidance.
+
 `ViewerRuntime` retains one main `NSWindow`, its `ViewerContentView`, and a
 lazily created `SettingsView`. Opening Settings swaps only the window's
 `contentView`; the session, decoder, renderer, selected Host/window, and

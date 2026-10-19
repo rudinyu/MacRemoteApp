@@ -150,9 +150,11 @@ policy as legacy input: detected secure input blocks control, while an unknown
 global signal follows the existing foreground checks. Target-process AX
 inspection is used only to classify an inactive target for safe cleanup; it
 does not authorize inactive-app input. Recheck the Host permission and select
-the window again before reconnecting. If Host cannot confirm foreground
-activation, click or reactivate MacRemoteApp Host locally, then explicitly
-select the window again.
+the window again before reconnecting. If the selected app stops being active
+on the Host, press Select again for the same window: the Viewer keeps the
+video running and asks the Host to bring that app forward. If Host still
+cannot confirm foreground activation, click or reactivate MacRemoteApp Host
+locally, then press Select again.
 
 ### P6 paired control safety
 

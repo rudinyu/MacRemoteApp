@@ -59,6 +59,10 @@ selection, including negotiated P6. The Host must first confirm that it is
 frontmost before yielding activation to the target; if that cannot be
 confirmed, or cooperative activation is unavailable, input stays fail-closed
 and the Viewer tells the Host user to click or reactivate MacRemoteApp Host.
+Pressing Select again for the window that is already streaming is also an
+explicit Viewer selection: the Host may repeat the same bounded request for
+that exact, still-authorized selection generation, and nothing else. The
+Viewer keeps input disabled until the Host reports fresh eligible status.
 The request does not authorize input. Ordinary admitted events use the public
 system Quartz event stream and its normal cursor/window hit-testing. A
 target-bound PID post is reserved for safe cleanup releases of already
