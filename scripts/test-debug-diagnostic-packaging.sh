@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The fixture exercises several artifact channels; do not inherit the caller's
+# release channel into those checks.
+unset MACREMOTEAPP_ARTIFACT_CHANNEL
+
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
 test_root="$(mktemp -d "${TMPDIR:-/private/tmp}/macremoteapp-debug-package-test.XXXXXX")"

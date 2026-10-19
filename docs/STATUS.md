@@ -14,21 +14,13 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 
 The public source snapshot at commit `a63222e`
 is included in the signed and notarized `0.2.1011` RC; both app bundle plists
-use Build `1011`. Build `1032` is the current M6 global system-event input
-candidate; both role plists identify Version `0.2`, Build `1032`. The M6
-implementation passed `.codex/ci.sh` on 2026-10-16 after the build-number
-update. Its in-house Debug Host and Viewer apps and DMGs are Developer ID
-signed, Apple notarized, stapled, and passed Gatekeeper/package audits. Apple
-accepted all four submissions: Host app ZIP `82dcb863-4a7c-44b7-8537-51c44f9dba27`,
-Viewer app ZIP `90896cc5-18c8-41f6-ba82-da22b81c15ab`, Host DMG
-`4043def5-28d8-4587-9f9f-370807284366`, and Viewer DMG
-`671645e8-caae-4863-8698-9ef4ab0569de`. The DMGs are in
-`build/debug-diagnostic/`: Host SHA-256
-`74e7129d3707f66d3b54e208c710ed5f68c97826979f17321587c0b1722baefb`; Viewer
-SHA-256 `c9c5420a2789e58e2030006c67e7ad01095a90971f219d87efea12e0933cd4c1`.
-Physical two-Mac input-receipt acceptance remains pending. Build `1031` is the
-previous signed and notarized in-house Debug artifact. Build `1030` is
-superseded. Its Dropbox
+use Build `1011`. Build `1033` is the current in-house M6 beta test candidate;
+both role plists identify Version `0.2`, Build `1033`. Its Host and Viewer
+artifacts are Developer ID signed, accepted by Apple, stapled, and passed the
+M9 release audit. They are in `build/beta/`; submission IDs and hashes are
+recorded below. Physical two-Mac input-receipt acceptance remains pending.
+Build `1032` is the previous signed and notarized in-house Debug artifact.
+Build `1031` is superseded. Build `1030` is superseded. Its Dropbox
 Viewer log copy records `attempted=0` through `05:45:49Z`; the local Viewer log
 continues with 18 locally accepted `mouse_move` events at `06:04:12Z`,
 `06:04:37Z`, and `06:05:48Z`, with no button or keyboard events. The Dropbox
@@ -132,30 +124,46 @@ They do not record why the Host sent the close, and actual target-app response
 to the injected events remains unverified. Repeated Viewer main-actor stalls
 around 0.8–1.1 seconds were also present during the session.
 
-### Unreleased source follow-ups (2026-10-19)
+### 0.2.1033 M6 in-house beta test artifacts
 
-Source-only changes after Build `1032`; no build number, signed artifact, or
-physical run is associated with them yet. `.codex/ci.sh` passed on 2026-10-19.
+Both role plists identify Version `0.2`, Build `1033`. This beta includes the
+M6 Host input-cost and pointer-semantics changes plus the Viewer action to
+re-request foreground restoration for the already-streaming window. The Host
+reuses a PostEvent permission result for at most 500 ms, performs one final
+adapter validation before dispatch, and resolves each WindowServer owner PID
+once per snapshot. Pointer events use the matching dragged type while a
+button is held, Host-computed multi-click counts and movement deltas, and
+modifier flags from the latest admitted keyboard event. Pressing Select for
+the current stream re-sends its explicit selection without restarting video.
 
-- M6 Host input cost and pointer semantics. The Build `1031` logs (2026-10-16)
-  show the Host admitting and posting every received event (for example 94
-  received, 93 posted) with a mean handler time of about 52 ms and a maximum
-  of 111 ms. `CGPreflightPostEventAccess` measured about 6.5 ms per call on the
-  development Mac and was queried four times per event. Per-event checks now
-  reuse a PostEvent result at most 500 ms old, the adapter keeps only its final
-  pre-post validation, and each WindowServer snapshot resolves each owning PID
-  once. Pointer events now use the `*MouseDragged` type while a button is held,
-  carry a Host-computed multi-click count, movement deltas, and the modifier
-  flags from the latest admitted keyboard event.
-- M7 Viewer foreground recovery. Pressing Select for the window that is
-  already streaming now re-sends the explicit selection without restarting the
-  stream, reaching the Host's existing bounded foreground-restore path. It was
-  previously blocked in the Viewer.
-- Pending: physical evidence on the Intel Host for handler time, drag,
-  double-click, modifier-click, and same-window foreground recovery.
-  Not addressed: Host window resize (capture dimensions stay fixed per
-  selection), Viewer line-based wheel scaling, Host pointer-move coalescing,
-  Viewer main-actor stalls, and the Intel encode-failure rate.
+`.codex/ci.sh` passed on 2026-10-19, including Host arm64/x86_64, Viewer arm64,
+all package tests, the M8 benchmark, and the local M9 artifact audit. The
+lock-protected beta workflow's clean validation, Developer ID signatures,
+Apple notarization, stapling, Gatekeeper checks, and final package audit also
+passed. Apple accepted all four submissions:
+
+| Artifact | Apple submission ID | Status |
+| --- | --- | --- |
+| Host app ZIP | `99985ada-daab-4348-81b4-ea956eb7ddaa` | Accepted |
+| Viewer app ZIP | `b836278f-eae2-4e97-b5e2-aab283f06b7b` | Accepted |
+| Host DMG | `d9611945-d79f-4157-9d59-3fde9b7fc3a3` | Accepted |
+| Viewer DMG | `f79d8adc-fb5e-455b-987a-d1c0c911bdfc` | Accepted |
+
+The artifacts are in `build/beta/`:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host-0.2.1033.app.zip` | `2a3f5660bfd660d55f287ad6355f3abb33d02e5c16f630de0f75dd638d8a195e` |
+| `MacRemoteApp-Host-0.2.1033.dmg` | `c7bb7d9c7b3fbaca67be584536e889865fdf5548152a309674b0bb8b9275c423` |
+| `MacRemoteApp-Viewer-0.2.1033.app.zip` | `cda3917ac312b6f65693392c6ecd486ba432ee97fcbf9a40a69c7c1e982784d8` |
+| `MacRemoteApp-Viewer-0.2.1033.dmg` | `0eaa859807e58691b5a86d7fced61b698f5809b6987a5a9703cc3000cbde3366` |
+
+Physical evidence on the Intel Host for handler time, drag, double-click,
+modifier-click, and same-window foreground recovery remains pending. This beta
+does not address Host window resizing, Viewer line-based wheel scaling,
+Host pointer-move coalescing, Viewer main-actor stalls, or the Intel
+encode-failure rate. These artifacts are for in-house testing, not a public
+release.
 
 ### 0.2.1032 M6 in-house Debug diagnostic artifacts
 

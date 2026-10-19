@@ -10,51 +10,30 @@ Host; this is deliberately not a full remote-desktop product.
 Milestone state and open evidence gaps are tracked in one place:
 [`docs/STATUS.md`](docs/STATUS.md).
 
-The last public signed and notarized test release is `0.2.1011` (Version
-`0.2`, Build `1011`) in `build/rc/`; it includes P6 background control. Build
-`1018` is a historical in-house Debug diagnostic pair; Build `1024` is the
-latest signed and notarized in-house Debug pair. Build `1025` is the current
-source candidate: its local `.codex/ci.sh` gate passed, but its Debug
-diagnostic apps have not been packaged and it has not had a physical retest.
-See `docs/STATUS.md` for artifact records and validation state. Debug Host and
-Viewer builds append
-to their own bounded diagnostic logs automatically. These are internal test
-builds, not a public release. On the negotiated P6 path, Host acceptance of
-the authenticated Viewer pairing establishes durable input trust and enables
-negotiated Host clipboard capability across reconnect without a second Host
-prompt. The Viewer still controls clipboard sharing through its own
-session-local opt-in. With negotiated P6, the Viewer can keep viewing the
-selected app while it is inactive. Before input is available, explicit window
-selection foregrounds the selected regular app; every input path remains
-foreground-only.
-The 1011 RC also includes the full-cleanup uninstaller in both DMGs, Viewer-led
-input-source following, and the earlier capture, input, reconnect, and
-presentation reliability fixes.
-Apple submission IDs and verification evidence for Build `1024` are recorded
-in [`docs/STATUS.md`](docs/STATUS.md#021024-in-house-debug-diagnostic-artifacts);
-the public RC evidence is in [`docs/STATUS.md`](docs/STATUS.md#021011-notarized-rc).
-Build `1022` keeps the selected-window stream alive without foreground
-activation, with bounded same-owner recovery for transient capture gaps. Build
-`1023` recovers from input failures proven to occur before delivery while
-keeping video connected; ambiguous delivery still ends the session so Host
-held-input cleanup runs. Passing local tests does not replace the pending
-two-Mac acceptance run.
+Build `0.2.1033` is the current in-house beta test pair in `build/beta/`.
+Host and Viewer are Developer ID signed, Apple notarized and stapled, and
+passed the release audit. It includes the M6 Host input-cost and pointer
+semantics changes, plus Viewer re-selection for same-window foreground
+recovery. Full local validation and the clean beta release gate passed;
+physical two-Mac input-receipt testing remains pending. See
+[`docs/STATUS.md`](docs/STATUS.md) for artifact hashes, Apple submission IDs,
+and remaining acceptance evidence. The last public signed and notarized test
+release is still the `0.2.1011` RC in `build/rc/`.
 
 P6 remains an explicit extension to foreground-only input authorization;
 secure-input, system-authentication-dialog, lock, session, target, permission,
 and generation checks still apply. A selected window keeps streaming when its
 app becomes inactive or the window is occluded; video does not activate the
 app. Before control, explicit selection foregrounds the selected regular app,
-and focus loss disables input. Brief catalog omissions and unexpected stream
-endings are recovered against the same window ID, bundle ID, and PID.
-Confirmed target loss or permission loss still fails closed. Host pairing trust can be paused for the active session or revoked by
-unpairing the Viewer; negotiated Host clipboard authorization follows accepted
-pairing, while text transfer retains its separate Viewer-local opt-in. Physical
-background-stream, input, and clipboard acceptance is still pending. See the
+and focus loss disables input. Host pairing trust can be paused for the active
+session or revoked by unpairing the Viewer; negotiated Host clipboard
+authorization follows accepted pairing, while text transfer retains its
+separate Viewer-local opt-in. Physical background-stream, input, and clipboard
+acceptance remains pending. See the
 [P6 contract](docs/P6_BACKGROUND_CONTROL.md).
 
-This build adds Viewer-led Chinese/English input-source
-following. The Host sets the requested state instead of replaying a toggle:
+Viewer-led Chinese/English input-source following is supported. The Host sets
+the requested state instead of replaying a toggle:
 an already-English Host stays English, while Chinese requires the same enabled
 input method on both Macs. Keyboard delivery waits for the matching Host
 acknowledgement; mouse control remains independent. Settings includes
