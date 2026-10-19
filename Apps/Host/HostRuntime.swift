@@ -142,6 +142,30 @@ enum HostRuntimeCaptureLivenessPolicy {
         case .idle, .starting, .stopping, .stopped, .failed: false
         }
     }
+
+    /// A fixed, log-safe category for why capture ended. Free-form platform
+    /// error text is deliberately omitted.
+    static func summary(for state: CaptureSessionState) -> String {
+        func category(_ failure: CaptureFailure?) -> String {
+            switch failure {
+            case .permissionDenied: "permission-denied"
+            case .windowUnavailable: "window-unavailable"
+            case .captureFailed: "capture-failed"
+            case .providerFailed: "provider-failed"
+            case .cancelled: "cancelled"
+            case nil: "none"
+            }
+        }
+        switch state {
+        case .idle: return "idle"
+        case .starting: return "starting"
+        case .capturing: return "capturing"
+        case .recovering: return "recovering"
+        case .stopping: return "stopping"
+        case let .stopped(failure): return "stopped-\(category(failure))"
+        case let .failed(failure): return "failed-\(category(failure))"
+        }
+    }
 }
 
 enum HostRuntimeWindowCatalogPolicy {
@@ -1141,6 +1165,9 @@ actor HostRuntime {
                     // Confirmed target loss or permission failure closes the
                     // protected session. A short discovery gap and bounded
                     // stream restart keep the authenticated session alive.
+                    startupLogger.error(
+                        "Host ended the session because capture stopped (state: \(HostRuntimeCaptureLivenessPolicy.summary(for: captureSnapshot.state), privacy: .public))"
+                    )
                     await teardown(session: session)
                     return
                 }

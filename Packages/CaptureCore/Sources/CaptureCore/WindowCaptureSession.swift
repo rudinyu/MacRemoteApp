@@ -27,6 +27,9 @@ public actor WindowCaptureSession {
     private static let maximumConsecutiveSelectionMisses = 3
     private static let maximumCaptureRestartAttempts = 2
     private static let captureRestartDelayNanoseconds: UInt64 = 250_000_000
+    /// Retry cadence while WindowServer still has the selected window but
+    /// ScreenCaptureKit cannot capture it (hidden app, minimized, other Space).
+    private static let unavailableTargetRetryNanoseconds: UInt64 = 1_000_000_000
 
     public init(
         windowProvider: any WindowDiscoveryProvider,
@@ -268,7 +271,11 @@ public actor WindowCaptureSession {
                 await fail(.windowUnavailable)
                 return
             case .unavailable:
-                await recordSelectionMiss(.windowUnavailable, generation: sessionGeneration)
+                await recordSelectionMiss(
+                    .windowUnavailable,
+                    window: activeWindow,
+                    generation: sessionGeneration
+                )
                 return
             }
         } catch {
@@ -277,17 +284,32 @@ public actor WindowCaptureSession {
                captureError == .permissionDenied {
                 permission = .denied
                 await fail(.permissionDenied)
-            } else {
+            } else if let activeWindow = selectedWindow {
                 await recordSelectionMiss(
                     .providerFailed(String(describing: error)),
+                    window: activeWindow,
                     generation: sessionGeneration
                 )
             }
         }
     }
 
-    private func recordSelectionMiss(_ failure: CaptureFailure, generation: UInt64) async {
+    /// Counts a liveness miss toward the bounded target-loss budget. A target
+    /// that WindowServer still lists for the same live owner is only
+    /// temporarily uncapturable: an inactive, hidden, or minimized selected app
+    /// must remain viewable in the session rather than ending it.
+    private func recordSelectionMiss(
+        _ failure: CaptureFailure,
+        window: CaptureWindow,
+        generation: UInt64
+    ) async {
         guard isCapturing(generation: generation) else { return }
+        let stillExists = await windowProvider.selectedWindowStillExists(window)
+        guard isCapturing(generation: generation) else { return }
+        if stillExists {
+            consecutiveSelectionMisses = 0
+            return
+        }
         consecutiveSelectionMisses += 1
         guard consecutiveSelectionMisses >= Self.maximumConsecutiveSelectionMisses else {
             return
@@ -355,6 +377,10 @@ public actor WindowCaptureSession {
               frame.windowIdentifier == windowIdentifier else {
             return
         }
+        // A delivered frame proves the stream recovered; later interruptions
+        // get a fresh bounded restart budget instead of sharing one for the
+        // whole selection.
+        captureRestartAttempts = 0
         frameChannel.yield(frame)
     }
 
@@ -457,7 +483,7 @@ public actor WindowCaptureSession {
                 await fail(.windowUnavailable)
                 return
             case .unavailable:
-                await scheduleCaptureRestart(.windowUnavailable, generation: recoveryGeneration)
+                await continueRecovery(after: .windowUnavailable, generation: recoveryGeneration)
                 return
             }
         } catch {
@@ -467,8 +493,8 @@ public actor WindowCaptureSession {
                 permission = .denied
                 await fail(.permissionDenied)
             } else {
-                await scheduleCaptureRestart(
-                    .providerFailed(String(describing: error)),
+                await continueRecovery(
+                    after: .providerFailed(String(describing: error)),
                     generation: recoveryGeneration
                 )
             }
@@ -496,8 +522,8 @@ public actor WindowCaptureSession {
                 await newEngine.stop()
                 return
             }
-            await scheduleCaptureRestart(
-                .captureFailed(String(describing: error)),
+            await continueRecovery(
+                after: .captureFailed(String(describing: error)),
                 generation: recoveryGeneration
             )
             return
@@ -509,7 +535,7 @@ public actor WindowCaptureSession {
             return
         }
         if let startupFailure = relayTermination.completeStartup() {
-            await scheduleCaptureRestart(startupFailure, generation: recoveryGeneration)
+            await continueRecovery(after: startupFailure, generation: recoveryGeneration)
             return
         }
         state = .capturing(
@@ -518,6 +544,37 @@ public actor WindowCaptureSession {
         )
         recoveryTask = nil
         startMonitor(generation: recoveryGeneration)
+    }
+
+    /// A recovery attempt that could not capture the target consumes the
+    /// bounded restart budget only when the target is really gone. While
+    /// WindowServer still lists the selected window for its live owner, the
+    /// session stays recovering and retries on a slower cadence.
+    private func continueRecovery(
+        after failure: CaptureFailure,
+        generation recoveryGeneration: UInt64
+    ) async {
+        guard isRecovering(generation: recoveryGeneration),
+              let expectedWindow = selectedWindow else { return }
+        let stillExists = await windowProvider.selectedWindowStillExists(expectedWindow)
+        guard isRecovering(generation: recoveryGeneration) else { return }
+        guard stillExists else {
+            await scheduleCaptureRestart(failure, generation: recoveryGeneration)
+            return
+        }
+        let failedEngine = engine
+        engine = nil
+        relayTask?.cancel()
+        relayTask = nil
+        recoveryTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: Self.unavailableTargetRetryNanoseconds)
+            } catch {
+                return
+            }
+            await self?.recoverCaptureEngine(generation: recoveryGeneration)
+        }
+        await failedEngine?.stop()
     }
 
     private func isRecovering(generation: UInt64) -> Bool {

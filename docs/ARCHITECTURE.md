@@ -360,6 +360,17 @@ These capture rules do not authorize input; Host input keeps its independent
 pairing, generation, permission, target, focus/P6, secure-input, and lock
 checks.
 
+An inactive selected app stays viewable. When ScreenCaptureKit cannot resolve
+or capture the selected window but WindowServer still lists that exact window
+number for the same live owner PID (a hidden app, a minimized window, or a
+window on another Space), the target is temporarily unavailable, not lost: a
+liveness miss is not counted, and recovery retries every second without
+consuming the bounded restart budget. Only a closed window, an exited owner,
+a reused window number, or a permission failure is a confirmed loss that
+fails capture and ends the session; the Host logs that reason as a fixed
+category. The restart budget resets once frames flow again, so separate
+interruptions do not share one budget for the whole selection.
+
 Stopping an engine can suspend while a replacement capture starts. Cleanup
 must remain bound to the engine and generation being stopped: a late stop or
 failure must not clear the replacement selection or finish its frame stream.

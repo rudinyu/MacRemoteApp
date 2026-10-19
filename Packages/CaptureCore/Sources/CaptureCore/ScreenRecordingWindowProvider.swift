@@ -78,6 +78,22 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
         )
     }
 
+    public func selectedWindowStillExists(_ expectedWindow: CaptureWindow) async -> Bool {
+        let windowNumber = CGWindowID(truncatingIfNeeded: expectedWindow.identifier)
+        guard UInt64(windowNumber) == expectedWindow.identifier,
+              let records = CGWindowListCopyWindowInfo(
+                  [.optionIncludingWindow],
+                  windowNumber
+              ) as? [[String: Any]] else {
+            return false
+        }
+        return SelectedWindowExistence.matches(
+            records: records,
+            expectedWindow: expectedWindow,
+            processIsAlive: { kill(pid_t($0), 0) == 0 }
+        )
+    }
+
     private func resolveSelectedWindow(
         _ expectedWindow: CaptureWindow,
         allowInactiveOffscreen: Bool

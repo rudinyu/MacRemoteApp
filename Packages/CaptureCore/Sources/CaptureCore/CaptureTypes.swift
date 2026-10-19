@@ -197,6 +197,28 @@ enum SelectedWindowCaptureEligibility {
     }
 }
 
+/// Classifies WindowServer records for one window number. A window number is
+/// owned by exactly one process, so a record with the selected number and the
+/// selected live owner PID proves the target still exists. A different owner
+/// means the number was reused, which is not the selected window.
+enum SelectedWindowExistence {
+    static func matches(
+        records: [[String: Any]],
+        expectedWindow: CaptureWindow,
+        processIsAlive: (Int32) -> Bool
+    ) -> Bool {
+        records.contains { record in
+            guard let number = (record["kCGWindowNumber"] as? NSNumber)?.uint64Value,
+                  let owner = (record["kCGWindowOwnerPID"] as? NSNumber)?.int32Value else {
+                return false
+            }
+            return number == expectedWindow.identifier &&
+                owner == expectedWindow.processIdentifier &&
+                processIsAlive(owner)
+        }
+    }
+}
+
 enum SelectedWindowCaptureTargetEligibility {
     /// An authenticated selected descriptor is sufficient authority to resolve
     /// the same target for initial capture or restart. Eligibility depends on
@@ -489,9 +511,19 @@ public protocol WindowDiscoveryProvider: Sendable {
     func resolveSelectedWindowForCapture(
         _ expectedWindow: CaptureWindow
     ) async throws -> CaptureWindowRefreshResult
+    /// Whether WindowServer still has this exact window for the same live
+    /// owning process, even when ScreenCaptureKit cannot capture it right now
+    /// (for example a hidden app, a minimized window, or another Space). Such
+    /// a window is temporarily unavailable, not lost.
+    func selectedWindowStillExists(_ expectedWindow: CaptureWindow) async -> Bool
 }
 
 public extension WindowDiscoveryProvider {
+    /// Providers without a WindowServer view treat every miss as a real loss.
+    func selectedWindowStillExists(_ expectedWindow: CaptureWindow) async -> Bool {
+        false
+    }
+
     /// Compatible fallback for providers whose catalog already contains only
     /// capture-eligible windows. ScreenCaptureKit overrides this to inspect
     /// offscreen windows and retain a currently streaming target.

@@ -743,6 +743,126 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertNotNil(exhausted, "recovery must stop after the configured retry budget")
     }
 
+    func testWindowExistenceRequiresSameNumberAndLiveSameOwner() {
+        let window = makeWindow(identifier: 41)
+        let record: [String: Any] = [
+            "kCGWindowNumber": NSNumber(value: window.identifier),
+            "kCGWindowOwnerPID": NSNumber(value: window.processIdentifier)
+        ]
+        XCTAssertTrue(SelectedWindowExistence.matches(
+            records: [record],
+            expectedWindow: window,
+            processIsAlive: { _ in true }
+        ))
+        XCTAssertFalse(
+            SelectedWindowExistence.matches(records: [record], expectedWindow: window, processIsAlive: { _ in false }),
+            "A window whose owner exited is gone."
+        )
+        let reused: [String: Any] = [
+            "kCGWindowNumber": NSNumber(value: window.identifier),
+            "kCGWindowOwnerPID": NSNumber(value: window.processIdentifier + 1)
+        ]
+        XCTAssertFalse(
+            SelectedWindowExistence.matches(records: [reused], expectedWindow: window, processIsAlive: { _ in true }),
+            "A reused window number under another process is not the selected window."
+        )
+        XCTAssertFalse(SelectedWindowExistence.matches(records: [], expectedWindow: window, processIsAlive: { _ in true }))
+    }
+
+    func testSelectedWindowThatStillExistsSurvivesLivenessMisses() async throws {
+        let window = makeWindow(identifier: 31)
+        let provider = FakeWindowProvider(windows: [window], permission: .authorized)
+        let engine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: SequencedCaptureEngineFactory(engines: [engine]),
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 5_000_000)
+        )
+        try await session.start(windowIdentifier: window.identifier)
+
+        // A hidden or minimized selected app: ScreenCaptureKit cannot resolve
+        // it, but WindowServer still lists the window for its live owner.
+        await provider.setRefreshOverride(.unavailable)
+        await provider.setWindowStillExists(true)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let kept = await session.snapshot()
+        XCTAssertEqual(
+            kept.state,
+            .capturing(windowIdentifier: window.identifier, generation: 1),
+            "An inactive app's window that still exists must not end capture."
+        )
+
+        await provider.setWindowStillExists(false)
+        let lost = await waitForState(.failed(.windowUnavailable), in: session)
+        XCTAssertEqual(lost?.state, .failed(.windowUnavailable), "A closed window is still a confirmed loss.")
+    }
+
+    func testRecoveryKeepsRetryingWithoutBudgetWhileWindowStillExists() async throws {
+        let window = makeWindow(identifier: 32)
+        let provider = FakeWindowProvider(windows: [window], permission: .authorized)
+        let firstEngine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        let secondEngine = GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: SequencedCaptureEngineFactory(engines: [firstEngine, secondEngine]),
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 0)
+        )
+        try await session.start(windowIdentifier: window.identifier)
+
+        await provider.setRestartWindows([])
+        await provider.setWindowStillExists(true)
+        firstEngine.finishFrames()
+        // Without the existence check two 250 ms restarts would exhaust the
+        // budget and fail well inside this interval.
+        try await Task.sleep(nanoseconds: 900_000_000)
+        let waiting = await session.snapshot()
+        XCTAssertEqual(
+            waiting.state,
+            .recovering(windowIdentifier: window.identifier, generation: 2),
+            "An uncapturable but existing window must keep the session recovering."
+        )
+
+        await provider.setRestartWindows([window])
+        let resumed = await waitForState(
+            .capturing(windowIdentifier: window.identifier, generation: 2),
+            in: session
+        )
+        XCTAssertEqual(resumed?.state, .capturing(windowIdentifier: window.identifier, generation: 2))
+        XCTAssertEqual(secondEngine.startCount(), 1)
+    }
+
+    func testRestartBudgetResetsAfterFramesFlowAgain() async throws {
+        let window = makeWindow(identifier: 33)
+        let provider = FakeWindowProvider(windows: [window], permission: .authorized)
+        let engines = (0 ..< 4).map { _ in
+            GatedCaptureEngine(startGate: TestAsyncSignal(signaled: true))
+        }
+        let session = WindowCaptureSession(
+            windowProvider: provider,
+            engineFactory: SequencedCaptureEngineFactory(engines: engines),
+            configuration: CaptureConfiguration(monitorIntervalNanoseconds: 0)
+        )
+        try await session.start(windowIdentifier: window.identifier)
+
+        for index in 0 ..< 3 {
+            let nextGeneration = UInt64(index + 2)
+            engines[index].finishFrames()
+            let restarted = await waitForState(
+                .capturing(windowIdentifier: window.identifier, generation: nextGeneration),
+                in: session
+            )
+            XCTAssertEqual(
+                restarted?.state,
+                .capturing(windowIdentifier: window.identifier, generation: nextGeneration),
+                "Interruption \(index + 1) must restart because frames resumed in between."
+            )
+            engines[index + 1].emit(
+                try makeFrame(windowIdentifier: window.identifier, generation: nextGeneration)
+            )
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
     func testCaptureRestartFailsClosedWhenWindowIDHasAReusedOwner() async throws {
         let window = makeWindow(identifier: 15)
         let provider = FakeWindowProvider(windows: [window], permission: .authorized)
@@ -1117,6 +1237,7 @@ private actor FakeWindowProvider: WindowDiscoveryProvider {
     private var currentPermission: CapturePermissionState
     private var refreshOverride: CaptureWindowRefreshResult?
     private var restartWindows: [CaptureWindow]?
+    private var windowStillExists = false
 
     init(windows: [CaptureWindow], permission: CapturePermissionState) {
         self.currentWindows = windows
@@ -1171,6 +1292,14 @@ private actor FakeWindowProvider: WindowDiscoveryProvider {
 
     func setRestartWindows(_ windows: [CaptureWindow]?) {
         restartWindows = windows
+    }
+
+    func setWindowStillExists(_ exists: Bool) {
+        windowStillExists = exists
+    }
+
+    func selectedWindowStillExists(_ expectedWindow: CaptureWindow) async -> Bool {
+        windowStillExists
     }
 
     private static func resolve(
