@@ -1582,7 +1582,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         generation: UInt64
     ) {
         Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
             guard let self,
                   self.session === session,
                   hostInputStatusGeneration == generation || hostInputStatusGeneration == nil,

@@ -415,9 +415,14 @@ M6 splits Host input handling across these owners:
   on-screen window identity, foreground ordering/identity, and lock state.
 - `CoreGraphicsAccessibilityInputAdapter` is the only M6 code that
   constructs/posts `CGEvent` values.
-- For an explicit window selection, `HostRuntime` makes a bounded cooperative
-  AppKit activation request on macOS 14 or later, after Host foreground status
-  is confirmed. The request is not itself proof of focus. Every input path
+- For an explicit window selection, `HostRuntime` tries bounded activation
+  requests in order: a cooperative AppKit request on macOS 14 or later after
+  Host foreground status is confirmed, then the AX `kAXFrontmostAttribute`
+  request when Accessibility is trusted, then LaunchServices activation of the
+  running app when it is the bundle's only instance. After each accepted
+  request it polls for the exact selected window to become foreground and
+  stops at the first confirmation; each step's outcome is logged without app
+  names. No request is itself proof of focus. Every input path
   requires the exact selected target to remain live, the selected PID to be
   active, and a top regular layer-0 WindowServer window from that app. P6 adds
   Host pairing trust and a control generation, and uses the same optional
@@ -548,7 +553,7 @@ Select on the window that is already streaming re-sends the same explicit
 selection without touching the stream, decoder, or input scope; the Host
 answers only with a bounded foreground-restore attempt for that generation,
 so readiness changes only when fresh Host input status arrives. If no eligible
-status arrives within 3 seconds, the Viewer restores the focus guidance.
+status arrives within 6 seconds, the Viewer restores the focus guidance.
 
 `ViewerRuntime` retains one main `NSWindow`, its `ViewerContentView`, and a
 lazily created `SettingsView`. Opening Settings swaps only the window's

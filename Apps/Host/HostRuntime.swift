@@ -74,6 +74,32 @@ enum HostRuntimeForegroundActivationPolicy {
     }
 }
 
+/// Ordered activation requests for an explicit Viewer selection. Each step is
+/// a public macOS request that may be refused; after each one the Host
+/// re-checks that the exact selected window is foreground, and no step
+/// authorizes input by itself.
+enum HostForegroundActivationStep: String, Equatable {
+    case cooperativeYield = "cooperative-yield"
+    case accessibilityFrontmost = "accessibility-frontmost"
+    case launchServicesActivation = "launch-services-activation"
+}
+
+enum HostForegroundActivationPlan {
+    static func steps(
+        cooperativeAPIAvailable: Bool,
+        accessibilityTrusted: Bool,
+        selectedProcessIsOnlyRunningInstance: Bool
+    ) -> [HostForegroundActivationStep] {
+        var steps: [HostForegroundActivationStep] = []
+        if cooperativeAPIAvailable { steps.append(.cooperativeYield) }
+        if accessibilityTrusted { steps.append(.accessibilityFrontmost) }
+        // LaunchServices activates by bundle; with more than one running copy
+        // it could pick a different process, so it is skipped then.
+        if selectedProcessIsOnlyRunningInstance { steps.append(.launchServicesActivation) }
+        return steps
+    }
+}
+
 enum HostRuntimeCooperativeActivationPolicy {
     static func permitsYield(
         cooperativeAPIAvailable: Bool,
@@ -2222,6 +2248,7 @@ actor HostRuntime {
                   targetApplicationAvailable: true,
                   targetIsRegularApplication: application.activationPolicy == .regular
               ) else {
+            startupLogger.error("Host foreground request skipped: selected app is not an available regular app")
             return false
         }
 
@@ -2241,14 +2268,56 @@ actor HostRuntime {
             return true
         }
 
-        guard #available(macOS 14.0, *) else {
-            // This cooperative API supports every explicit selected-app
-            // foreground request, including negotiated P6. On macOS 13,
-            // leave control fail-closed and let the Viewer ask the Host user
-            // to reactivate the Host.
-            return false
+        let cooperativeAPIAvailable: Bool
+        if #available(macOS 14.0, *) {
+            cooperativeAPIAvailable = true
+        } else {
+            cooperativeAPIAvailable = false
         }
+        let steps = HostForegroundActivationPlan.steps(
+            cooperativeAPIAvailable: cooperativeAPIAvailable,
+            accessibilityTrusted: AXIsProcessTrusted(),
+            selectedProcessIsOnlyRunningInstance: Self.isOnlyRunningInstance(application)
+        )
+        for step in steps {
+            let requested: Bool
+            switch step {
+            case .cooperativeYield:
+                requested = await requestCooperativeActivation(of: application)
+            case .accessibilityFrontmost:
+                requested = CoreGraphicsAccessibilityWindowFocus
+                    .activateSelectedApplicationIfAccessible(selection)
+            case .launchServicesActivation:
+                requested = await requestLaunchServicesActivation(of: application)
+            }
+            guard requested else {
+                startupLogger.error(
+                    "Host foreground request step was not accepted (step: \(step.rawValue, privacy: .public))"
+                )
+                continue
+            }
+            if await waitForSelectedWindowForeground(selection, title: window.title) {
+                startupLogger.notice(
+                    "Host brought the selected app forward (step: \(step.rawValue, privacy: .public))"
+                )
+                return true
+            }
+            startupLogger.error(
+                "Host foreground request step did not make the selected window foreground (step: \(step.rawValue, privacy: .public))"
+            )
+        }
+        startupLogger.error(
+            "Host could not bring the selected app forward (steps tried: \(steps.count, privacy: .public))"
+        )
+        return false
+    }
 
+    /// The macOS 14 cooperative path: the Host must be frontmost before it can
+    /// yield activation. A background menu-bar Host is often refused, which is
+    /// why later steps exist.
+    @MainActor
+    private func requestCooperativeActivation(of application: NSRunningApplication) async -> Bool {
+        guard #available(macOS 14.0, *) else { return false }
         let hostApplication = NSRunningApplication.current
         NSApplication.shared.activate()
         guard await waitForHostToBecomeFrontmost(
@@ -2261,23 +2330,57 @@ actor HostRuntime {
         ) else {
             return false
         }
-
         NSApplication.shared.yieldActivation(to: application)
-        guard application.activate(from: hostApplication, options: []) else { return false }
+        return application.activate(from: hostApplication, options: [])
+    }
 
+    /// Asks LaunchServices to activate the already-running selected app. It is
+    /// used only when that bundle has exactly one running instance, so it can
+    /// never launch or activate a different copy of the app.
+    @MainActor
+    private func requestLaunchServicesActivation(of application: NSRunningApplication) async -> Bool {
+        guard let bundleURL = application.bundleURL,
+              Self.isOnlyRunningInstance(application) else { return false }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.addsToRecentItems = false
+        configuration.promptsUserIfNeeded = false
+        configuration.createsNewApplicationInstance = false
+        let expectedProcessIdentifier = application.processIdentifier
+        return await withCheckedContinuation { continuation in
+            NSWorkspace.shared.openApplication(at: bundleURL, configuration: configuration) { opened, error in
+                continuation.resume(
+                    returning: error == nil && opened?.processIdentifier == expectedProcessIdentifier
+                )
+            }
+        }
+    }
+
+    @MainActor
+    private static func isOnlyRunningInstance(_ application: NSRunningApplication) -> Bool {
+        guard let bundleIdentifier = application.bundleIdentifier else { return false }
+        let instances = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+        return instances.count == 1 && instances.first?.processIdentifier == application.processIdentifier
+    }
+
+    /// Polls for the exact selected window to become foreground after one
+    /// activation request. App activation may complete asynchronously; at most
+    /// two bounded AXRaise attempts target the exact window. Activation alone
+    /// is never treated as proof of focus.
+    @MainActor
+    private func waitForSelectedWindowForeground(
+        _ selection: HostInputWindowSelection,
+        title: String?
+    ) async -> Bool {
         for attempt in 0 ..< 20 {
             if CoreGraphicsAccessibilityWindowFocus.isSelectedWindowForeground(selection) {
                 return true
             }
-            // App activation may complete asynchronously. Make at most two
-            // bounded AXRaise attempts after activation has had time to start;
-            // app-level activation is never treated as focus proof.
             if attempt == 2 || attempt == 8 {
-                let selectedTitle = window.title
                 _ = await Task.detached(priority: .userInitiated) {
                     CoreGraphicsAccessibilityWindowFocus.raiseSelectedWindowIfAccessible(
                         selection,
-                        title: selectedTitle
+                        title: title
                     )
                 }.value
             }

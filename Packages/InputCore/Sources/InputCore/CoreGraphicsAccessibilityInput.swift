@@ -757,6 +757,25 @@ public enum CoreGraphicsAccessibilityWindowFocus {
         ) == .eligible
     }
 
+    /// Asks Accessibility to make the selected process the active app. This
+    /// is a public AX action that, unlike cooperative AppKit activation, a
+    /// background menu-bar Host can use without first becoming active itself.
+    /// It never prompts for Accessibility access, and success only means the
+    /// request was accepted: callers must still confirm foreground state.
+    @discardableResult
+    public static func activateSelectedApplicationIfAccessible(
+        _ selection: HostInputWindowSelection
+    ) -> Bool {
+        guard selection.processIdentifier > 0, AXIsProcessTrusted() else { return false }
+        let application = AXUIElementCreateApplication(pid_t(selection.processIdentifier))
+        _ = AXUIElementSetMessagingTimeout(application, 0.35)
+        return AXUIElementSetAttributeValue(
+            application,
+            kAXFrontmostAttribute as CFString,
+            kCFBooleanTrue
+        ) == .success
+    }
+
     /// Raises a uniquely identified AX window for an explicit Viewer window
     /// selection. It never prompts for Accessibility access and returns false
     /// when permission, geometry, or window identity is ambiguous.

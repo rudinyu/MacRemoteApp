@@ -88,6 +88,56 @@ final class HostRuntimeRecoveryPolicyTests: XCTestCase {
         XCTAssertTrue(permitsRestore(requiresHostFrontmost: true, hostIsFrontmost: true))
     }
 
+    func testForegroundActivationFallsBackFromCooperativeYieldToAccessibilityAndLaunchServices() {
+        XCTAssertEqual(
+            HostForegroundActivationPlan.steps(
+                cooperativeAPIAvailable: true,
+                accessibilityTrusted: true,
+                selectedProcessIsOnlyRunningInstance: true
+            ),
+            [.cooperativeYield, .accessibilityFrontmost, .launchServicesActivation],
+            "A refused cooperative request from the menu-bar Host must not end the attempt."
+        )
+        XCTAssertEqual(
+            HostForegroundActivationPlan.steps(
+                cooperativeAPIAvailable: false,
+                accessibilityTrusted: true,
+                selectedProcessIsOnlyRunningInstance: true
+            ),
+            [.accessibilityFrontmost, .launchServicesActivation],
+            "macOS 13 still gets the non-cooperative public requests."
+        )
+    }
+
+    func testForegroundActivationSkipsStepsWhosePreconditionsAreMissing() {
+        XCTAssertEqual(
+            HostForegroundActivationPlan.steps(
+                cooperativeAPIAvailable: true,
+                accessibilityTrusted: false,
+                selectedProcessIsOnlyRunningInstance: true
+            ),
+            [.cooperativeYield, .launchServicesActivation],
+            "Without Accessibility trust the AX request is not attempted."
+        )
+        XCTAssertEqual(
+            HostForegroundActivationPlan.steps(
+                cooperativeAPIAvailable: true,
+                accessibilityTrusted: true,
+                selectedProcessIsOnlyRunningInstance: false
+            ),
+            [.cooperativeYield, .accessibilityFrontmost],
+            "LaunchServices could pick another running copy, so it is skipped."
+        )
+        XCTAssertEqual(
+            HostForegroundActivationPlan.steps(
+                cooperativeAPIAvailable: false,
+                accessibilityTrusted: false,
+                selectedProcessIsOnlyRunningInstance: false
+            ),
+            []
+        )
+    }
+
     func testForegroundActivationRequiresExplicitSelectionAndRegularTarget() {
         XCTAssertTrue(HostRuntimeForegroundActivationPolicy.permits(
             explicitViewerSelection: true,

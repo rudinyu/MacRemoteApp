@@ -124,6 +124,24 @@ They do not record why the Host sent the close, and actual target-app response
 to the injected events remains unverified. Repeated Viewer main-actor stalls
 around 0.8–1.1 seconds were also present during the session.
 
+### Unreleased M6 foreground-activation fallback (2026-10-19)
+
+Source-only, after Build `1033`; no build number or physical run yet.
+`.codex/ci.sh` passed on 2026-10-19. A physical Build `1033` test (no logs
+collected) reported that pressing Select for the already-streaming window did
+not bring the selected app back to the foreground, while the other M6 checks
+were not reported as failing. The Host's only activation path was the macOS 14
+cooperative request, which first needs the background menu-bar Host to become
+frontmost, so the system can refuse it. The Host now continues, in order, with
+the public AX `kAXFrontmostAttribute` request (when Accessibility is trusted)
+and a LaunchServices activation of the running app (only when it is the
+bundle's single instance). It confirms the exact selected window is foreground
+after each step, and logs each step's outcome to the unified log under
+subsystem `com.rudinyu.MacRemoteApp`, category `host-runtime`, without app
+names. The same path now also serves the first selection and macOS 13 Hosts.
+The Viewer waits 6 seconds, up from 3, before restoring the focus guidance.
+Pending: physical confirmation on the Intel Host.
+
 ### 0.2.1033 M6 in-house beta test artifacts
 
 Both role plists identify Version `0.2`, Build `1033`. This beta includes the

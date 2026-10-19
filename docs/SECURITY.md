@@ -53,12 +53,18 @@ and bundle. The top regular layer-0 WindowServer window must belong to that
 same PID and bundle, but may have a different window identifier, as with an
 app-owned sheet or popover. Only layer-0 windows participate; nonzero layers
 are excluded, and an overlapping unknown-owner layer-0 window or window with
-missing layer metadata is an unresolved blocker. A bounded cooperative
-AppKit activation request is allowed only for an explicit Viewer window
-selection, including negotiated P6. The Host must first confirm that it is
-frontmost before yielding activation to the target; if that cannot be
-confirmed, or cooperative activation is unavailable, input stays fail-closed
-and the Viewer tells the Host user to click or reactivate MacRemoteApp Host.
+missing layer metadata is an unresolved blocker. Bounded activation requests
+for the selected regular app are allowed only for an explicit Viewer window
+selection, including negotiated P6. They run in order and stop as soon as the
+exact selected window is confirmed foreground: (1) on macOS 14 or later, a
+cooperative AppKit request, where the Host must first confirm that it is
+frontmost before yielding activation to the target; (2) when the Host already
+has Accessibility trust, the public AX `kAXFrontmostAttribute` request on the
+selected process; (3) when that bundle has exactly one running instance and it
+is the selected PID, a LaunchServices activation of the running app (never a
+new launch). A menu-bar Host is often refused step 1, which is why the later
+steps exist. If none is confirmed, input stays fail-closed and the Viewer
+tells the Host user to click or reactivate MacRemoteApp Host.
 Pressing Select again for the window that is already streaming is also an
 explicit Viewer selection: the Host may repeat the same bounded request for
 that exact, still-authorized selection generation, and nothing else. The
@@ -256,9 +262,9 @@ surface when the state is not ready. A UI label such as "connected" must not
 be treated as equivalent to "authorized to control".
 
 On explicit Viewer window selection, with or without P6, Host may activate the
-selected regular application and, when the Host already has Accessibility
-trust, request the public Accessibility raise action for the exact selected
-window. The AX window must match the selected window's global point geometry
+selected regular application using the ordered requests above and, when the
+Host already has Accessibility trust, request the public Accessibility raise
+action for the exact selected window. The AX window must match the selected window's global point geometry
 and, when known, its local title; ambiguity or a known-title mismatch fails
 closed. Ordinary events use the public system Quartz event stream and normal
 cursor/window hit-testing. P6's process identity and safety checks supplement
