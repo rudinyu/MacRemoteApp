@@ -100,6 +100,27 @@ enum HostForegroundActivationPlan {
     }
 }
 
+/// Decides whether a same-window Select may request foreground restore. The
+/// target must be the exact authorized window: a refreshed descriptor with the
+/// same owner, or, when ScreenCaptureKit cannot resolve it, the current
+/// descriptor while WindowServer still lists it for its live owner.
+enum HostSameWindowSelectionPolicy {
+    static func restoreTarget(
+        current: CaptureWindow,
+        refresh: CaptureWindowRefreshResult?,
+        windowStillExists: Bool
+    ) -> CaptureWindow? {
+        switch refresh {
+        case let .available(window):
+            return window.hasSameOwner(as: current) ? window : nil
+        case .ownerMismatch:
+            return nil
+        case .unavailable, nil:
+            return windowStillExists ? current : nil
+        }
+    }
+}
+
 enum HostRuntimeCooperativeActivationPolicy {
     static func permitsYield(
         cooperativeAPIAvailable: Bool,
@@ -1538,6 +1559,15 @@ actor HostRuntime {
                 await republishWindowCatalogAfterRejectedSelection(session)
                 return
             }
+            // Select on the window that is already selected is a foreground
+            // restore request. An inactive app may be hidden, minimized, or on
+            // another Space, so it can be absent from the on-screen discovery
+            // used for new selections; resolve the exact target instead.
+            if let currentSelection = selectedWindow,
+               currentSelection.hasSameOwner(as: advertisedWindow) {
+                await restoreForegroundForCurrentSelection(currentSelection, session: session)
+                return
+            }
             do {
                 let windows = try await discoverWindowsForRuntime()
                 guard activeSession === session else { return }
@@ -1667,6 +1697,46 @@ actor HostRuntime {
         }
     }
 
+    /// Verifies that the authorized selection still names the same live
+    /// window, including while ScreenCaptureKit cannot capture it, then asks
+    /// for the bounded foreground restore. A reused window number or a closed
+    /// window is rejected and the Viewer receives a fresh catalog.
+    private func restoreForegroundForCurrentSelection(
+        _ currentSelection: CaptureWindow,
+        session: SessionCoordinator
+    ) async {
+        guard let selectedWindowGeneration else { return }
+        let refresh = try? await windowProvider.refreshSelectedWindow(currentSelection)
+        let stillExists: Bool
+        switch refresh {
+        case .available, .ownerMismatch:
+            stillExists = false
+        case .unavailable, nil:
+            stillExists = await windowProvider.selectedWindowStillExists(currentSelection)
+        }
+        let target = HostSameWindowSelectionPolicy.restoreTarget(
+            current: currentSelection,
+            refresh: refresh,
+            windowStillExists: stillExists
+        )
+        guard activeSession === session else { return }
+        guard let target else {
+            startupLogger.error("Host rejected a same-window selection: the selected window no longer exists")
+            await republishWindowCatalogAfterRejectedSelection(session)
+            return
+        }
+        startupLogger.notice("Host received a same-window selection; requesting foreground restore")
+        let restored = await restoreSelectedApplicationToForeground(
+            target,
+            for: session,
+            requestGeneration: selectedWindowGeneration,
+            requiresHostFrontmost: false
+        )
+        if !restored {
+            startupLogger.error("Host foreground restore did not complete")
+        }
+    }
+
     private func restoreSelectedApplicationToForeground(
         _ window: CaptureWindow,
         for session: SessionCoordinator,
@@ -1694,6 +1764,7 @@ actor HostRuntime {
             requiresHostFrontmost: requiresHostFrontmost,
             hostIsFrontmost: hostIsFrontmost
         ) else {
+            startupLogger.error("Host foreground restore was not permitted for the current session or selection generation")
             return false
         }
 

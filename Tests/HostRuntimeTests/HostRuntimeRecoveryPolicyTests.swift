@@ -32,6 +32,98 @@ final class HostRuntimeRecoveryPolicyTests: XCTestCase {
         )
     }
 
+    func testSameWindowSelectReachesRestoreEvenWhenTheAppIsHidden() {
+        let current = CaptureWindow(
+            identifier: 21,
+            applicationIdentifier: "com.example.notes",
+            bounds: WindowBounds(x: 0, y: 0, width: 800, height: 600),
+            processIdentifier: 210,
+            eligible: true
+        )
+        let moved = CaptureWindow(
+            identifier: 21,
+            applicationIdentifier: "com.example.notes",
+            bounds: WindowBounds(x: 40, y: 40, width: 800, height: 600),
+            processIdentifier: 210,
+            eligible: true
+        )
+        XCTAssertEqual(
+            HostSameWindowSelectionPolicy.restoreTarget(
+                current: current,
+                refresh: .available(moved),
+                windowStillExists: false
+            ),
+            moved,
+            "A resolvable target restores with its refreshed geometry."
+        )
+        XCTAssertEqual(
+            HostSameWindowSelectionPolicy.restoreTarget(
+                current: current,
+                refresh: .unavailable,
+                windowStillExists: true
+            ),
+            current,
+            "A hidden, minimized, or other-Space window that still exists must reach restore."
+        )
+        XCTAssertEqual(
+            HostSameWindowSelectionPolicy.restoreTarget(
+                current: current,
+                refresh: nil,
+                windowStillExists: true
+            ),
+            current,
+            "A failed ScreenCaptureKit lookup falls back to the WindowServer record."
+        )
+    }
+
+    func testSameWindowSelectRejectsClosedOrReusedWindows() {
+        let current = CaptureWindow(
+            identifier: 22,
+            applicationIdentifier: "com.example.notes",
+            bounds: WindowBounds(x: 0, y: 0, width: 800, height: 600),
+            processIdentifier: 220,
+            eligible: true
+        )
+        let reused = CaptureWindow(
+            identifier: 22,
+            applicationIdentifier: "com.example.other",
+            bounds: WindowBounds(x: 0, y: 0, width: 800, height: 600),
+            processIdentifier: 221,
+            eligible: true
+        )
+        XCTAssertNil(HostSameWindowSelectionPolicy.restoreTarget(
+            current: current,
+            refresh: .ownerMismatch,
+            windowStillExists: true
+        ))
+        XCTAssertNil(HostSameWindowSelectionPolicy.restoreTarget(
+            current: current,
+            refresh: .available(reused),
+            windowStillExists: true
+        ))
+        XCTAssertNil(
+            HostSameWindowSelectionPolicy.restoreTarget(
+                current: current,
+                refresh: .unavailable,
+                windowStillExists: false
+            ),
+            "A closed window must not trigger app activation."
+        )
+    }
+
+    func testCaptureLossSummaryUsesFixedCategories() {
+        XCTAssertEqual(
+            HostRuntimeCaptureLivenessPolicy.summary(for: .failed(.windowUnavailable)),
+            "failed-window-unavailable"
+        )
+        XCTAssertEqual(
+            HostRuntimeCaptureLivenessPolicy.summary(for: .failed(.captureFailed("detail text"))),
+            "failed-capture-failed",
+            "Free-form platform error text must not reach the log."
+        )
+        XCTAssertEqual(HostRuntimeCaptureLivenessPolicy.summary(for: .stopped(nil)), "stopped-none")
+    }
+
     func testTransientCatalogGapDoesNotPublishAnEmptySelectedWindowList() {
         let selected = CaptureWindow(
             identifier: 19,

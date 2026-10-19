@@ -67,8 +67,14 @@ steps exist. If none is confirmed, input stays fail-closed and the Viewer
 tells the Host user to click or reactivate MacRemoteApp Host.
 Pressing Select again for the window that is already streaming is also an
 explicit Viewer selection: the Host may repeat the same bounded request for
-that exact, still-authorized selection generation, and nothing else. The
-Viewer keeps input disabled until the Host reports fresh eligible status.
+that exact, still-authorized selection generation, and nothing else. Because
+an inactive app can be hidden, minimized, or on another Space, the Host
+verifies that target by its exact identity instead of the on-screen catalog:
+a ScreenCaptureKit descriptor with the same window number, bundle, and PID,
+or, if ScreenCaptureKit cannot resolve it, a WindowServer record of the same
+window number owned by the same live PID. A reused window number or a closed
+window is rejected without any activation request. The Viewer keeps input
+disabled until the Host reports fresh eligible status.
 The request does not authorize input. Ordinary admitted events use the public
 system Quartz event stream and its normal cursor/window hit-testing. A
 target-bound PID post is reserved for safe cleanup releases of already
