@@ -829,6 +829,72 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         XCTAssertEqual(ViewerInputStatusPresentation.readyInputSummary(), "Ready")
     }
 
+    private func descriptor(_ id: UInt64, _ app: String, width: UInt32 = 800) -> WindowDescriptor {
+        WindowDescriptor(identifier: id, applicationIdentifier: app, width: width, height: 600, eligible: true)
+    }
+
+    func testPickerStaysOnTheSameAppWhenItsBackgroundEntryIsReplaced() {
+        let finder = descriptor(10, "com.apple.finder")
+        let weChatVisible = descriptor(21, "com.tencent.xinWeChat")
+        XCTAssertEqual(
+            ViewerWindowPickerChoice.index(
+                in: [finder, weChatVisible],
+                highlighted: 20,
+                highlightedApplication: "com.tencent.xinWeChat",
+                selected: nil
+            ),
+            1,
+            "A vanished WeChat background row must not fall back to Finder at row 0."
+        )
+    }
+
+    func testStreamingSelectionAdoptsTheSameAppsWindowOrEndsWhenTheAppIsGone() {
+        let ghost = descriptor(20, "com.tencent.xinWeChat", width: 1000)
+        let finder = descriptor(10, "com.apple.finder")
+        let weChatSmall = descriptor(21, "com.tencent.xinWeChat", width: 400)
+        let weChatMain = descriptor(22, "com.tencent.xinWeChat", width: 900)
+
+        XCTAssertEqual(
+            ViewerSelectionReconciliation.resolve(
+                selected: 20,
+                previous: [finder, ghost],
+                current: [finder, weChatSmall, weChatMain],
+                streaming: true
+            ),
+            .adopt(22),
+            "Mirror the Host, which captures the app's largest visible window."
+        )
+        XCTAssertEqual(
+            ViewerSelectionReconciliation.resolve(
+                selected: 20,
+                previous: [finder, ghost],
+                current: [finder],
+                streaming: true
+            ),
+            .ended,
+            "If the app has no window left, the Host ended the selection."
+        )
+        XCTAssertEqual(
+            ViewerSelectionReconciliation.resolve(
+                selected: 20,
+                previous: [finder, ghost],
+                current: [finder],
+                streaming: false
+            ),
+            .unchanged,
+            "A pending selection is reconciled by the rejection path instead."
+        )
+        XCTAssertEqual(
+            ViewerSelectionReconciliation.resolve(
+                selected: 10,
+                previous: [finder, ghost],
+                current: [finder],
+                streaming: true
+            ),
+            .unchanged
+        )
+    }
+
     func testCatalogRefreshKeepsTheOperatorsHighlightedWindow() {
         // Host sorts by bundle id, so a refresh that reset the picker sent
         // com.apple.finder instead of the WeChat window the operator chose.

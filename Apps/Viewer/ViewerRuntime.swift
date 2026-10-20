@@ -37,6 +37,61 @@ enum ViewerWindowPickerChoice {
         if let selected, let index = identifiers.firstIndex(of: selected) { return index }
         return 0
     }
+
+    /// As above, but when the highlighted window disappeared (for example a
+    /// background entry replaced by the same app's now-visible window), stay
+    /// on that app rather than jumping to the first row.
+    static func index(
+        in windows: [WindowDescriptor],
+        highlighted: UInt64?,
+        highlightedApplication: String?,
+        selected: UInt64?
+    ) -> Int {
+        let identifiers = windows.map(\.identifier)
+        if let highlighted, identifiers.contains(highlighted) {
+            return index(in: identifiers, highlighted: highlighted, selected: selected)
+        }
+        if let highlightedApplication,
+           let sameApplication = windows.firstIndex(where: { $0.applicationIdentifier == highlightedApplication }) {
+            return sameApplication
+        }
+        return index(in: identifiers, highlighted: nil, selected: selected)
+    }
+}
+
+/// How the Viewer's selection follows a Host catalog while streaming. The Host
+/// never publishes a catalog without its selected window, so a missing
+/// selected window means the Host either captured the same app's visible
+/// window instead of an unrevealable background one, or ended the selection
+/// because the window closed.
+enum ViewerSelectionReconciliation: Equatable {
+    case unchanged
+    case adopt(UInt64)
+    case ended
+
+    static func resolve(
+        selected: UInt64?,
+        previous: [WindowDescriptor],
+        current: [WindowDescriptor],
+        streaming: Bool
+    ) -> Self {
+        guard streaming, let selected,
+              !current.contains(where: { $0.identifier == selected }) else {
+            return .unchanged
+        }
+        guard let application = previous.first(where: { $0.identifier == selected })?.applicationIdentifier else {
+            return .unchanged
+        }
+        let sameApplication = current.filter { $0.applicationIdentifier == application }
+        guard let adopted = sameApplication.max(by: {
+            let lhs = UInt64($0.width) * UInt64($0.height)
+            let rhs = UInt64($1.width) * UInt64($1.height)
+            return lhs == rhs ? $0.identifier > $1.identifier : lhs < rhs
+        }) else {
+            return .ended
+        }
+        return .adopt(adopted.identifier)
+    }
 }
 
 /// What pressing Select does for the window currently chosen in the picker.
@@ -71,6 +126,8 @@ enum ViewerWindowSelectionAction: Equatable {
 enum ViewerInputStatusPresentation {
     static let hostFocusUnavailableStatus =
         "Connected — the selected app is not active on the Host. Press Select to ask the Host to bring it forward; if that fails, click or reactivate MacRemoteApp Host locally"
+    static let selectionEndedStatus =
+        "The selected Host window closed — select a window to continue"
     static let restoreForegroundRequestedStatus =
         "Asking the Host to bring the selected app forward"
     static func readyStatus(focusEligible: Bool) -> String {
@@ -1194,6 +1251,34 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
 #if DEBUG
             debugEligibleWindowCount = UInt64(eligibleWindows.count)
 #endif
+            var selectionEnded = false
+            if !selectionWasRejected {
+                switch ViewerSelectionReconciliation.resolve(
+                    selected: selectedWindowIdentifier,
+                    previous: contentView?.currentWindowOptions ?? [],
+                    current: eligibleWindows,
+                    streaming: selectedGeneration != nil && pendingWindowSelection == nil
+                ) {
+                case .unchanged:
+                    break
+                case let .adopt(identifier):
+                    selectedWindowIdentifier = identifier
+                case .ended:
+                    selectionEnded = true
+                    selectedWindowIdentifier = nil
+                    resetPresentedFPS()
+                    selectedGeneration = nil
+                    streamGenerationGate.revoke()
+                    updateInputSendScope(nil)
+                    advancePresentationLifetime(resetDecoder: true)
+                    streamDimensions = .zero
+                    hostInputPermission = .unknown
+                    hostInputFocusEligible = false
+                    hostInputStatusGeneration = nil
+                    contentView?.updateStream(size: .zero, readiness: .awaitingAuthorization)
+                    contentView?.setWindowSelectionEnabled(true)
+                }
+            }
             contentView?.setWindowOptions(
                 eligibleWindows,
                 generation: generation,
@@ -1204,6 +1289,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 setStatus("Connected — Host has no eligible windows")
             } else if selectionWasRejected {
                 setStatus("Host window list changed — select a window again")
+            } else if selectionEnded {
+                setStatus(ViewerInputStatusPresentation.selectionEndedStatus)
             } else if selectedWindowIdentifier != nil {
                 setStatus(selectedGeneration == nil ? "Connected — starting video" : "Receiving video")
             } else {
@@ -1213,6 +1300,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard session === sourceSession else { return }
             if selectionWasRejected {
                 setStatus("Host window list changed — select a window again")
+            } else if selectionEnded {
+                setStatus(ViewerInputStatusPresentation.selectionEndedStatus)
             }
 
         case let .streamConfig(config):
@@ -3110,9 +3199,9 @@ private final class ViewerContentView: NSView {
         // Keep the operator's current choice across catalog refreshes. The
         // Host republishes whenever a window title, size, or visibility
         // changes; resetting the picker made Select send a different window.
-        let highlightedIdentifier = windowPicker.indexOfSelectedItem >= 0 &&
+        let highlightedWindow = windowPicker.indexOfSelectedItem >= 0 &&
             windowPicker.indexOfSelectedItem < windowOptions.count
-            ? windowOptions[windowPicker.indexOfSelectedItem].identifier
+            ? windowOptions[windowPicker.indexOfSelectedItem]
             : nil
         let unchanged = windows == windowOptions && !windows.isEmpty
         windowOptions = windows
@@ -3136,13 +3225,17 @@ private final class ViewerContentView: NSView {
             windowPicker.addItem(withTitle: itemTitle)
         }
         windowPicker.selectItem(at: ViewerWindowPickerChoice.index(
-            in: windows.map(\.identifier),
-            highlighted: highlightedIdentifier,
+            in: windows,
+            highlighted: highlightedWindow?.identifier,
+            highlightedApplication: highlightedWindow?.applicationIdentifier,
             selected: selectedIdentifier
         ))
         windowPicker.isEnabled = windowSelectionAllowed
         selectWindowButton.isEnabled = windowSelectionAllowed
     }
+
+    /// The catalog currently shown, before a refresh replaces it.
+    var currentWindowOptions: [WindowDescriptor] { windowOptions }
 
     func setSelectedWindowIdentifier(_ identifier: UInt64) {
         guard let index = windowOptions.firstIndex(where: { $0.identifier == identifier }) else { return }

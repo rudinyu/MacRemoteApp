@@ -574,9 +574,15 @@ input enablement, clipboard consent, and errors. The UI must distinguish
 "connected but input disabled" from "fully authorized and controllable".
 
 A catalog refresh keeps the operator's highlighted picker row when that window
-is still offered (falling back to the streaming window, then the first row),
+is still offered (falling back to a window of the same app, then the
+streaming window, then the first row),
 does not rebuild the picker when the catalog is unchanged, and never
-re-enables Select while a selection is in flight.
+re-enables Select while a selection is in flight. Because the Host never
+publishes a catalog without its selected window, a streaming selection that
+disappears from a catalog is reconciled: the Viewer adopts the same app's
+largest window when one is listed (the Host captured it instead of an
+unrevealable background window), or otherwise treats the selection as ended,
+stops the stream, and asks for a new selection.
 
 Select on a different window replaces the selection and restarts the stream.
 Select on the window that is already streaming re-sends the same explicit
