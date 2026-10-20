@@ -1573,6 +1573,9 @@ actor HostRuntime {
                 // flowing, and coalesce repeated Select presses into one.
                 guard !foregroundRestoreInProgress else {
                     startupLogger.notice("Host ignored a same-window selection while a foreground restore is running")
+#if DEBUG
+                    Self.recordDebugForegroundRestore(.coalesced, .ignored)
+#endif
                     return
                 }
                 foregroundRestoreInProgress = true
@@ -1711,6 +1714,31 @@ actor HostRuntime {
         }
     }
 
+#if DEBUG
+    private nonisolated static func recordDebugForegroundRestore(
+        _ stage: M10HostForegroundRestoreStage,
+        _ outcome: M10HostForegroundRestoreOutcome
+    ) {
+        M10HostDiagnosticFileLog.shared.record(
+            .foregroundRestore(
+                stage: stage,
+                outcome: outcome,
+                accessibilityTrusted: AXIsProcessTrusted()
+            )
+        )
+    }
+
+    private nonisolated static func debugStage(
+        for step: HostForegroundActivationStep
+    ) -> M10HostForegroundRestoreStage {
+        switch step {
+        case .cooperativeYield: .cooperativeYield
+        case .accessibilityFrontmost: .accessibilityFrontmost
+        case .launchServicesActivation: .launchServicesActivation
+        }
+    }
+#endif
+
     private func finishForegroundRestore() {
         foregroundRestoreInProgress = false
     }
@@ -1724,6 +1752,9 @@ actor HostRuntime {
         session: SessionCoordinator
     ) async {
         guard let selectedWindowGeneration else { return }
+#if DEBUG
+        Self.recordDebugForegroundRestore(.sameWindowRequest, .started)
+#endif
         let refresh = try? await windowProvider.refreshSelectedWindow(currentSelection)
         let stillExists: Bool
         switch refresh {
@@ -1740,6 +1771,9 @@ actor HostRuntime {
         guard activeSession === session else { return }
         guard let target else {
             startupLogger.error("Host rejected a same-window selection: the selected window no longer exists")
+#if DEBUG
+            Self.recordDebugForegroundRestore(.targetMissing, .rejected)
+#endif
             await republishWindowCatalogAfterRejectedSelection(session)
             return
         }
@@ -1753,6 +1787,10 @@ actor HostRuntime {
         if !restored {
             startupLogger.error("Host foreground restore did not complete")
         }
+#if DEBUG
+        Self.recordDebugForegroundRestore(.finished, restored ? .confirmed : .unconfirmed)
+#endif
+
     }
 
     private func restoreSelectedApplicationToForeground(
@@ -1783,6 +1821,9 @@ actor HostRuntime {
             hostIsFrontmost: hostIsFrontmost
         ) else {
             startupLogger.error("Host foreground restore was not permitted for the current session or selection generation")
+#if DEBUG
+            Self.recordDebugForegroundRestore(.notPermitted, .rejected)
+#endif
             return false
         }
 
@@ -2391,6 +2432,9 @@ actor HostRuntime {
             startupLogger.notice(
                 "Host asked the hidden selected app to unhide (accepted: \(unhideAccepted, privacy: .public))"
             )
+#if DEBUG
+            Self.recordDebugForegroundRestore(.unhide, unhideAccepted ? .accepted : .refused)
+#endif
         }
         let selectedTitle = window.title
         let unminimizeAccepted = await Task.detached(priority: .userInitiated) {
@@ -2402,6 +2446,11 @@ actor HostRuntime {
         if unminimizeAccepted {
             startupLogger.notice("Host asked Accessibility to restore the minimized selected window")
         }
+#if DEBUG
+        if AXIsProcessTrusted() {
+            Self.recordDebugForegroundRestore(.unminimize, unminimizeAccepted ? .accepted : .refused)
+        }
+#endif
 
         let cooperativeAPIAvailable: Bool
         if #available(macOS 14.0, *) {
@@ -2429,17 +2478,26 @@ actor HostRuntime {
                 startupLogger.error(
                     "Host foreground request step was not accepted (step: \(step.rawValue, privacy: .public))"
                 )
+#if DEBUG
+                Self.recordDebugForegroundRestore(Self.debugStage(for: step), .refused)
+#endif
                 continue
             }
             if await waitForSelectedWindowForeground(selection, title: window.title) {
                 startupLogger.notice(
                     "Host brought the selected app forward (step: \(step.rawValue, privacy: .public))"
                 )
+#if DEBUG
+                Self.recordDebugForegroundRestore(Self.debugStage(for: step), .confirmed)
+#endif
                 return true
             }
             startupLogger.error(
                 "Host foreground request step did not make the selected window foreground (step: \(step.rawValue, privacy: .public))"
             )
+#if DEBUG
+            Self.recordDebugForegroundRestore(Self.debugStage(for: step), .unconfirmed)
+#endif
         }
         startupLogger.error(
             "Host could not bring the selected app forward (steps tried: \(steps.count, privacy: .public))"

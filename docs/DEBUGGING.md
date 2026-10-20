@@ -63,6 +63,15 @@ event classes such as `button_down` or `key_up`, never their values.
 MainActor scheduling gaps and AppKit main-run-loop stalls are recorded
 separately, with durations and fixed run-loop phases only.
 
+Host `foreground_restore` records trace each explicit request to bring the
+selected app forward, including same-window Select. `stage` is one of
+`same_window_request`, `coalesced`, `target_missing`, `not_permitted`,
+`unhide`, `unminimize`, `cooperative_yield`, `accessibility_frontmost`,
+`launch_services_activation`, or `finished`; `outcome` is one of `started`,
+`ignored`, `rejected`, `accepted`, `refused`, `confirmed`, or `unconfirmed`;
+and `accessibility_trusted` records whether the Host had Accessibility trust.
+No app name, window title, or window identifier is recorded.
+
 Host authorization records use the fixed `source` values
 `connection_establishment`, `window_selection`, `input_authorization`, and
 `clipboard_fallback`. `authorization_attempt` includes `succeeded`, requested

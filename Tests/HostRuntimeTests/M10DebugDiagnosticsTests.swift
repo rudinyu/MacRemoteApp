@@ -145,6 +145,34 @@ final class M10DebugDiagnosticsTests: XCTestCase {
         XCTAssertEqual(M10HostDiagnosticFileLog.logFileURL, expectedURL)
     }
 
+    func testForegroundRestoreStepsUseOnlyFixedValues() throws {
+        let directoryURL = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let logURL = directoryURL.appendingPathComponent("m10-debug-host.log")
+        let writer = M10HostDiagnosticFileLog(fileURL: logURL)
+        let date = Date(timeIntervalSince1970: 1_797_000_000)
+
+        writer.record(.foregroundRestore(stage: .sameWindowRequest, outcome: .started, accessibilityTrusted: false), at: date)
+        writer.record(.foregroundRestore(stage: .unminimize, outcome: .refused, accessibilityTrusted: true), at: date)
+        writer.record(.foregroundRestore(stage: .accessibilityFrontmost, outcome: .unconfirmed, accessibilityTrusted: true), at: date)
+        writer.record(.foregroundRestore(stage: .finished, outcome: .confirmed, accessibilityTrusted: true), at: date)
+        writer.waitForPendingWrites()
+
+        let records = try readJSONLines(at: logURL).filter { $0["event"] as? String == "foreground_restore" }
+        XCTAssertEqual(records.count, 4)
+        XCTAssertEqual(records.map { $0["stage"] as? String }, [
+            "same_window_request", "unminimize", "accessibility_frontmost", "finished"
+        ])
+        XCTAssertEqual(records.map { $0["outcome"] as? String }, [
+            "started", "refused", "unconfirmed", "confirmed"
+        ])
+        XCTAssertEqual(records.first?["accessibility_trusted"] as? Bool, false)
+        for record in records {
+            XCTAssertNil(record["title"], "No window title may be recorded.")
+            XCTAssertNil(record["application"], "No app name may be recorded.")
+        }
+    }
+
     func testWritesVersionedJSONLEnvelopeAndLifecycleAggregates() throws {
         let directoryURL = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directoryURL) }

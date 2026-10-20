@@ -80,6 +80,31 @@ enum M10HostWindowSelection: String, Sendable {
     case rejected
 }
 
+/// One step of an explicit foreground request for the selected app. Values
+/// are fixed; no app name, title, or window identifier is recorded.
+enum M10HostForegroundRestoreStage: String, Sendable {
+    case sameWindowRequest = "same_window_request"
+    case coalesced
+    case targetMissing = "target_missing"
+    case notPermitted = "not_permitted"
+    case unhide
+    case unminimize
+    case cooperativeYield = "cooperative_yield"
+    case accessibilityFrontmost = "accessibility_frontmost"
+    case launchServicesActivation = "launch_services_activation"
+    case finished
+}
+
+enum M10HostForegroundRestoreOutcome: String, Sendable {
+    case started
+    case ignored
+    case rejected
+    case accepted
+    case refused
+    case confirmed
+    case unconfirmed
+}
+
 enum M10HostInputReadiness: String, Equatable, Sendable {
     case ready
     case cleanupPending = "cleanup_pending"
@@ -250,6 +275,11 @@ enum M10HostDiagnosticEvent: Sendable {
     case screenRecordingPermission(M10HostScreenRecordingPermission)
     case windowCatalogPublished(eligibleCount: UInt64)
     case windowSelection(M10HostWindowSelection)
+    case foregroundRestore(
+        stage: M10HostForegroundRestoreStage,
+        outcome: M10HostForegroundRestoreOutcome,
+        accessibilityTrusted: Bool
+    )
     case inputReadiness(M10HostInputReadiness)
     case windowCatalog(
         permission: M10HostScreenRecordingPermission,
@@ -378,6 +408,11 @@ enum M10HostDiagnosticEvent: Sendable {
         case let .windowSelection(state):
             event = "window_selection"
             fields["state"] = state.rawValue
+        case let .foregroundRestore(stage, outcome, accessibilityTrusted):
+            event = "foreground_restore"
+            fields["stage"] = stage.rawValue
+            fields["outcome"] = outcome.rawValue
+            fields["accessibility_trusted"] = accessibilityTrusted
         case let .inputReadiness(state):
             event = "input_readiness"
             fields["state"] = state.rawValue
