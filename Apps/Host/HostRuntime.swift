@@ -1207,6 +1207,9 @@ actor HostRuntime {
                         startupLogger.error(
                             "Host ended the session because capture stopped (state: \(summary, privacy: .public))"
                         )
+#if DEBUG
+                        M10HostDiagnosticFileLog.shared.record(.captureLoss(scope: .session, captureState: summary))
+#endif
                         await teardown(session: session)
                         return
                     }
@@ -1217,6 +1220,9 @@ actor HostRuntime {
                     startupLogger.error(
                         "Host ended the selection because capture stopped; the session stays open (state: \(summary, privacy: .public))"
                     )
+#if DEBUG
+                    M10HostDiagnosticFileLog.shared.record(.captureLoss(scope: .selection, captureState: summary))
+#endif
                     await endSelectionAfterCaptureLoss(session)
                 }
                 switch captureSnapshot.state {

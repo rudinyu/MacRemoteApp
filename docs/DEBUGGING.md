@@ -72,6 +72,11 @@ selected app forward, including same-window Select. `stage` is one of
 and `accessibility_trusted` records whether the Host had Accessibility trust.
 No app name, window title, or window identifier is recorded.
 
+Host `capture_loss` records say what ended after the selected window stopped
+being capturable: `scope` is `selection` (window closed or gone; the session
+stays open) or `session` (Screen Recording permission lost), and
+`capture_state` is a fixed category such as `failed-window-unavailable`.
+
 Host authorization records use the fixed `source` values
 `connection_establishment`, `window_selection`, `input_authorization`, and
 `clipboard_fallback`. `authorization_attempt` includes `succeeded`, requested

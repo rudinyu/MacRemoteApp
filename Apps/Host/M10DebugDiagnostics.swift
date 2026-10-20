@@ -95,6 +95,12 @@ enum M10HostForegroundRestoreStage: String, Sendable {
     case finished
 }
 
+/// What the Host ended after the selected window stopped being capturable.
+enum M10HostCaptureLossScope: String, Sendable {
+    case selection
+    case session
+}
+
 enum M10HostForegroundRestoreOutcome: String, Sendable {
     case started
     case ignored
@@ -275,6 +281,9 @@ enum M10HostDiagnosticEvent: Sendable {
     case screenRecordingPermission(M10HostScreenRecordingPermission)
     case windowCatalogPublished(eligibleCount: UInt64)
     case windowSelection(M10HostWindowSelection)
+    /// `captureState` is a fixed category from
+    /// `HostRuntimeCaptureLivenessPolicy.summary(for:)`; no error text.
+    case captureLoss(scope: M10HostCaptureLossScope, captureState: String)
     case foregroundRestore(
         stage: M10HostForegroundRestoreStage,
         outcome: M10HostForegroundRestoreOutcome,
@@ -408,6 +417,10 @@ enum M10HostDiagnosticEvent: Sendable {
         case let .windowSelection(state):
             event = "window_selection"
             fields["state"] = state.rawValue
+        case let .captureLoss(scope, captureState):
+            event = "capture_loss"
+            fields["scope"] = scope.rawValue
+            fields["capture_state"] = captureState
         case let .foregroundRestore(stage, outcome, accessibilityTrusted):
             event = "foreground_restore"
             fields["stage"] = stage.rawValue

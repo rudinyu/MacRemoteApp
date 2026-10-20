@@ -145,6 +145,24 @@ final class M10DebugDiagnosticsTests: XCTestCase {
         XCTAssertEqual(M10HostDiagnosticFileLog.logFileURL, expectedURL)
     }
 
+    func testCaptureLossRecordsScopeAndFixedState() throws {
+        let directoryURL = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let logURL = directoryURL.appendingPathComponent("m10-debug-host.log")
+        let writer = M10HostDiagnosticFileLog(fileURL: logURL)
+        let date = Date(timeIntervalSince1970: 1_797_000_000)
+
+        writer.record(.captureLoss(scope: .selection, captureState: "failed-window-unavailable"), at: date)
+        writer.record(.captureLoss(scope: .session, captureState: "failed-permission-denied"), at: date)
+        writer.waitForPendingWrites()
+
+        let records = try readJSONLines(at: logURL).filter { $0["event"] as? String == "capture_loss" }
+        XCTAssertEqual(records.map { $0["scope"] as? String }, ["selection", "session"])
+        XCTAssertEqual(records.map { $0["capture_state"] as? String }, [
+            "failed-window-unavailable", "failed-permission-denied"
+        ])
+    }
+
     func testForegroundRestoreStepsUseOnlyFixedValues() throws {
         let directoryURL = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directoryURL) }
