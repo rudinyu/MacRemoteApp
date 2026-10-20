@@ -25,8 +25,9 @@ recovery, and M8 stage timing/process-discovery reductions. It retains Build
 `1040`'s offscreen representative window selection and Viewer-side Chinese
 composition. Physical high-resolution performance, background-window
 selection, and two-Mac Chinese-input acceptance remain pending. Artifacts were
-built from local source commit `7fbdb8e`; its four feature commits are ahead of
-`origin/main`, and Build `1041`'s two plist version edits are uncommitted.
+built from source commit `7fbdb8e` with the Build `1041` version bump. The four
+feature commits and release metadata are now pushed to `origin/main` at
+`109a1d0`.
 Build `1041` submission IDs and hashes are recorded below.
 The public source snapshot at commit `a63222e` remains included in the
 historical signed and notarized `0.2.1011` RC. Builds `1036`, `1035`, `1033`, `1032`,
