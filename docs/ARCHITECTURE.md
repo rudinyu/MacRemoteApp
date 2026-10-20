@@ -569,6 +569,14 @@ selection without touching the stream, decoder, or input scope; the Host
 answers only with a bounded foreground-restore attempt for that generation,
 so readiness changes only when fresh Host input status arrives. If no eligible
 status arrives within 6 seconds, the Viewer restores the focus guidance.
+While a restore request awaits that status, further Select presses are
+ignored so they cannot queue on the Host.
+
+The Connect button becomes `Disconnect` while the Viewer is connected,
+connecting, or reconnecting. Disconnect clears the selected Host before
+closing the session so discovery does not reconnect automatically, cancels
+any connection attempt or reconnect loop, and closes the session normally;
+saved pairings are kept.
 
 `ViewerRuntime` retains one main `NSWindow`, its `ViewerContentView`, and a
 lazily created `SettingsView`. Opening Settings swaps only the window's

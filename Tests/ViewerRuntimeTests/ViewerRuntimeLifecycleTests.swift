@@ -829,6 +829,17 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         XCTAssertEqual(ViewerInputStatusPresentation.readyInputSummary(), "Ready")
     }
 
+    func testConnectionButtonOffersDisconnectWhileConnectedOrConnecting() {
+        XCTAssertEqual(ViewerConnectionState.disconnected.buttonTitle, "Connect")
+        XCTAssertEqual(ViewerConnectionState.connecting.buttonTitle, "Disconnect")
+        XCTAssertEqual(ViewerConnectionState.connected.buttonTitle, "Disconnect")
+        XCTAssertEqual(
+            ViewerConnectionState.reconnecting.buttonTitle,
+            "Disconnect",
+            "The operator must be able to stop an automatic reconnect loop."
+        )
+    }
+
     func testSelectingTheStreamingWindowAgainRequestsForegroundRestore() {
         XCTAssertEqual(
             ViewerWindowSelectionAction.resolve(

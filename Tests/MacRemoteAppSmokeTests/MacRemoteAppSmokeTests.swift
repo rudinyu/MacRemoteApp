@@ -435,8 +435,12 @@ final class MacRemoteAppSmokeTests: XCTestCase {
         XCTAssertTrue(hostRuntime.contains("Viewer brought \\(application) to the front and is sharing it"))
         XCTAssertTrue(viewerRuntime.contains("deviceName: Self.localDeviceName"))
         XCTAssertTrue(viewerRuntime.contains("case .connected: return \"Connected\""))
-        XCTAssertTrue(viewerRuntime.contains("case .reconnecting: return \"Reconnecting…\""))
-        XCTAssertTrue(viewerRuntime.contains("connectHostButton.isEnabled = isDisconnected"))
+        // While connected or (re)connecting, the connection button is an
+        // enabled Disconnect action that stops automatic reconnection.
+        XCTAssertTrue(viewerRuntime.contains("case .connecting, .connected, .reconnecting: return \"Disconnect\""))
+        XCTAssertTrue(viewerRuntime.contains("connectHostButton.isEnabled = !isDisconnected"))
+        XCTAssertTrue(viewerRuntime.contains("onDisconnect?()"))
+        XCTAssertTrue(viewerRuntime.contains("private func disconnectFromHost()"))
         XCTAssertTrue(hostRuntime.contains("videoConfigSentAuthorizationGeneration"))
         XCTAssertTrue(hostRuntime.contains("expectedAuthorizationGeneration: authorizationGeneration"))
         XCTAssertTrue(hostRuntime.contains("case .authorizationChanged:"))

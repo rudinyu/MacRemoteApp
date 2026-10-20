@@ -220,6 +220,10 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var streamGenerationGate = StreamGenerationGate()
     private var streamDimensions: CGSize = .zero
     private var windowSelectionInFlight = false
+    /// A same-window foreground restore was requested and its outcome is not
+    /// known yet. Further Select presses are ignored until fresh eligible Host
+    /// status arrives or the fallback timeout expires.
+    private var foregroundRestorePending = false
     private var presentedFrameCount = 0
     private var presentedFrameTimes: [TimeInterval] = []
     private var lastPresentedFrameTime: TimeInterval?
@@ -504,6 +508,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         content.onPairingRetry = { [weak self] in
             self?.retryPairing()
+        }
+        content.onDisconnect = { [weak self] in
+            self?.disconnectFromHost()
         }
         content.onForgetPairings = { [weak self] in
             self?.forgetSavedPairings()
@@ -1417,7 +1424,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
             selectedWindowIdentifier: selectedWindowIdentifier,
             streamGeneration: selectedGeneration,
             selectionPending: pendingWindowSelection != nil,
-            selectionInFlight: windowSelectionInFlight
+            selectionInFlight: windowSelectionInFlight || foregroundRestorePending
         ) {
         case .ignore:
             return
@@ -1523,11 +1530,16 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         session: SessionCoordinator
     ) {
         windowSelectionInFlight = true
+        foregroundRestorePending = true
         Task { @MainActor [weak self] in
             guard let self else { return }
+            var awaitingHostStatus = false
             defer {
                 if self.session === session {
                     windowSelectionInFlight = false
+                    if !awaitingHostStatus {
+                        foregroundRestorePending = false
+                    }
                 }
             }
             let snapshot = await session.snapshot()
@@ -1561,6 +1573,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 M10ViewerDiagnosticRecorder.shared.recordWindowSelection(.sent)
 #endif
                 if !hostInputFocusEligible {
+                    awaitingHostStatus = true
                     setStatus(ViewerInputStatusPresentation.restoreForegroundRequestedStatus)
                     scheduleForegroundRestoreFallback(for: session, generation: generation)
                 }
@@ -1582,10 +1595,20 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         generation: UInt64
     ) {
         Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 6_000_000_000)
-            guard let self,
-                  self.session === session,
-                  hostInputStatusGeneration == generation || hostInputStatusGeneration == nil,
+            // Poll so a successful restore re-enables Select promptly; the
+            // Host's bounded attempt finishes well inside the timeout.
+            let deadline = DispatchTime.now().uptimeNanoseconds &+ 6_000_000_000
+            while DispatchTime.now().uptimeNanoseconds < deadline {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard let self, self.session === session else { return }
+                if hostInputFocusEligible {
+                    foregroundRestorePending = false
+                    return
+                }
+            }
+            guard let self, self.session === session else { return }
+            foregroundRestorePending = false
+            guard hostInputStatusGeneration == generation || hostInputStatusGeneration == nil,
                   !hostInputFocusEligible else { return }
             let snapshot = await session.snapshot()
             guard self.session === session,
@@ -2468,6 +2491,32 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         scheduleReconnect(immediate: true)
     }
 
+    /// Operator-requested disconnect. Clears the selected Host first so the
+    /// discovery stream does not reconnect on its own, cancels any connection
+    /// attempt or reconnect loop, and closes the session normally so the Host
+    /// releases held input and stops capture. Saved pairings are kept.
+    private func disconnectFromHost() {
+        guard !isShuttingDown,
+              session != nil || connectionAttemptID != nil || reconnectTask != nil else { return }
+        selectedServiceIdentifier = nil
+        lastDiscoveredService = nil
+        pairingRetryRequired = false
+        contentView?.setPairingRetryVisible(false)
+        connectionAttemptID = nil
+        cancelReconnect()
+        updateInputSendScope(nil)
+        advancePresentationLifetime(resetDecoder: true)
+        contentView?.setConnectionState(.disconnected)
+        setStatus("Disconnecting…")
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await resetSession()
+            contentView?.setConnectionState(.disconnected)
+            contentView?.setHostSelectionEnabled(true)
+            setStatus("Disconnected — choose a Host and press Connect")
+        }
+    }
+
     private func forgetSavedPairings() {
         guard !isShuttingDown else { return }
         let alert = NSAlert()
@@ -2568,6 +2617,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         selectedWindowIdentifier = nil
         pendingWindowSelection = nil
         windowSelectionInFlight = false
+        foregroundRestorePending = false
         presentedFrameCount = 0
         resetPresentedFPS()
         performanceCollector.reset()
@@ -2613,7 +2663,7 @@ enum ViewerRuntimeError: Error, CustomStringConvertible, Sendable {
     }
 }
 
-private enum ViewerConnectionState: Equatable {
+enum ViewerConnectionState: Equatable {
     case disconnected
     case connecting
     case connected
@@ -2622,9 +2672,9 @@ private enum ViewerConnectionState: Equatable {
     var buttonTitle: String {
         switch self {
         case .disconnected: return "Connect"
-        case .connecting: return "Connecting…"
-        case .connected: return "Connected"
-        case .reconnecting: return "Reconnecting…"
+        // While connected or trying to connect, the same button ends the
+        // session (or the attempt) and stops automatic reconnection.
+        case .connecting, .connected, .reconnecting: return "Disconnect"
         }
     }
 
@@ -2659,6 +2709,7 @@ private final class ViewerContentView: NSView {
     var onHostSelection: (@MainActor (Int) -> Void)?
     var onWindowSelection: (@MainActor (UInt64, UInt64, UInt64) -> Void)?
     var onPairingRetry: (@MainActor () -> Void)?
+    var onDisconnect: (@MainActor () -> Void)?
     var onForgetPairings: (@MainActor () -> Void)?
     var onClipboardToggle: (@MainActor () -> Void)?
     var onRetryInputSource: (@MainActor () -> Void)?
@@ -3021,18 +3072,19 @@ private final class ViewerContentView: NSView {
         _ = sender
         let selectedIndex = hostPicker.indexOfSelectedItem - 1
         let hasHostSelection = selectedIndex >= 0 && selectedIndex < hostOptionIdentifiers.count
-        connectHostButton.isEnabled = connectionState == .disconnected &&
-            hostSelectionEnabled && hasHostSelection
+        connectHostButton.isEnabled = connectionState != .disconnected ||
+            (hostSelectionEnabled && hasHostSelection)
     }
 
     private func updateHostControls() {
         let isDisconnected = connectionState == .disconnected
         hostPicker.isEnabled = isDisconnected && hostSelectionEnabled && !hostOptionIdentifiers.isEmpty
         connectHostButton.title = connectionState.buttonTitle
-        connectHostButton.isEnabled = isDisconnected &&
+        connectHostButton.isEnabled = !isDisconnected || (
             hostSelectionEnabled &&
-            hostPicker.indexOfSelectedItem > 0 &&
-            hostPicker.indexOfSelectedItem - 1 < hostOptionIdentifiers.count
+                hostPicker.indexOfSelectedItem > 0 &&
+                hostPicker.indexOfSelectedItem - 1 < hostOptionIdentifiers.count
+        )
     }
 
     func setWindowOptions(
@@ -3295,6 +3347,10 @@ private final class ViewerContentView: NSView {
 
     @objc private func connectHost(_ sender: NSButton) {
         _ = sender
+        guard connectionState == .disconnected else {
+            onDisconnect?()
+            return
+        }
         let selectedIndex = hostPicker.indexOfSelectedItem - 1
         guard selectedIndex >= 0,
               selectedIndex < hostOptionIdentifiers.count else { return }

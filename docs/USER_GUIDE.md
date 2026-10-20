@@ -250,6 +250,12 @@ permission; it is not a permission preflight result.
 
 ## Stop or uninstall
 
+To end the session but keep both apps running, press `Disconnect` on the
+Viewer. The Connect button shows `Disconnect` while the Viewer is connected,
+connecting, or reconnecting; it closes the session, stops automatic
+reconnection, and keeps saved pairings. Choose a Host and press `Connect` to
+start again.
+
 Quit both apps to end the session. For an app installed by dragging to
 `/Applications`, use Finder's normal Move to Trash action. For an app installed
 by the optional DMG helper, open the DMG and double-click the role-specific
