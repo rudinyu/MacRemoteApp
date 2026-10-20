@@ -10,17 +10,18 @@ Host; this is deliberately not a full remote-desktop product.
 Milestone state and open evidence gaps are tracked in one place:
 [`docs/STATUS.md`](docs/STATUS.md).
 
-Build `0.2.1040` is the current in-house M10 Debug diagnostic pair in
-`build/debug-diagnostic/`. Full `.codex/ci.sh` validation passed on 2026-10-20.
-The Host and Viewer apps, ZIPs, and DMGs are Developer ID signed, accepted by
-Apple, stapled, and passed Gatekeeper and final package audits. Build `1040`
-adds untitled background-window selection for regular apps with
-no on-screen window, and optional Viewer-side Chinese composition that sends
-only committed text. Marked text and candidates stay on the Viewer; Host
-foreground, permission, target, and secure-input checks still apply. Physical
-window-selection and two-Mac Chinese-input acceptance remain pending. Earlier
-distribution outputs were cleared before creating this pair; `.build`
-validation caches were retained. See
+Build `0.2.1041` is the current in-house M10 Debug diagnostic pair in
+`build/debug-diagnostic/`. Full `.codex/ci.sh` validation and the opt-in
+VideoToolbox encode/decode smoke passed on 2026-10-20. The Host and Viewer
+apps, ZIPs, and DMGs are Developer ID signed, accepted by Apple, stapled, and
+passed Gatekeeper and final package audits. Build `1041` adds selectable
+Viewer stream quality (1080p or 1440p at 30/60 fps, or experimental 4K at
+30/60 fps), asynchronous Viewer decoding, and Host handling for oversized
+encoded frames. It retains Build `1040`'s background-window selection and
+Viewer-side Chinese composition. Physical high-resolution performance,
+background-window selection, and two-Mac Chinese-input acceptance remain
+pending. Earlier distribution outputs were cleared before creating this pair;
+`.build` validation caches were retained. See
 [`docs/STATUS.md`](docs/STATUS.md) for artifact hashes, Apple submission IDs,
 and remaining acceptance evidence.
 

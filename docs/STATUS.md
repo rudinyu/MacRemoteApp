@@ -12,21 +12,22 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 
 ## Summary
 
-Build `0.2.1040` is the current in-house M10 Debug diagnostic pair. Both role
-plists identify Version `0.2`, Build `1040`; the apps, ZIPs, and DMGs are in
-`build/debug-diagnostic/`. Full `.codex/ci.sh` validation passed on 2026-10-20.
-Four Apple notarizations were accepted; both apps and DMGs were stapled and
-passed Gatekeeper and final package audit. Previous `build/` distribution
-outputs were cleared before packaging; `.build` validation caches were
-retained. Build `1040` adds one offscreen representative window for each
-regular app with no on-screen window (titled windows first, otherwise the
-largest untitled window) and optional Viewer-side Chinese IME composition that
-sends only committed text. Marked text and candidates stay on the Viewer;
-Command/Control shortcuts stay on the physical-key path. Every text event
-remains subject to the Host's existing selected-target, focus, permission, and
-secure-input checks. Physical background-window selection and two-Mac Chinese
-input acceptance remain pending. Build `1040` submission IDs and hashes are
-recorded below.
+Build `0.2.1041` is the current in-house M10 Debug diagnostic pair. Both role
+plists identify Version `0.2`, Build `1041`; the apps, ZIPs, and DMGs are in
+`build/debug-diagnostic/`. Full `.codex/ci.sh` validation and the opt-in
+VideoToolbox encode/decode smoke passed on 2026-10-20. Four Apple notarizations
+were accepted; both apps and DMGs were stapled and passed Gatekeeper, ticket,
+and final package audits. Previous `build/debug-diagnostic/` outputs were
+cleared before packaging; `.build` validation caches were retained. Build
+`1041` adds selectable Viewer stream quality (1080p/1440p or experimental 4K,
+at 30 or 60 fps), asynchronous Viewer decoding, Host-side oversized-frame
+recovery, and M8 stage timing/process-discovery reductions. It retains Build
+`1040`'s offscreen representative window selection and Viewer-side Chinese
+composition. Physical high-resolution performance, background-window
+selection, and two-Mac Chinese-input acceptance remain pending. Artifacts were
+built from local source commit `7fbdb8e`; its four feature commits are ahead of
+`origin/main`, and Build `1041`'s two plist version edits are uncommitted.
+Build `1041` submission IDs and hashes are recorded below.
 The public source snapshot at commit `a63222e` remains included in the
 historical signed and notarized `0.2.1011` RC. Builds `1036`, `1035`, `1033`, `1032`,
 `1031`, and `1030` are historical; their local distribution outputs are not
@@ -172,6 +173,44 @@ The artifacts are in `build/debug-diagnostic/`:
 
 These artifacts are for in-house diagnostics, not a public release. Physical
 background-window selection and Chinese input acceptance remain pending.
+
+### 0.2.1041 M4/M7/M8/M10 in-house Debug diagnostic artifacts
+
+Build `1041` was generated from source commit `7fbdb8e` plus the Host and Viewer
+`CFBundleVersion` bump from `1040` to `1041`. The four commits after the
+previously pushed `origin/main` are `cb8e499` (asynchronous Viewer decode and
+occlusion-aware rendering), `fc2262a` (Host capture/discovery performance and
+stage timing), `13a951d` (oversized-frame recovery and a 4 MiB default protocol
+payload bound), and `7fbdb8e` (Viewer stream quality through experimental 4K).
+The Viewer requests 1080p, 1440p, or experimental 4K at 30 or 60 fps; the Host
+caps the negotiated stream at 3840×2160 and 60 fps. Physical high-resolution
+performance and Intel Host to Apple Silicon Viewer acceptance remain pending.
+
+Full `.codex/ci.sh` validation passed, including Host arm64/x86_64, Viewer
+arm64, deterministic package/app tests, M8 benchmark, and M9 package audit. The
+opt-in VideoToolbox BGRA and 4:2:0 encode/decode smoke passed. All four Apple
+submissions were accepted, and apps and DMGs passed stapling, Gatekeeper,
+ticket, and final package audits. Submission IDs:
+
+| Artifact | Apple submission ID | Status |
+| --- | --- | --- |
+| Host app ZIP | `913ae6a1-d835-4090-9ee2-7781774644e9` | Accepted |
+| Viewer app ZIP | `afd8265b-6561-43cc-ad34-ab23d96eadae` | Accepted |
+| Host DMG | `00f9e721-a224-4637-a47e-15e143301edb` | Accepted |
+| Viewer DMG | `f48319f3-a77b-4a22-bd15-aa3cd60850fb` | Accepted |
+
+The notarized artifacts are in `build/debug-diagnostic/`:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1041.app.zip` | `7848e964d07b30fba2003216f340c16fe919b85a677f5ea8b7725d9253e0d1f3` |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1041.dmg` | `bed5a72d0876e7cae7f4360b6245dd005d512665e6fe0026b7a4abec713ebb8a` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1041.app.zip` | `e5359e0a8db6bf86948bf3b78ea46b882a0c284486fa5a1f41f4f213f9ee9d44` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1041.dmg` | `29f673c1ed5b8491f348c11d7212de5effb4deb80938c70698a737ccd3670d66` |
+
+These are in-house Debug diagnostic artifacts, not a public release. Physical
+M3 offscreen-window selection, M10 Chinese input, and high-resolution
+performance acceptance remain pending.
 
 ### 0.2.1039 M3/M6/M7/M10 in-house Debug diagnostic artifacts
 
@@ -620,13 +659,13 @@ diagnostic artifacts, not a public release.
 | M1 | Complete | — |
 | M2 | Code gates and loopback smoke complete; operator confirms physical Bonjour/TLS works | Detailed run record not captured; no known M2 blocker |
 | M3 | Code/tests complete; operator confirms a physical Host frame appeared in Viewer | Physical offscreen-window selection/activation, permission-revocation, and selected-window lifecycle checks |
-| M4 | Deterministic gate complete; operator confirms a physical Host frame displayed | Physical resize/aspect and frame-pacing checks; codec fixture smoke is optional |
+| M4 | Deterministic gate complete; operator confirms a physical Host frame displayed; opt-in VideoToolbox smoke passes on this Mac | Physical resize/aspect and frame-pacing checks |
 | M5 | Viewer input transport gate complete | — |
 | M6 | Implementation/test gate complete | Real OS event posting (manual disposable-application test) |
 | M7 | Implementation/test gate complete | Physical two-machine clipboard walkthrough |
 | M8 | Deterministic measurement/resilience gate implemented | Physical clock-synchronized performance report |
 | M9 | Release-audit gate implemented; current `0.2.1011` notarized RC artifacts verified | Physical acceptance remains separate |
-| M10 | Production composition and pairing UI complete; Build `1039` is the current validated, Developer ID signed, Apple-notarized in-house Debug pair; previous local distribution outputs were cleared before it | Physical offscreen/background-window selection and foreground input-delivery test; full background-stream, connected-UI, clipboard, performance, and disconnect-recovery acceptance on the physical pair; the deterministic end-to-end Viewer send-race path remains unverified |
+| M10 | Production composition and pairing UI complete; Build `1041` is the current validated, Developer ID signed, Apple-notarized in-house Debug pair; previous local distribution outputs were cleared before it | Physical offscreen/background-window selection and foreground input-delivery test; full background-stream, connected-UI, clipboard, high-resolution performance, and disconnect-recovery acceptance on the physical pair; the deterministic end-to-end Viewer send-race path remains unverified |
 
 ### 0.2.1024 in-house Debug diagnostic artifacts
 
