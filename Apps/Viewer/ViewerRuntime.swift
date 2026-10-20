@@ -28,6 +28,17 @@ enum ViewerProcessControlReadiness {
     }
 }
 
+/// Which picker row stays chosen after a catalog refresh: the operator's
+/// highlighted window if it is still offered, otherwise the streaming
+/// window, otherwise the first row.
+enum ViewerWindowPickerChoice {
+    static func index(in identifiers: [UInt64], highlighted: UInt64?, selected: UInt64?) -> Int {
+        if let highlighted, let index = identifiers.firstIndex(of: highlighted) { return index }
+        if let selected, let index = identifiers.firstIndex(of: selected) { return index }
+        return 0
+    }
+}
+
 /// What pressing Select does for the window currently chosen in the picker.
 enum ViewerWindowSelectionAction: Equatable {
     /// Nothing to send: a selection is already in flight or not yet confirmed.
@@ -2758,6 +2769,9 @@ private final class ViewerContentView: NSView {
     private let retryPairingButton = NSButton(title: "Retry pairing", target: nil, action: nil)
     private let retryInputSourceButton = NSButton(title: "Retry source sync", target: nil, action: nil)
     private var windowOptions: [WindowDescriptor] = []
+    /// Whether the runtime currently allows a window selection. A catalog
+    /// refresh must not re-enable Select while a selection is in flight.
+    private var windowSelectionAllowed = true
     private var windowSelectionGeneration: UInt64?
     private(set) var windowSelectionCatalogGeneration: UInt64?
     private var hostOptionIdentifiers: [String] = []
@@ -3093,9 +3107,22 @@ private final class ViewerContentView: NSView {
         catalogGeneration: UInt64,
         selectedIdentifier: UInt64? = nil
     ) {
+        // Keep the operator's current choice across catalog refreshes. The
+        // Host republishes whenever a window title, size, or visibility
+        // changes; resetting the picker made Select send a different window.
+        let highlightedIdentifier = windowPicker.indexOfSelectedItem >= 0 &&
+            windowPicker.indexOfSelectedItem < windowOptions.count
+            ? windowOptions[windowPicker.indexOfSelectedItem].identifier
+            : nil
+        let unchanged = windows == windowOptions && !windows.isEmpty
         windowOptions = windows
         windowSelectionGeneration = generation
         windowSelectionCatalogGeneration = catalogGeneration
+        if unchanged {
+            windowPicker.isEnabled = windowSelectionAllowed
+            selectWindowButton.isEnabled = windowSelectionAllowed
+            return
+        }
         windowPicker.removeAllItems()
         if windows.isEmpty {
             windowPicker.addItem(withTitle: "No eligible Host windows")
@@ -3108,14 +3135,13 @@ private final class ViewerContentView: NSView {
             let itemTitle = "\(title) — \(window.applicationIdentifier) (\(window.width)x\(window.height))"
             windowPicker.addItem(withTitle: itemTitle)
         }
-        if let selectedIdentifier,
-           let index = windows.firstIndex(where: { $0.identifier == selectedIdentifier }) {
-            windowPicker.selectItem(at: index)
-        } else {
-            windowPicker.selectItem(at: 0)
-        }
-        windowPicker.isEnabled = true
-        selectWindowButton.isEnabled = true
+        windowPicker.selectItem(at: ViewerWindowPickerChoice.index(
+            in: windows.map(\.identifier),
+            highlighted: highlightedIdentifier,
+            selected: selectedIdentifier
+        ))
+        windowPicker.isEnabled = windowSelectionAllowed
+        selectWindowButton.isEnabled = windowSelectionAllowed
     }
 
     func setSelectedWindowIdentifier(_ identifier: UInt64) {
@@ -3128,11 +3154,15 @@ private final class ViewerContentView: NSView {
     }
 
     func setWindowSelectionEnabled(_ enabled: Bool) {
+        windowSelectionAllowed = enabled
         windowPicker.isEnabled = enabled && !windowOptions.isEmpty
         selectWindowButton.isEnabled = enabled && !windowOptions.isEmpty
     }
 
     func clearWindowOptions() {
+        // A new session starts with selection allowed again, even if the old
+        // one ended while a selection was in flight.
+        windowSelectionAllowed = true
         windowOptions.removeAll(keepingCapacity: false)
         windowSelectionGeneration = nil
         windowSelectionCatalogGeneration = nil

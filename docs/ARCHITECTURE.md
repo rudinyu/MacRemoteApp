@@ -571,6 +571,11 @@ The Viewer owns discovery results, pairing UX, session state, stream status,
 input enablement, clipboard consent, and errors. The UI must distinguish
 "connected but input disabled" from "fully authorized and controllable".
 
+A catalog refresh keeps the operator's highlighted picker row when that window
+is still offered (falling back to the streaming window, then the first row),
+does not rebuild the picker when the catalog is unchanged, and never
+re-enables Select while a selection is in flight.
+
 Select on a different window replaces the selection and restarts the stream.
 Select on the window that is already streaming re-sends the same explicit
 selection without touching the stream, decoder, or input scope; the Host

@@ -829,6 +829,27 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         XCTAssertEqual(ViewerInputStatusPresentation.readyInputSummary(), "Ready")
     }
 
+    func testCatalogRefreshKeepsTheOperatorsHighlightedWindow() {
+        // Host sorts by bundle id, so a refresh that reset the picker sent
+        // com.apple.finder instead of the WeChat window the operator chose.
+        let finder: UInt64 = 10
+        let weChat: UInt64 = 20
+        let streaming: UInt64 = 30
+        XCTAssertEqual(
+            ViewerWindowPickerChoice.index(in: [finder, weChat, streaming], highlighted: weChat, selected: streaming),
+            1
+        )
+        XCTAssertEqual(
+            ViewerWindowPickerChoice.index(in: [finder, streaming], highlighted: weChat, selected: streaming),
+            1,
+            "If the highlighted window disappeared, fall back to the streaming window."
+        )
+        XCTAssertEqual(
+            ViewerWindowPickerChoice.index(in: [finder, weChat], highlighted: nil, selected: nil),
+            0
+        )
+    }
+
     func testConnectionButtonOffersDisconnectWhileConnectedOrConnecting() {
         XCTAssertEqual(ViewerConnectionState.disconnected.buttonTitle, "Connect")
         XCTAssertEqual(ViewerConnectionState.connecting.buttonTitle, "Disconnect")
