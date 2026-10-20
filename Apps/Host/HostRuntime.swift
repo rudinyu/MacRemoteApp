@@ -156,6 +156,59 @@ enum HostRuntimeClipboardAuthorizationPolicy {
     }
 }
 
+/// A keyframe request shared between the HostRuntime actor and the capture
+/// loop. The capture loop consumes it once per frame without an actor hop.
+final class HostKeyframeRequestFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var requested = false
+
+    func request() {
+        lock.lock()
+        requested = true
+        lock.unlock()
+    }
+
+    /// Returns whether a keyframe was requested and clears the request.
+    func consume() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let wasRequested = requested
+        requested = false
+        return wasRequested
+    }
+
+    func reset() {
+        lock.lock()
+        requested = false
+        lock.unlock()
+    }
+}
+
+/// Thread-safe wrapper for a stage latency collector fed from a VideoToolbox
+/// callback thread. Only aggregate timing is ever reported.
+final class HostStageLatencyRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var collector = BoundedStageLatencyCollector()
+
+    func append(startNanoseconds: UInt64, endNanoseconds: UInt64) {
+        lock.lock()
+        collector.append(startNanoseconds: startNanoseconds, endNanoseconds: endNanoseconds)
+        lock.unlock()
+    }
+
+    func summary() -> PercentileSummary? {
+        lock.lock()
+        defer { lock.unlock() }
+        return collector.summary()
+    }
+
+    func reset() {
+        lock.lock()
+        collector.reset()
+        lock.unlock()
+    }
+}
+
 enum HostRuntimeCaptureLivenessPolicy {
     static func keepsAuthenticatedSession(for state: CaptureSessionState) -> Bool {
         switch state {
@@ -359,7 +412,12 @@ actor HostRuntime {
     /// Set when the media queue discarded video or the decoder configuration
     /// must be resent. The Viewer skips delta frames until the next keyframe,
     /// so the capture loop forces one.
-    private var keyframeRequested = false
+    /// Read by the capture loop without hopping onto this actor per frame.
+    private let keyframeRequest = HostKeyframeRequestFlag()
+    /// Capture arrival to encoder output, recorded on the VideoToolbox
+    /// callback thread, so the capture-to-send stage can be split into
+    /// encode time and send-side waiting.
+    private let captureToEncodedRecorder = HostStageLatencyRecorder()
     private var lastViewerKeyframeRequestNanoseconds: UInt64?
     /// Lowers the encoder bitrate on congestion and restores it when the
     /// path is clear. Created per video pipeline.
@@ -2123,8 +2181,9 @@ actor HostRuntime {
         self.encoder = encoder
         videoConfigSentGeneration = nil
         videoConfigSentAuthorizationGeneration = nil
-        keyframeRequested = false
+        keyframeRequest.reset()
         captureToSendCollector.reset()
+        captureToEncodedRecorder.reset()
         bitrateController = AdaptiveBitrateController(
             configuration: .standard(maximumBitrate: H264EncoderConfiguration.defaultAverageBitrate)
         )
@@ -2173,6 +2232,8 @@ actor HostRuntime {
                 )
             }
         }
+        let keyframeRequest = self.keyframeRequest
+        let captureToEncodedRecorder = self.captureToEncodedRecorder
         captureTask = Task { [weak self, weak encoder] in
             defer { relay.finish() }
             var framesSinceKeyframe = 60
@@ -2182,7 +2243,7 @@ actor HostRuntime {
 #if DEBUG
                     M10HostVideoDiagnostics.shared.recordCaptured()
 #endif
-                    let requested = await self?.consumeKeyframeRequest() ?? false
+                    let requested = keyframeRequest.consume()
                     let forceKeyframe = requested || framesSinceKeyframe >= 60
                     do {
                         try encoder.encode(
@@ -2191,6 +2252,12 @@ actor HostRuntime {
                             presentationTimestamp: frame.presentationTimestamp,
                             forceKeyframe: forceKeyframe,
                             completion: { result in
+                                if case let .success(encoded) = result {
+                                    captureToEncodedRecorder.append(
+                                        startNanoseconds: encoded.captureTimestamp,
+                                        endNanoseconds: DispatchTime.now().uptimeNanoseconds
+                                    )
+                                }
 #if DEBUG
                                 switch result {
                                 case .success:
@@ -2253,7 +2320,7 @@ actor HostRuntime {
                     // Wait for the next keyframe. Non-keyframes cannot repair
                     // a decoder after the previous epoch was invalidated, so
                     // ask for one instead of waiting for the periodic keyframe.
-                    keyframeRequested = true
+                    keyframeRequest.request()
                     return
                 }
                 try await session.send(
@@ -2287,7 +2354,7 @@ actor HostRuntime {
 #if DEBUG
                 M10HostVideoDiagnostics.shared.recordDropped()
 #endif
-                keyframeRequested = true
+                keyframeRequest.request()
                 // The Host send queue is full: the path cannot carry the
                 // current bitrate.
                 applyBitrate(
@@ -2463,6 +2530,11 @@ actor HostRuntime {
         startupLogger.notice(
             "M8 stage host-capture-to-send samples=\(summary.count, privacy: .public) p50Ns=\(summary.p50Nanoseconds, privacy: .public) p95Ns=\(summary.p95Nanoseconds, privacy: .public) budgetNs=\(budget, privacy: .public) withinBudget=\(within, privacy: .public)"
         )
+        if let encoded = captureToEncodedRecorder.summary() {
+            startupLogger.notice(
+                "M8 stage host-capture-to-encoded samples=\(encoded.count, privacy: .public) p50Ns=\(encoded.p50Nanoseconds, privacy: .public) p95Ns=\(encoded.p95Nanoseconds, privacy: .public)"
+            )
+        }
     }
 
     /// Applies a controller decision to the live encoder. Logs only the
@@ -2482,12 +2554,7 @@ actor HostRuntime {
     }
 
     private func requestKeyframe() {
-        keyframeRequested = true
-    }
-
-    private func consumeKeyframeRequest() -> Bool {
-        defer { keyframeRequested = false }
-        return keyframeRequested
+        keyframeRequest.request()
     }
 
     /// Local status-menu text only; never logged or sent to the Viewer.
@@ -2729,8 +2796,9 @@ actor HostRuntime {
         encoder = nil
         videoConfigSentGeneration = nil
         videoConfigSentAuthorizationGeneration = nil
-        keyframeRequested = false
+        keyframeRequest.reset()
         captureToSendCollector.reset()
+        captureToEncodedRecorder.reset()
         bitrateController = nil
 #if DEBUG
         M10HostVideoDiagnostics.shared.flushPendingWindow()
@@ -2749,8 +2817,9 @@ actor HostRuntime {
         encoder = nil
         videoConfigSentGeneration = nil
         videoConfigSentAuthorizationGeneration = nil
-        keyframeRequested = false
+        keyframeRequest.reset()
         captureToSendCollector.reset()
+        captureToEncodedRecorder.reset()
         bitrateController = nil
 #if DEBUG
         M10HostVideoDiagnostics.shared.flushPendingWindow()

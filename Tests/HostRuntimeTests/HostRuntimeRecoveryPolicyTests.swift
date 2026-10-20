@@ -111,6 +111,29 @@ final class HostRuntimeRecoveryPolicyTests: XCTestCase {
         )
     }
 
+    func testKeyframeRequestIsConsumedOnceAndCanBeReset() {
+        let flag = HostKeyframeRequestFlag()
+        XCTAssertFalse(flag.consume())
+        flag.request()
+        flag.request()
+        XCTAssertTrue(flag.consume(), "A pending request forces the next frame to be a keyframe.")
+        XCTAssertFalse(flag.consume(), "A request is consumed by exactly one frame.")
+        flag.request()
+        flag.reset()
+        XCTAssertFalse(flag.consume())
+    }
+
+    func testStageLatencyRecorderSummarizesAfterWarmup() {
+        let recorder = HostStageLatencyRecorder()
+        XCTAssertNil(recorder.summary())
+        for index in 0 ..< 200 {
+            recorder.append(startNanoseconds: 1_000, endNanoseconds: 1_000 + UInt64(index % 10) * 1_000_000)
+        }
+        XCTAssertNotNil(recorder.summary())
+        recorder.reset()
+        XCTAssertNil(recorder.summary())
+    }
+
     func testWindowLossEndsOnlyTheSelectionButPermissionLossEndsTheSession() {
         XCTAssertTrue(HostRuntimeCaptureLivenessPolicy.keepsSessionAfterSelectionLoss(for: .failed(.windowUnavailable)))
         XCTAssertTrue(HostRuntimeCaptureLivenessPolicy.keepsSessionAfterSelectionLoss(for: .failed(.captureFailed("x"))))

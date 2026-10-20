@@ -771,6 +771,16 @@ final class CaptureCoreTests: XCTestCase {
         )
     }
 
+    func testApplicationRegularityIsLookedUpOncePerProcessPerDiscovery() {
+        var cache = ApplicationRegularityCache(lookup: { $0 == 10 })
+        for pid in [10, 10, 20, 10, 20, 30, 30] as [Int32] {
+            _ = cache.isRegular(pid)
+        }
+        XCTAssertEqual(cache.lookupCount, 3, "Each owning process is resolved once, not once per window.")
+        XCTAssertTrue(cache.isRegular(10))
+        XCTAssertFalse(cache.isRegular(20))
+    }
+
     func testBackgroundCatalogOffersRegularAppWindowsEvenWhenUntitled() {
         XCTAssertTrue(
             WindowCandidateVisibility.permitsBackgroundCatalogWindow(

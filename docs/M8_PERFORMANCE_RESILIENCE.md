@@ -87,7 +87,13 @@ skips 60 warm-up samples, keeps at most 10,000 intervals, and stores interval
 lengths only. During a session the Host and Viewer write aggregate lines to the
 unified log about every ten seconds, for example
 `M8 stage host-capture-to-send samples=… p50Ns=… p95Ns=… budgetNs=…
-withinBudget=…`. The Host uses category `host-runtime`; the Viewer uses
+withinBudget=…`. Alongside it the Host logs `M8 stage host-capture-to-encoded`
+(capture arrival to VideoToolbox output, recorded on the encoder callback
+thread), so a slow capture-to-send stage can be attributed to encoding
+(for example thermal throttling) or to send-side waiting. The capture loop
+reads keyframe requests without an actor hop, and window discovery resolves
+each owning process's activation policy once per pass rather than per window.
+The Host uses category `host-runtime`; the Viewer uses
 `startup` and also logs `viewer-receive-to-present` and, once the clock
 estimate is eligible, `end-to-end`. These lines contain no pixels, titles,
 input, or clipboard data. The physical run should collect them with the

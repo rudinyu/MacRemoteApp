@@ -51,12 +51,14 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
             onScreenWindowsOnly: catalogQueriesOnScreenWindowsOnly
         )
         let displays = content.displays.map(Self.displayGeometry)
+        var ownerRegularity = ApplicationRegularityCache(lookup: applicationIsRegular)
         let evaluated = content.windows.compactMap {
             evaluateWindow(
                 $0,
                 displays: displays,
                 allowInactiveOffscreen: false,
-                allowBackgroundCatalogWindow: includesBackgroundWindows
+                allowBackgroundCatalogWindow: includesBackgroundWindows,
+                ownerRegularity: &ownerRegularity
             ).window
         }
         return CatalogBackgroundWindowReduction.reduce(evaluated).sorted {
@@ -181,12 +183,14 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
         var counts = ScreenRecordingWindowDiscoveryCountAccumulator()
         var windows: [CaptureWindow] = []
         windows.reserveCapacity(content.windows.count)
+        var ownerRegularity = ApplicationRegularityCache(lookup: applicationIsRegular)
         for candidate in content.windows {
             let evaluation = evaluateWindow(
                 candidate,
                 displays: displays,
                 allowInactiveOffscreen: false,
-                allowBackgroundCatalogWindow: includesBackgroundWindows
+                allowBackgroundCatalogWindow: includesBackgroundWindows,
+                ownerRegularity: &ownerRegularity
             )
             counts.record(evaluation.rejection)
             if let window = evaluation.window {
@@ -216,6 +220,25 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
         allowInactiveOffscreen: Bool = false,
         allowBackgroundCatalogWindow: Bool = false
     ) -> WindowCandidateEvaluation {
+        var ownerRegularity = ApplicationRegularityCache(lookup: applicationIsRegular)
+        return evaluateWindow(
+            window,
+            displays: displays,
+            allowActiveOffscreen: allowActiveOffscreen,
+            allowInactiveOffscreen: allowInactiveOffscreen,
+            allowBackgroundCatalogWindow: allowBackgroundCatalogWindow,
+            ownerRegularity: &ownerRegularity
+        )
+    }
+
+    private func evaluateWindow(
+        _ window: SCWindow,
+        displays: [CaptureDisplayGeometry],
+        allowActiveOffscreen: Bool = false,
+        allowInactiveOffscreen: Bool = false,
+        allowBackgroundCatalogWindow: Bool,
+        ownerRegularity: inout ApplicationRegularityCache
+    ) -> WindowCandidateEvaluation {
         let visible = WindowCandidateVisibility.permits(
             isOnScreen: window.isOnScreen,
             isActive: Self.isActive(window),
@@ -227,7 +250,7 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
                   let owner = window.owningApplication,
                   WindowCandidateVisibility.permitsBackgroundCatalogWindow(
                       title: window.title,
-                      ownerIsRegularApplication: applicationIsRegular(owner.processID)
+                      ownerIsRegularApplication: ownerRegularity.isRegular(owner.processID)
                   ) else {
                 return .rejected(.offScreen)
             }
@@ -342,6 +365,28 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
         return !helperMarkers.contains {
             name.contains($0) || identifier.contains($0)
         }
+    }
+}
+
+/// Resolves each owning process's activation policy once per discovery. A
+/// full window list holds hundreds of offscreen windows from a few dozen
+/// processes; repeating the AppKit lookup per window competed with capture
+/// and encoding on the Host every second.
+struct ApplicationRegularityCache {
+    private let lookup: (Int32) -> Bool
+    private var resolved: [Int32: Bool] = [:]
+    private(set) var lookupCount = 0
+
+    init(lookup: @escaping (Int32) -> Bool) {
+        self.lookup = lookup
+    }
+
+    mutating func isRegular(_ processIdentifier: Int32) -> Bool {
+        if let known = resolved[processIdentifier] { return known }
+        lookupCount += 1
+        let regular = lookup(processIdentifier)
+        resolved[processIdentifier] = regular
+        return regular
     }
 }
 
