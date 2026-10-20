@@ -636,7 +636,11 @@ view, not a persistent second preference. Disconnected input reads
 ### Decode and presentation path
 
 `CodecCore` wraps the VideoToolbox decoder and emits decoded frames to a
-presentation contract. The Viewer composes that contract with a Metal-backed
+presentation contract. Decoding uses VideoToolbox asynchronous decompression,
+so it never runs on the Viewer main actor; replacing or resetting the decoder
+first drains in-flight frames. The Metal renderer skips draws while the Viewer
+window is occluded or minimized instead of blocking the main thread waiting
+for a drawable. The Viewer composes that contract with a Metal-backed
 surface, preserving aspect ratio. `MetalVideoRenderer` attaches a
 `MTLDrawable` presented handler and reports `presentedTime` only after the
 drawable reaches the display handoff boundary; queue-entry time is not used as

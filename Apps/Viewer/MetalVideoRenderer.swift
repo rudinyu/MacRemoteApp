@@ -79,6 +79,11 @@ final class MetalVideoRenderer: NSObject, MTKViewDelegate {
                 lifetimeToken: activeLifetimeToken
             )
         }
+        // `currentDrawable` blocks the main thread for up to one second when
+        // no drawable is available, which happens while the window is
+        // occluded or minimized. Skip those draws; the next submitted frame
+        // redraws once the window is visible again.
+        guard view.window?.occlusionState.contains(.visible) == true else { return }
         guard let drawable = view.currentDrawable,
               let commandBuffer = commandQueue.makeCommandBuffer() else {
             return

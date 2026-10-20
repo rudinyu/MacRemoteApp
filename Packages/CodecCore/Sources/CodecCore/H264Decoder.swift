@@ -120,6 +120,7 @@ public final class H264Decoder: @unchecked Sendable {
         decoderConfiguration = configuration
         lock.unlock()
         if let oldSession {
+            VTDecompressionSessionWaitForAsynchronousFrames(oldSession)
             VTDecompressionSessionInvalidate(oldSession)
         }
         oldRequests.forEach { request in
@@ -225,10 +226,14 @@ public final class H264Decoder: @unchecked Sendable {
         pendingRequests[requestID] = request
         lock.unlock()
         let refcon = Unmanaged.passRetained(request).toOpaque()
+        // Asynchronous decompression keeps VideoToolbox work off the caller,
+        // which on the Viewer is the main actor. The encoder never reorders
+        // frames, so outputs still arrive in decode order. The completion runs
+        // on a VideoToolbox thread.
         let status = VTDecompressionSessionDecodeFrame(
             activeSession,
             sampleBuffer: sampleBuffer,
-            flags: [],
+            flags: [._EnableAsynchronousDecompression],
             frameRefcon: refcon,
             infoFlagsOut: nil
         )
@@ -260,6 +265,10 @@ public final class H264Decoder: @unchecked Sendable {
         decoderConfiguration = nil
         lock.unlock()
         if let oldSession {
+            // Let in-flight asynchronous frames finish so each retained
+            // request is claimed and released exactly once; their completions
+            // are already detached from `pendingRequests` and are ignored.
+            VTDecompressionSessionWaitForAsynchronousFrames(oldSession)
             VTDecompressionSessionInvalidate(oldSession)
         }
         requests.forEach { request in
