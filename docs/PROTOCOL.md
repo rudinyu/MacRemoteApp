@@ -226,6 +226,11 @@ mismatch stops capture and fails closed.
   1 MiB older peer keeps 1 MiB. A Host access unit that does not fit the
   negotiated limit is dropped (the Host lowers its bitrate and forces the next
   keyframe) instead of stopping the stream.
+- Stream size and rate: each side advertises its maximum video width, height,
+  and frame rate in `Capabilities`; the session uses min(Host, Viewer). The
+  Host advertises up to 3840×2160 at 60 fps, the Viewer advertises its Stream
+  quality setting (1080p60 by default), and each selection streams at that
+  negotiated bound. Peers that advertise nothing get 1920×1080 at 60 fps.
 - Keyframes: the Host can request or produce a new keyframe after stream start,
   decoder reset, or recovery.
 - Ordering: the Viewer rejects non-increasing media sequences and stale

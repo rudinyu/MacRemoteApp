@@ -994,6 +994,24 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         )
     }
 
+    func testStreamQualityDefaultsTo1080p60PersistsAndCycles() throws {
+        let suite = "ViewerStreamQualityTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        XCTAssertEqual(ViewerStreamQuality.load(from: defaults), .hd1080p60)
+        ViewerStreamQuality.qhd1440p60.save(to: defaults)
+        XCTAssertEqual(ViewerStreamQuality.load(from: defaults), .qhd1440p60)
+        defaults.set("bogus", forKey: ViewerStreamQuality.storageKey)
+        XCTAssertEqual(ViewerStreamQuality.load(from: defaults), .hd1080p60, "Unknown values fall back to the default.")
+
+        XCTAssertEqual(ViewerStreamQuality.qhd1440p60.maximumWidth, 2560)
+        XCTAssertEqual(ViewerStreamQuality.qhd1440p60.maximumHeight, 1440)
+        XCTAssertEqual(ViewerStreamQuality.uhd4k30.maximumFrameRate, 30)
+        XCTAssertEqual(ViewerStreamQuality.uhd4k60.next, .hd1080p30, "The Settings button wraps around.")
+        XCTAssertTrue(ViewerStreamQuality.allCases.allSatisfy { $0.maximumFrameRate <= 60 })
+    }
+
     func testConnectionButtonOffersDisconnectWhileConnectedOrConnecting() {
         XCTAssertEqual(ViewerConnectionState.disconnected.buttonTitle, "Connect")
         XCTAssertEqual(ViewerConnectionState.connecting.buttonTitle, "Disconnect")

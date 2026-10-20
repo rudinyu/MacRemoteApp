@@ -245,7 +245,11 @@ to return; switching pages keeps the session connected and releases any held
 remote input. Closing the remote-view window itself quits the Viewer.
 The settings page shows live connection, Host, discovery, round-trip time, input,
 and clipboard status. The text clipboard checkbox uses the same session-only
-opt-in as the main window. Settings also links to Local Network privacy controls
+opt-in as the main window. `Change stream quality` cycles the requested
+quality — 1080p, 1440p, or 4K, at 30 or 60 fps (1080p · 60 fps by default) —
+and remembers it. It applies to the next connection: press `Disconnect`, then
+`Connect`. Higher settings sharpen text but need more Host power and network
+bandwidth; 4K is experimental on older Intel Hosts and can lag or run hot. Settings also links to Local Network privacy controls
 and the confirmed pairing-reset action. Local app shortcuts such as `Command-,`,
 `Command-M`, and `Command-Q` operate the Viewer even when the remote surface is
 focused.

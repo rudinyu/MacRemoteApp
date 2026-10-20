@@ -209,6 +209,42 @@ final class HostStageLatencyRecorder: @unchecked Sendable {
     }
 }
 
+/// Stream quality for one selection. The Viewer advertises its chosen quality
+/// as the Hello/Capabilities video bound; SessionCoordinator negotiates
+/// min(Host, Viewer). Peers that advertise nothing get the V1 1080p60 default.
+enum HostStreamQuality {
+    /// The highest quality this Host advertises. 4K is offered for an
+    /// explicit, experimental Viewer setting; 60 fps is the frame-rate ceiling.
+    static let hostMaximumWidth: UInt32 = 3840
+    static let hostMaximumHeight: UInt32 = 2160
+    static let hostMaximumFrameRate: UInt16 = 60
+
+    static let defaultLimits = CaptureOutputLimits(maximumWidth: 1920, maximumHeight: 1080, frameRate: 60)
+
+    static func limits(
+        negotiatedWidth: UInt32?,
+        negotiatedHeight: UInt32?,
+        negotiatedFrameRate: UInt16?
+    ) -> CaptureOutputLimits {
+        CaptureOutputLimits(
+            maximumWidth: min(negotiatedWidth ?? defaultLimits.maximumWidth, hostMaximumWidth),
+            maximumHeight: min(negotiatedHeight ?? defaultLimits.maximumHeight, hostMaximumHeight),
+            frameRate: min(negotiatedFrameRate ?? defaultLimits.frameRate, hostMaximumFrameRate)
+        )
+    }
+
+    /// Average bitrate scaled from the 16 Mbps 1080p60 baseline by encoded
+    /// pixel rate. Bitrate need grows more slowly than pixel rate, so the
+    /// scale is sub-linear; the result is clamped to 4–60 Mbps.
+    static func averageBitrate(width: UInt32, height: UInt32, frameRate: UInt16) -> UInt32 {
+        let baselinePixelRate = 1920.0 * 1080.0 * 60.0
+        let pixelRate = Double(width) * Double(height) * Double(frameRate)
+        guard pixelRate.isFinite, pixelRate > 0 else { return H264EncoderConfiguration.defaultAverageBitrate }
+        let scaled = Double(H264EncoderConfiguration.defaultAverageBitrate) * pow(pixelRate / baselinePixelRate, 0.75)
+        return UInt32(min(60_000_000, max(4_000_000, scaled.rounded())))
+    }
+}
+
 enum HostVideoFramePolicy {
     /// Bytes reserved for the VideoFrame fields around the access unit.
     static let messageOverheadBytes = 256
@@ -1004,12 +1040,13 @@ actor HostRuntime {
                 deviceName: configuration.serviceName,
                 capabilities: Self.capabilities,
                 mandatoryCapabilities: [.pingPong],
-                // Advertise the CaptureCore pixel cap; SessionCoordinator
+                // Advertise what this Host can encode; SessionCoordinator
                 // rejects any StreamConfig/VideoFrame above the negotiated
-                // min(Host, Viewer) bound.
-                maxVideoWidth: CaptureConfiguration.default.maximumWidth,
-                maxVideoHeight: CaptureConfiguration.default.maximumHeight,
-                maxFrameRate: 60
+                // min(Host, Viewer) bound, and each selection streams at that
+                // bound (the Viewer's quality setting).
+                maxVideoWidth: HostStreamQuality.hostMaximumWidth,
+                maxVideoHeight: HostStreamQuality.hostMaximumHeight,
+                maxFrameRate: HostStreamQuality.hostMaximumFrameRate
             ),
             transport: transport,
             pairingCoordinator: pairingCoordinator
@@ -2052,7 +2089,13 @@ actor HostRuntime {
                 )
             }
         }
-        try await captureSession.start(window: captureTarget)
+        let qualitySnapshot = await session.snapshot()
+        let streamLimits = HostStreamQuality.limits(
+            negotiatedWidth: qualitySnapshot.negotiatedMaxVideoWidth,
+            negotiatedHeight: qualitySnapshot.negotiatedMaxVideoHeight,
+            negotiatedFrameRate: qualitySnapshot.negotiatedMaxFrameRate
+        )
+        try await captureSession.start(window: captureTarget, outputLimits: streamLimits)
         let captureSnapshot = await captureSession.snapshot()
         // CaptureCore owns its internal engine generation. It advances that
         // value on every restart, including a same-session window switch. The
@@ -2176,13 +2219,18 @@ actor HostRuntime {
 
         // `dimensions` is the pixel size the capture engine was configured
         // with for this generation (backing scale applied, fit to the cap).
+        let streamBitrate = HostStreamQuality.averageBitrate(
+            width: dimensions.width,
+            height: dimensions.height,
+            frameRate: streamLimits.frameRate
+        )
         let encoder = try H264Encoder(
             configuration: H264EncoderConfiguration(
                 width: dimensions.width,
                 height: dimensions.height,
-                frameRate: 60,
-                averageBitrate: H264EncoderConfiguration.defaultAverageBitrate,
-                keyframeInterval: 60,
+                frameRate: streamLimits.frameRate,
+                averageBitrate: streamBitrate,
+                keyframeInterval: UInt32(streamLimits.frameRate),
                 maxInFlightFrames: 2
             )
         )
@@ -2194,14 +2242,14 @@ actor HostRuntime {
         captureToSendCollector.reset()
         captureToEncodedRecorder.reset()
         bitrateController = AdaptiveBitrateController(
-            configuration: .standard(maximumBitrate: H264EncoderConfiguration.defaultAverageBitrate)
+            configuration: .standard(maximumBitrate: streamBitrate)
         )
         try await session.send(
             .streamConfig(
                 StreamConfigMessage(
                     width: dimensions.width,
                     height: dimensions.height,
-                    frameRate: 60,
+                    frameRate: streamLimits.frameRate,
                     codec: .h264,
                     generation: generation
                 )

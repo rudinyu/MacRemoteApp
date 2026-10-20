@@ -320,6 +320,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var inputSourceRetryGate = ViewerInputSourceRetryGate()
     private var inputSourceSyncTimeoutTask: Task<Void, Never>?
     private var inputSourceFollowViewer = true
+    private var streamQuality = ViewerStreamQuality.load()
     private var inputSourceSyncCapabilityAvailable = false
     private var remoteSurfaceFocused = false
     private var inputSourceSyncStatus = "Waiting for remote keyboard"
@@ -512,7 +513,8 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         .init("filter", "Host filter", configuration.hostName ?? "All LAN Hosts"),
                         .init("pairing", "Trust", configuration.peerCertificateURL == nil ? "Pairing saved in Keychain" : "Pinned certificate override"),
                         .init("reconnect", "Reconnect", "Automatic for the selected Host"),
-                        .init("clipboard", "Text clipboard")
+                        .init("clipboard", "Text clipboard"),
+                        .init("streamQuality", "Stream quality")
                     ])
                 ]
             )
@@ -530,6 +532,10 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self?.retryInputSourceSynchronization()
             }
             controller.addNote("Input-source following matches enabled English or Chinese TIS sources. Both Macs need the same enabled Chinese method; some third-party IME internal modes require manual matching.")
+            controller.addAction("streamQuality", title: "Change stream quality") { [weak self] in
+                self?.cycleStreamQuality()
+            }
+            controller.addNote("Stream quality is the highest size and frame rate the Viewer asks for; the Host may stream lower. A change applies to the next connection — press Disconnect, then Connect. 4K is experimental on older Intel Hosts and can lag or run hot.")
             controller.addAction("network", title: "Local Network Settings…") {
                 ViewerStartupOnboarding.openLocalNetworkSettings()
             }
@@ -557,6 +563,17 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         settingsView.setValue(inputSourceSyncStatus, for: "inputSource")
         settingsView.setAction("followInputSource", enabled: true, checked: inputSourceFollowViewer)
         settingsView.setAction("retryInputSource", enabled: contentView.inputSourceRetryAvailable)
+        settingsView.setValue(streamQuality.label, for: "streamQuality")
+        settingsView.setAction("streamQuality", enabled: true)
+    }
+
+    private func cycleStreamQuality() {
+        streamQuality = streamQuality.next
+        streamQuality.save()
+        refreshSettings()
+        if session != nil {
+            setStatus("Stream quality \(streamQuality.label) applies to the next connection")
+        }
     }
 
     private func makeWindow() {
@@ -757,9 +774,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     deviceName: Self.localDeviceName,
                     capabilities: Self.capabilities,
                     mandatoryCapabilities: [.pingPong],
-                    maxVideoWidth: 1920,
-                    maxVideoHeight: 1080,
-                    maxFrameRate: 60
+                    maxVideoWidth: streamQuality.maximumWidth,
+                    maxVideoHeight: streamQuality.maximumHeight,
+                    maxFrameRate: streamQuality.maximumFrameRate
                 ),
                 transport: transport,
                 pairingCoordinator: pairingCoordinator

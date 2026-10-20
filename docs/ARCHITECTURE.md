@@ -347,8 +347,14 @@ does not grant permission or mutate trust independently.
 the selected window rather than the whole display. It emits pixel frames with
 a Host monotonic capture-arrival timestamp and a separate media presentation
 timestamp, plus capture-state transitions. Output is sized in pixels at the
-window's display backing scale and fit to the negotiated 1920×1080 cap; the
-size is fixed per capture generation. The discovery picker may remain limited
+window's display backing scale and fit to the negotiated pixel cap; the
+size is fixed per capture generation. Each selection carries
+`CaptureOutputLimits` from the negotiated stream quality (the Viewer's Stream
+quality setting bounded by the Host's 3840×2160 at 60 fps, 1920×1080 at 60 fps
+when a peer advertises nothing); they replace the pixel cap and frame rate for
+every engine in that selection, and the Host scales the encoder frame rate,
+keyframe interval, and bitrate (sub-linearly from 16 Mbps at 1080p60, clamped
+to 4–60 Mbps) to match. The discovery picker may remain limited
 to on-screen windows, but selected-window refresh and engine resolution query
 the full ScreenCaptureKit catalog. `isOnScreen` reports onscreen status, while
 `SCWindow.isActive` reports whether the window is currently streaming and may

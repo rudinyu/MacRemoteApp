@@ -605,7 +605,30 @@ public protocol WindowCaptureEngine: AnyObject, Sendable {
     var frames: AsyncThrowingStream<CapturedFrame, Error> { get }
 
     func start(window: CaptureWindow, generation: UInt64) async throws
+    /// Starts with per-selection output limits (negotiated stream quality).
+    func start(window: CaptureWindow, generation: UInt64, outputLimits: CaptureOutputLimits?) async throws
     func stop() async
+}
+
+public extension WindowCaptureEngine {
+    /// Engines that size their own output ignore per-selection limits.
+    func start(window: CaptureWindow, generation: UInt64, outputLimits: CaptureOutputLimits?) async throws {
+        try await start(window: window, generation: generation)
+    }
+}
+
+/// The negotiated stream quality for one selection: an encoded-pixel bound
+/// and a frame-rate bound applied on top of the base capture configuration.
+public struct CaptureOutputLimits: Equatable, Sendable {
+    public let maximumWidth: UInt32
+    public let maximumHeight: UInt32
+    public let frameRate: UInt16
+
+    public init(maximumWidth: UInt32, maximumHeight: UInt32, frameRate: UInt16) {
+        self.maximumWidth = max(1, maximumWidth)
+        self.maximumHeight = max(1, maximumHeight)
+        self.frameRate = max(1, frameRate)
+    }
 }
 
 public protocol WindowCaptureEngineFactory: Sendable {
@@ -648,6 +671,23 @@ public struct CaptureConfiguration: Equatable, Sendable {
         self.monitorIntervalNanoseconds = monitorIntervalNanoseconds
         self.outputBufferCount = outputBufferCount
         self.pixelFormat = pixelFormat
+    }
+
+    /// This configuration with the output bound and frame rate replaced by
+    /// negotiated per-selection limits; `nil` keeps the base values.
+    public func applying(_ limits: CaptureOutputLimits?) -> CaptureConfiguration {
+        guard let limits else { return self }
+        return CaptureConfiguration(
+            maximumWidth: limits.maximumWidth,
+            maximumHeight: limits.maximumHeight,
+            minimumWindowWidth: minimumWindowWidth,
+            minimumWindowHeight: minimumWindowHeight,
+            frameRate: limits.frameRate,
+            queueDepth: queueDepth,
+            monitorIntervalNanoseconds: monitorIntervalNanoseconds,
+            outputBufferCount: outputBufferCount,
+            pixelFormat: pixelFormat
+        )
     }
 
     /// Reject macOS helper/service surfaces that are technically on-screen

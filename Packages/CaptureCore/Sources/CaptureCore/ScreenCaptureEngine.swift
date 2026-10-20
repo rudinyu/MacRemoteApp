@@ -30,6 +30,15 @@ public final class ScreenCaptureEngine: NSObject, WindowCaptureEngine, SCStreamO
     }
 
     public func start(window: CaptureWindow, generation: UInt64) async throws {
+        try await start(window: window, generation: generation, outputLimits: nil)
+    }
+
+    public func start(
+        window: CaptureWindow,
+        generation: UInt64,
+        outputLimits: CaptureOutputLimits?
+    ) async throws {
+        let configuration = self.configuration.applying(outputLimits)
         let alreadyStarted = lock.withLock { stream != nil }
         guard !alreadyStarted else {
             throw CaptureCoreError.alreadyCapturing

@@ -47,7 +47,7 @@ mouse and keyboard interaction, and text clipboard exchange.
 | Viewer hardware | Apple Silicon Mac |
 | Network | Same trusted LAN; no Internet traversal requirement |
 | Platform APIs | Swift 6, ScreenCaptureKit, VideoToolbox, Metal, Network.framework, CoreGraphics, Accessibility APIs |
-| Video | H.264, target 1080p, up to 60 fps |
+| Video | H.264, target 1080p, up to 60 fps by default; the Viewer Stream quality setting can request 1440p or experimental 4K, at 30 or 60 fps |
 | Interaction | Mouse, keyboard, and text clipboard |
 | Connection | Explicit discovery, pairing, authentication, and session authorization |
 
@@ -295,7 +295,7 @@ has already verified them.
 | Metric | Target and measurement rule |
 | --- | --- |
 | Resolution | Support a 1920×1080 capture/display configuration when the selected window and hardware permit it; negotiate a lower size when necessary. Dimensions are encoded pixels: the Host captures at the window's backing scale (Retina = 2 pixels per point) and downscales with preserved aspect ratio to fit 1920×1080 pixels; see [the M3 output resolution policy](M3_CAPTURE.md#output-resolution-policy). |
-| Frame rate | Target 60 fps on the LAN path; provide a stable 30 fps fallback when the target cannot be sustained. Measure delivered frames over a defined 30-second window. |
+| Frame rate | Target 60 fps on the LAN path; provide a stable 30 fps fallback when the target cannot be sustained. Measure delivered frames over a defined 30-second window. The Viewer Stream quality setting (1080p/1440p/4K at 30 or 60 fps; 1080p60 by default) sets the requested bound; the Host streams at min(Host, Viewer), at most 3840×2160 and 60 fps. 4K is experimental on Intel Hosts. |
 | End-to-end latency | Target p95 under 50 ms from a Host capture timestamp to the corresponding Viewer presentation timestamp on a controlled LAN benchmark. Report p50 and p95, not only an average. Before sampling, exchange authenticated monotonic-clock timestamps over at least 20 Ping/Pong probes; estimate clock offset from the minimum-RTT sample and report the residual offset uncertainty and drift. Exclude warm-up samples, measure for 30 seconds with at least 1,000 valid frame samples, and mark one-way latency unverified when clock uncertainty exceeds 5 ms. |
 | Interaction latency | Measure input send-to-observable-result on a documented test app; report p50/p95 and conditions. |
 | Backpressure | A slow Viewer must not cause unbounded Host capture, encode, or memory queues. Prefer a recent frame over stale frames. |

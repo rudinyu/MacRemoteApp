@@ -111,6 +111,33 @@ final class HostRuntimeRecoveryPolicyTests: XCTestCase {
         )
     }
 
+    func testStreamQualityDefaultsTo1080p60AndClampsToTheHostMaximum() {
+        XCTAssertEqual(
+            HostStreamQuality.limits(negotiatedWidth: nil, negotiatedHeight: nil, negotiatedFrameRate: nil),
+            CaptureOutputLimits(maximumWidth: 1920, maximumHeight: 1080, frameRate: 60),
+            "Peers that advertise nothing keep the V1 default."
+        )
+        XCTAssertEqual(
+            HostStreamQuality.limits(negotiatedWidth: 2560, negotiatedHeight: 1440, negotiatedFrameRate: 60),
+            CaptureOutputLimits(maximumWidth: 2560, maximumHeight: 1440, frameRate: 60)
+        )
+        XCTAssertEqual(
+            HostStreamQuality.limits(negotiatedWidth: 7680, negotiatedHeight: 4320, negotiatedFrameRate: 120),
+            CaptureOutputLimits(maximumWidth: 3840, maximumHeight: 2160, frameRate: 60),
+            "The Host never streams above what it advertised."
+        )
+    }
+
+    func testStreamBitrateScalesWithPixelRateWithinBounds() {
+        XCTAssertEqual(HostStreamQuality.averageBitrate(width: 1920, height: 1080, frameRate: 60), 16_000_000)
+        let qhd = HostStreamQuality.averageBitrate(width: 2560, height: 1440, frameRate: 60)
+        XCTAssertGreaterThan(qhd, 16_000_000)
+        XCTAssertLessThan(qhd, 28_500_000, "Bitrate grows more slowly than pixel rate.")
+        XCTAssertLessThan(HostStreamQuality.averageBitrate(width: 1920, height: 1080, frameRate: 30), 16_000_000)
+        XCTAssertEqual(HostStreamQuality.averageBitrate(width: 7680, height: 4320, frameRate: 60), 60_000_000)
+        XCTAssertEqual(HostStreamQuality.averageBitrate(width: 320, height: 200, frameRate: 30), 4_000_000)
+    }
+
     func testOversizeVideoFramesAreDetectedAgainstTheNegotiatedLimit() {
         XCTAssertTrue(HostVideoFramePolicy.fits(accessUnitBytes: 500_000, payloadLimit: 1_048_576))
         XCTAssertFalse(HostVideoFramePolicy.fits(accessUnitBytes: 1_048_576, payloadLimit: 1_048_576))

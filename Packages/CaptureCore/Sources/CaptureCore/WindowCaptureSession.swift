@@ -8,6 +8,9 @@ public actor WindowCaptureSession {
     private let windowProvider: any WindowDiscoveryProvider
     private let engineFactory: any WindowCaptureEngineFactory
     private let configuration: CaptureConfiguration
+    /// Negotiated stream quality for the current selection, applied to the
+    /// output size and frame rate of every engine in that selection.
+    private var outputLimits: CaptureOutputLimits?
 
     private var state: CaptureSessionState = .idle
     private var selectedWindow: CaptureWindow?
@@ -82,6 +85,7 @@ public actor WindowCaptureSession {
 
     public func start(windowIdentifier: UInt64) async throws {
         prepareForStart()
+        outputLimits = nil
         permission = await windowProvider.permissionState()
         guard permission == .authorized else {
             throw CaptureCoreError.permissionDenied
@@ -104,8 +108,12 @@ public actor WindowCaptureSession {
     /// catalog generations. This rechecks the same owner through the full
     /// ScreenCaptureKit catalog, even if the app became inactive after the
     /// Viewer selected it.
-    public func start(window expectedWindow: CaptureWindow) async throws {
+    public func start(
+        window expectedWindow: CaptureWindow,
+        outputLimits: CaptureOutputLimits? = nil
+    ) async throws {
         prepareForStart()
+        self.outputLimits = outputLimits
         permission = await windowProvider.permissionState()
         guard permission == .authorized else {
             throw CaptureCoreError.permissionDenied
@@ -160,7 +168,7 @@ public actor WindowCaptureSession {
         captureRestartAttempts = 0
         // The engine sizes its stream from this same window value, so the
         // dimensions are pinned here for the whole generation.
-        outputDimensions = configuration.outputDimensions(for: window)
+        outputDimensions = configuration.applying(outputLimits).outputDimensions(for: window)
         state = .starting(windowIdentifier: window.identifier, generation: sessionGeneration)
         engine = newEngine
         startRelay(
@@ -170,7 +178,7 @@ public actor WindowCaptureSession {
         )
 
         do {
-            try await newEngine.start(window: window, generation: sessionGeneration)
+            try await newEngine.start(window: window, generation: sessionGeneration, outputLimits: outputLimits)
         } catch {
             guard owns(engine: newEngine, windowIdentifier: window.identifier, generation: sessionGeneration) else {
                 await newEngine.stop()
@@ -514,7 +522,7 @@ public actor WindowCaptureSession {
         )
 
         do {
-            try await newEngine.start(window: engineWindow, generation: recoveryGeneration)
+            try await newEngine.start(window: engineWindow, generation: recoveryGeneration, outputLimits: outputLimits)
         } catch {
             guard isRecovering(generation: recoveryGeneration),
                   let currentEngine = engine,

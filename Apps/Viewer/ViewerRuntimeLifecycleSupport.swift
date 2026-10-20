@@ -871,3 +871,67 @@ final class ViewerHostInputSourceTargetProvider: InputSourceProvider, @unchecked
         base.selectInputSource(descriptor, validatingImmediatelyBeforeSelection: isStillEligible)
     }
 }
+
+/// The Viewer's requested stream quality. It is advertised as the session's
+/// video bound; the Host streams at min(Host, Viewer). 4K is experimental on
+/// older Intel Hosts. A change applies to the next connection.
+enum ViewerStreamQuality: String, CaseIterable, Equatable, Sendable {
+    case hd1080p30
+    case hd1080p60
+    case qhd1440p30
+    case qhd1440p60
+    case uhd4k30
+    case uhd4k60
+
+    static let storageKey = "ViewerStreamQuality"
+    static let defaultQuality: ViewerStreamQuality = .hd1080p60
+
+    var maximumWidth: UInt32 {
+        switch self {
+        case .hd1080p30, .hd1080p60: 1920
+        case .qhd1440p30, .qhd1440p60: 2560
+        case .uhd4k30, .uhd4k60: 3840
+        }
+    }
+
+    var maximumHeight: UInt32 {
+        switch self {
+        case .hd1080p30, .hd1080p60: 1080
+        case .qhd1440p30, .qhd1440p60: 1440
+        case .uhd4k30, .uhd4k60: 2160
+        }
+    }
+
+    var maximumFrameRate: UInt16 {
+        switch self {
+        case .hd1080p30, .qhd1440p30, .uhd4k30: 30
+        case .hd1080p60, .qhd1440p60, .uhd4k60: 60
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .hd1080p30: "1080p · 30 fps"
+        case .hd1080p60: "1080p · 60 fps"
+        case .qhd1440p30: "1440p · 30 fps"
+        case .qhd1440p60: "1440p · 60 fps"
+        case .uhd4k30: "4K · 30 fps (experimental)"
+        case .uhd4k60: "4K · 60 fps (experimental)"
+        }
+    }
+
+    /// The next option, wrapping around, for the Settings cycle button.
+    var next: ViewerStreamQuality {
+        let all = Self.allCases
+        let index = all.firstIndex(of: self) ?? 0
+        return all[(index + 1) % all.count]
+    }
+
+    static func load(from defaults: UserDefaults = .standard) -> ViewerStreamQuality {
+        defaults.string(forKey: storageKey).flatMap(ViewerStreamQuality.init(rawValue:)) ?? defaultQuality
+    }
+
+    func save(to defaults: UserDefaults = .standard) {
+        defaults.set(rawValue, forKey: Self.storageKey)
+    }
+}
