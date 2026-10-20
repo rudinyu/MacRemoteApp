@@ -1880,6 +1880,16 @@ actor HostRuntime {
         M10HostVideoDiagnostics.shared.beginWindow()
 #endif
         captureRecoveryStatusActive = false
+        if !window.isOnScreen {
+            // A background catalog entry (minimized, hidden app, another
+            // Space) has nothing visible to capture yet. The explicit Viewer
+            // selection permits the same bounded reveal and activation used
+            // for foreground restore; capture still starts if it is refused.
+            let revealed = await bringSelectedApplicationToForeground(window)
+            startupLogger.notice(
+                "Host revealed an offscreen selected window before capture (confirmed: \(revealed, privacy: .public))"
+            )
+        }
         try await captureSession.start(window: window)
         let captureSnapshot = await captureSession.snapshot()
         // CaptureCore owns its internal engine generation. It advances that

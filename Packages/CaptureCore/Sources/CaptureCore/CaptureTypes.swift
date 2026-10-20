@@ -148,6 +148,10 @@ public struct CaptureWindow: Equatable, Sendable {
     public let backingScaleFactor: Double
     public let processIdentifier: Int32
     public let eligible: Bool
+    /// WindowServer visibility when the catalog was read. An offscreen
+    /// selected window (minimized, hidden app, another Space) is revealed and
+    /// activated before capture starts.
+    public let isOnScreen: Bool
 
     public init(
         identifier: UInt64,
@@ -157,7 +161,8 @@ public struct CaptureWindow: Equatable, Sendable {
         bounds: WindowBounds,
         backingScaleFactor: Double = 1,
         processIdentifier: Int32,
-        eligible: Bool
+        eligible: Bool,
+        isOnScreen: Bool = true
     ) {
         self.identifier = identifier
         self.applicationIdentifier = applicationIdentifier
@@ -167,6 +172,7 @@ public struct CaptureWindow: Equatable, Sendable {
         self.backingScaleFactor = CaptureBackingScale.sanitized(backingScaleFactor)
         self.processIdentifier = processIdentifier
         self.eligible = eligible
+        self.isOnScreen = isOnScreen
     }
 
     /// Window IDs can be reused by WindowServer. These fields identify the

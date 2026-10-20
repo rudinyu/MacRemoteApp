@@ -10,15 +10,16 @@ Host; this is deliberately not a full remote-desktop product.
 Milestone state and open evidence gaps are tracked in one place:
 [`docs/STATUS.md`](docs/STATUS.md).
 
-Build `0.2.1033` is the current in-house beta test pair in `build/beta/`.
-Host and Viewer are Developer ID signed, Apple notarized and stapled, and
-passed the release audit. It includes the M6 Host input-cost and pointer
-semantics changes, plus Viewer re-selection for same-window foreground
-recovery. Full local validation and the clean beta release gate passed;
-physical two-Mac input-receipt testing remains pending. See
-[`docs/STATUS.md`](docs/STATUS.md) for artifact hashes, Apple submission IDs,
-and remaining acceptance evidence. The last public signed and notarized test
-release is still the `0.2.1011` RC in `build/rc/`.
+Build `0.2.1037` is the current in-house M10 Debug diagnostic pair in
+`build/debug-diagnostic/`. Host and Viewer are Developer ID signed, Apple
+notarized and stapled, and passed the package audit. Full `.codex/ci.sh`
+validation passed. This build adds selection of titled offscreen windows from
+regular apps; explicit selection requests that the Host reveal and foreground
+the app before capture, while the existing input authorization checks remain
+independent. Physical offscreen-selection and full two-Mac input/recovery
+acceptance remain pending. Earlier local build outputs were cleared before
+creating this pair. See [`docs/STATUS.md`](docs/STATUS.md) for artifact hashes,
+Apple submission IDs, and remaining acceptance evidence.
 
 P6 remains an explicit extension to foreground-only input authorization;
 secure-input, system-authentication-dialog, lock, session, target, permission,

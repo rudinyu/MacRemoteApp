@@ -743,6 +743,46 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertNotNil(exhausted, "recovery must stop after the configured retry budget")
     }
 
+    func testBackgroundCatalogOffersOnlyTitledWindowsOfRegularApps() {
+        XCTAssertTrue(
+            WindowCandidateVisibility.permitsBackgroundCatalogWindow(
+                title: "Quarterly report",
+                ownerIsRegularApplication: true
+            ),
+            "A minimized or other-Space document window of a regular app must be selectable."
+        )
+        XCTAssertFalse(
+            WindowCandidateVisibility.permitsBackgroundCatalogWindow(title: nil, ownerIsRegularApplication: true),
+            "Untitled offscreen windows are usually invisible utility surfaces."
+        )
+        XCTAssertFalse(
+            WindowCandidateVisibility.permitsBackgroundCatalogWindow(title: "   ", ownerIsRegularApplication: true)
+        )
+        XCTAssertFalse(
+            WindowCandidateVisibility.permitsBackgroundCatalogWindow(
+                title: "Agent panel",
+                ownerIsRegularApplication: false
+            ),
+            "Offscreen windows of agent or accessory apps are not offered."
+        )
+    }
+
+    func testCaptureWindowDefaultsToOnScreenAndRecordsBackgroundVisibility() {
+        let visible = makeWindow(identifier: 51)
+        XCTAssertTrue(visible.isOnScreen)
+        let background = CaptureWindow(
+            identifier: 52,
+            applicationIdentifier: visible.applicationIdentifier,
+            title: "Minimized document",
+            bounds: visible.bounds,
+            processIdentifier: visible.processIdentifier,
+            eligible: true,
+            isOnScreen: false
+        )
+        XCTAssertFalse(background.isOnScreen)
+        XCTAssertTrue(background.eligible)
+    }
+
     func testWindowExistenceRequiresSameNumberAndLiveSameOwner() {
         let window = makeWindow(identifier: 41)
         let record: [String: Any] = [

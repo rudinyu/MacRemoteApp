@@ -234,6 +234,9 @@ whole-desktop default capture, background/locked-screen control.
 ### Exit criteria
 
 - The Host can list eligible windows and start/stop capture for one selection.
+- The catalog can offer titled offscreen windows of regular apps. Explicit
+  selection requests bounded reveal/activation before capture without
+  authorizing input.
 - Window close, selection change, permission loss, and capture failure cancel
   the capture safely and produce explicit state.
 - Capture output is bounded and testable with a fake capture provider.
@@ -243,6 +246,9 @@ whole-desktop default capture, background/locked-screen control.
 
 - Unit tests using fake window/capture providers.
 - Manual Host test with Screen Recording permission granted and revoked.
+- Physical selection of a minimized, hidden, or other-Space regular-app window;
+  verify the app is revealed before capture and that input remains separately
+  gated by its authorization checks.
 - Verify selected-window identity changes and lifecycle cancellation.
 - Record actual supported OS/hardware behavior separately from mocked tests.
 

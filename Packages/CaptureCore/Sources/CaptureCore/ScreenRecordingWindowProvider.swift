@@ -1,17 +1,34 @@
 @preconcurrency import ScreenCaptureKit
+import AppKit
 import CoreGraphics
 import Foundation
 
 public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unchecked Sendable {
     private let onScreenWindowsOnly: Bool
+    private let includesBackgroundWindows: Bool
     private let configuration: CaptureConfiguration
+    private let applicationIsRegular: @Sendable (Int32) -> Bool
 
+    /// - Parameter includesBackgroundWindows: Also offer titled windows of
+    ///   regular apps that are offscreen (minimized, hidden app, another Space,
+    ///   or a full-screen Space). Selecting one reveals and activates it.
     public init(
         onScreenWindowsOnly: Bool = true,
+        includesBackgroundWindows: Bool = true,
         configuration: CaptureConfiguration = .default
     ) {
         self.onScreenWindowsOnly = onScreenWindowsOnly
+        self.includesBackgroundWindows = includesBackgroundWindows
         self.configuration = configuration
+        self.applicationIsRegular = { processIdentifier in
+            NSRunningApplication(processIdentifier: pid_t(processIdentifier))?
+                .activationPolicy == .regular
+        }
+    }
+
+    /// Background windows are only discoverable from the full window list.
+    private var catalogQueriesOnScreenWindowsOnly: Bool {
+        onScreenWindowsOnly && !includesBackgroundWindows
     }
 
     public func permissionState() async -> CapturePermissionState {
@@ -31,14 +48,15 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
 
         let content = try await SCShareableContent.excludingDesktopWindows(
             true,
-            onScreenWindowsOnly: onScreenWindowsOnly
+            onScreenWindowsOnly: catalogQueriesOnScreenWindowsOnly
         )
         let displays = content.displays.map(Self.displayGeometry)
         return content.windows.compactMap {
             evaluateWindow(
                 $0,
                 displays: displays,
-                allowInactiveOffscreen: false
+                allowInactiveOffscreen: false,
+                allowBackgroundCatalogWindow: includesBackgroundWindows
             ).window
         }.sorted {
             if $0.applicationIdentifier == $1.applicationIdentifier {
@@ -156,7 +174,7 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
 
         let content = try await SCShareableContent.excludingDesktopWindows(
             true,
-            onScreenWindowsOnly: onScreenWindowsOnly
+            onScreenWindowsOnly: catalogQueriesOnScreenWindowsOnly
         )
         let displays = content.displays.map(Self.displayGeometry)
         var counts = ScreenRecordingWindowDiscoveryCountAccumulator()
@@ -166,7 +184,8 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
             let evaluation = evaluateWindow(
                 candidate,
                 displays: displays,
-                allowInactiveOffscreen: false
+                allowInactiveOffscreen: false,
+                allowBackgroundCatalogWindow: includesBackgroundWindows
             )
             counts.record(evaluation.rejection)
             if let window = evaluation.window {
@@ -190,15 +209,24 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
         _ window: SCWindow,
         displays: [CaptureDisplayGeometry],
         allowActiveOffscreen: Bool = false,
-        allowInactiveOffscreen: Bool = false
+        allowInactiveOffscreen: Bool = false,
+        allowBackgroundCatalogWindow: Bool = false
     ) -> WindowCandidateEvaluation {
-        guard WindowCandidateVisibility.permits(
+        let visible = WindowCandidateVisibility.permits(
             isOnScreen: window.isOnScreen,
             isActive: Self.isActive(window),
             allowsActiveOffscreen: allowActiveOffscreen,
             allowsInactiveOffscreen: allowInactiveOffscreen
-        ) else {
-            return .rejected(.offScreen)
+        )
+        if !visible {
+            guard allowBackgroundCatalogWindow,
+                  let owner = window.owningApplication,
+                  WindowCandidateVisibility.permitsBackgroundCatalogWindow(
+                      title: window.title,
+                      ownerIsRegularApplication: applicationIsRegular(owner.processID)
+                  ) else {
+                return .rejected(.offScreen)
+            }
         }
         guard window.windowLayer == 0 else { return .rejected(.nonBaseLayer) }
         guard let application = window.owningApplication else {
@@ -245,7 +273,8 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
                     displays: displays
                 ),
                 processIdentifier: application.processID,
-                eligible: true
+                eligible: true,
+                isOnScreen: window.isOnScreen
             )
         )
     }
@@ -320,6 +349,24 @@ enum WindowCandidateVisibility {
         allowsInactiveOffscreen: Bool
     ) -> Bool {
         isOnScreen || allowsInactiveOffscreen || (allowsActiveOffscreen && isActive)
+    }
+
+    /// Whether an offscreen window may be offered in the selection catalog.
+    /// Minimized windows, hidden apps, and windows on another Space or in a
+    /// full-screen Space are offscreen but are real user documents; an
+    /// explicit selection reveals and activates them. Untitled offscreen
+    /// windows and windows of non-regular (agent/accessory) apps are commonly
+    /// invisible utility surfaces and are not offered.
+    static func permitsBackgroundCatalogWindow(
+        title: String?,
+        ownerIsRegularApplication: Bool
+    ) -> Bool {
+        guard ownerIsRegularApplication,
+              let title = title?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty else {
+            return false
+        }
+        return true
     }
 }
 

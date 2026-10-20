@@ -96,8 +96,12 @@ available on every macOS version.
 
 1. The Host lists eligible local applications/windows after Screen Recording
    authorization.
-2. The Operator selects one window.
-3. The Host starts a stream for that window only.
+2. The Operator selects one window. The catalog may include titled offscreen
+   windows of regular apps; selecting one asks the Host to reveal and foreground
+   that app before capture.
+3. The Host starts a stream for that window only. Selection and foreground
+   activation do not authorize input; the existing independent input checks
+   still apply.
 4. The Viewer displays the remote content with a visible connection and stream
    status.
 5. The Operator may stop the session or explicitly change the selected window;

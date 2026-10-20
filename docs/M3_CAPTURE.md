@@ -13,12 +13,17 @@ clipboard content, or introduce whole-desktop capture.
   import or construct protocol messages.
 - `CodecCore` owns the H.264 conversion implemented in M4. `InputCore` owns later input
   authorization/injection adapters.
-- The system provider excludes desktop windows, requires an on-screen window
-  layer of zero, requires a non-empty application bundle identifier, and
-  rejects zero-sized, helper, renderer, or service surfaces. The default
-  minimum selectable window is 160×80 points, which prevents common 1×33
-  preview/service windows while preserving normal app windows such as LINE and
-  ChatGPT.
+- The system provider excludes desktop windows and requires a layer-0 window,
+  a non-empty application bundle identifier, positive bounds, and a user-facing
+  app. The catalog includes on-screen windows and titled offscreen windows of
+  regular apps; it excludes untitled offscreen utility surfaces and offscreen
+  windows of agent/accessory apps. The default minimum selectable window is
+  160×80 points, which prevents common 1×33 preview/service windows while
+  preserving normal app windows such as LINE and ChatGPT.
+- `CaptureWindow.isOnScreen` records the catalog visibility. Selecting an
+  offscreen entry explicitly asks the Host to reveal and foreground that app
+  before capture starts. This selection action does not authorize input; the
+  independent foreground, permission, pairing, and session checks still apply.
 - M8 changes the default capture pixel format to 4:2:0 bi-planar video range
   (`420v`) with a BT.709 YCbCr matrix, which H.264 encodes without a BGRA
   conversion. `CaptureConfiguration.pixelFormat` keeps BGRA available.
@@ -98,6 +103,8 @@ Deterministic tests use fake window and capture providers to cover:
 - selected-window start/stop and generation-tagged frame delivery;
 - permission loss and window disappearance fail-closed behavior;
 - rejection of ineligible windows;
+- catalog policy for titled offscreen windows of regular apps and visibility
+  metadata;
 - bounded output configuration;
 - pixel output sizing at backing scale 1 and 2, oversized-window downscaling
   with preserved aspect ratio, display selection by largest overlap, and
@@ -112,11 +119,17 @@ visible user-application window to avoid WindowManager overlays. A headless or
 non-window-server environment may enumerate but produce no frame; that result
 is an environment limitation, not a passing capture evidence claim.
 
+Physical checks should also select a minimized, hidden, or other-Space regular
+app window and verify that explicit selection foregrounds it before video
+capture. Test that input remains unavailable unless the existing independent
+input-authorization checks pass.
+
 ## Exit status
 
 The CaptureCore implementation and deterministic tests are complete. The
 operator's physical Viewer screenshot confirms a selected Host window frame
 reached the Viewer, so the tested Host's ScreenCaptureKit capture path has
-produced a real frame. Physical Screen Recording revocation and selected-window
-change/close lifecycle checks are not separately recorded; see the remaining
-M3 evidence in `docs/STATUS.md`.
+produced a real frame. Deterministic offscreen-catalog policy tests pass, but
+physical offscreen selection/activation, Screen Recording revocation, and
+selected-window change/close lifecycle checks are not separately recorded; see
+the remaining M3 evidence in `docs/STATUS.md`.

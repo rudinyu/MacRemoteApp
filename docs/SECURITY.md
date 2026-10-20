@@ -36,12 +36,23 @@ window is currently streaming, including offscreen windows. A transiently
 missing catalog entry does not immediately clear the selection or authenticated
 session. CaptureCore requires three consecutive liveness misses before
 declaring the selected target unavailable and makes at most two delayed
-stream restarts after an unexpected end. Each restart checks
-the same window ID, bundle ID, PID, layer, and valid geometry; it does not use
-the stream's `isActive` state as its own prerequisite. Confirmed owner change,
-target loss, or Screen Recording permission loss still fails closed. None of
-these capture rules relaxes input authorization or the secure-input, lock,
-console-session, system-authentication-dialog, or PostEvent checks.
+stream restarts after an unexpected end; a miss or failed restart does not
+count while WindowServer still lists the exact window number for the same
+live owner PID, and the restart budget resets once frames flow again. Each
+restart checks the same window ID, bundle ID, PID, layer, and valid geometry;
+it does not use the stream's `isActive` state as its own prerequisite.
+Confirmed owner change, target loss, or Screen Recording permission loss still
+fails closed. None of these capture rules relaxes input authorization or the
+secure-input, lock, console-session, system-authentication-dialog, or PostEvent
+checks.
+
+The selection catalog sent to the authenticated, paired Viewer lists
+on-screen layer-0 windows and, per the ADR-0003 amendment, titled offscreen
+windows of regular apps (minimized, hidden, or on another Space). Their
+titles are the same metadata class as on-screen titles; untitled offscreen
+windows and agent/accessory app windows are not listed. Selecting an
+offscreen window permits only the bounded reveal and activation described
+above; it never authorizes input by itself.
 
 P6 input requires current local admission, a live matching target and
 generation, valid geometry, PostEvent permission, foreground eligibility, a

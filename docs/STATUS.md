@@ -12,15 +12,18 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 
 ## Summary
 
-The public source snapshot at commit `a63222e`
-is included in the signed and notarized `0.2.1011` RC; both app bundle plists
-use Build `1011`. Build `1033` is the current in-house M6 beta test candidate;
-both role plists identify Version `0.2`, Build `1033`. Its Host and Viewer
-artifacts are Developer ID signed, accepted by Apple, stapled, and passed the
-M9 release audit. They are in `build/beta/`; submission IDs and hashes are
-recorded below. Physical two-Mac input-receipt acceptance remains pending.
-Build `1032` is the previous signed and notarized in-house Debug artifact.
-Build `1031` is superseded. Build `1030` is superseded. Its Dropbox
+Build `0.2.1037` is the current in-house M10 Debug diagnostic pair. Both role
+plists identify Version `0.2`, Build `1037`; the apps, ZIPs, and DMGs are in
+`build/debug-diagnostic/`. The full `.codex/ci.sh` validation, four Apple
+notarizations, stapling, Gatekeeper checks, and final package audit passed on
+2026-10-20. Previous local distribution outputs were cleared before packaging;
+the `.build` validation caches were retained. Artifact submission IDs and
+hashes are recorded below. Physical offscreen-window selection and full
+two-Mac M10 acceptance remain pending.
+The public source snapshot at commit `a63222e` remains included in the
+historical signed and notarized `0.2.1011` RC. Builds `1036`, `1035`, `1033`, `1032`,
+`1031`, and `1030` are historical; their local distribution outputs are not
+retained. Build `1030`'s Dropbox
 Viewer log copy records `attempted=0` through `05:45:49Z`; the local Viewer log
 continues with 18 locally accepted `mouse_move` events at `06:04:12Z`,
 `06:04:37Z`, and `06:05:48Z`, with no button or keyboard events. The Dropbox
@@ -124,23 +127,76 @@ They do not record why the Host sent the close, and actual target-app response
 to the injected events remains unverified. Repeated Viewer main-actor stalls
 around 0.8–1.1 seconds were also present during the session.
 
-### Unreleased M6 foreground-activation fallback (2026-10-19)
+### 0.2.1037 M3/M10 in-house Debug diagnostic artifacts
 
-Source-only, after Build `1033`; no build number or physical run yet.
-`.codex/ci.sh` passed on 2026-10-19. A physical Build `1033` test (no logs
-collected) reported that pressing Select for the already-streaming window did
-not bring the selected app back to the foreground, while the other M6 checks
-were not reported as failing. The Host's only activation path was the macOS 14
-cooperative request, which first needs the background menu-bar Host to become
-frontmost, so the system can refuse it. The Host now continues, in order, with
-the public AX `kAXFrontmostAttribute` request (when Accessibility is trusted)
-and a LaunchServices activation of the running app (only when it is the
-bundle's single instance). It confirms the exact selected window is foreground
-after each step, and logs each step's outcome to the unified log under
-subsystem `com.rudinyu.MacRemoteApp`, category `host-runtime`, without app
-names. The same path now also serves the first selection and macOS 13 Hosts.
-The Viewer waits 6 seconds, up from 3, before restoring the focus guidance.
-Pending: physical confirmation on the Intel Host.
+Build `1037` adds titled offscreen regular-app windows to the selection
+catalog. Selecting a minimized, hidden, or other-Space window explicitly asks
+the Host to reveal and foreground its app before capture; it does not bypass
+the independent input-authorization checks. The M3 physical offscreen-window
+selection/activation check and full M10 two-Mac acceptance remain pending.
+
+The full `.codex/ci.sh` validation passed on 2026-10-20, including Host
+arm64/x86_64 and Viewer arm64 builds, deterministic tests, the M8 benchmark, and
+M9 packaging audit. The opt-in ScreenCaptureKit system smoke was skipped by
+design; this is not physical Host/Viewer acceptance. Previous local
+distribution outputs were cleared before packaging, and `.build` validation
+caches were retained. Both Debug apps, ZIPs, and DMGs were Developer ID signed,
+accepted by Apple, stapled, and passed Gatekeeper, ticket, and final package
+audits. Apple submission IDs:
+
+| Artifact | Apple submission ID | Status |
+| --- | --- | --- |
+| Host app ZIP | `311f940d-65c7-4512-a924-e95e76a894a8` | Accepted |
+| Viewer app ZIP | `bbc9bbdc-3eda-49a3-97e8-c603e1767172` | Accepted |
+| Host DMG | `5950d0f0-acb0-475e-9595-5a08560809fd` | Accepted |
+| Viewer DMG | `d0f09f2c-b1d0-4bc5-b99c-ce0744df0888` | Accepted |
+
+The artifacts are in `build/debug-diagnostic/`:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1037.app.zip` | `539df7e4ee00f46fcf11ae8421631128e53c9ed13710da15a2f938fab9e9c1a1` |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1037.dmg` | `4cde3f95716c0c29760983311796545f3e70201e97d70592e5b50b0cd9f803b0` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1037.app.zip` | `13a18efb1785c9af41d07e5c3f3b280efc47649c97cca6e2e432f243c68c3f82` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1037.dmg` | `b09974cf3341a2331968d12dcd44023306e0a29bd593f5ef26354e509a7d762a` |
+
+These artifacts are for in-house diagnostics, not a public release.
+
+### 0.2.1036 M10 in-house Debug diagnostic artifacts
+
+Build `1036` was generated from source commit `5696ba7`, with the Host and
+Viewer build metadata updated to `1036` for packaging. Full `.codex/ci.sh`
+validation passed on 2026-10-20, including Host arm64/x86_64 and Viewer arm64
+builds, deterministic tests, the M8 benchmark, and M9 packaging audit. Both
+Debug apps, ZIPs, and DMGs were Developer ID signed, accepted by Apple, stapled,
+and passed Gatekeeper, ticket, and final package audits. Apple submission IDs:
+
+| Artifact | Apple submission ID | Status |
+| --- | --- | --- |
+| Host app ZIP | `649299f0-0394-4a9a-9d19-b78fb998e045` | Accepted |
+| Viewer app ZIP | `a526cdd7-f945-4cb7-8b56-8265f3b0e327` | Accepted |
+| Host DMG | `c79ecd9f-8a0c-440b-8d28-5e989bea3d51` | Accepted |
+| Viewer DMG | `ef5ba960-5579-40dc-b1d6-ce670c82a522` | Accepted |
+
+At generation, the artifacts were in `build/debug-diagnostic/`; Build `1037`
+has since replaced them:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1036.app.zip` | `be4aba33bc8967d2a3d35453858207762d32c7a8915c23dbdc7f78b5ea3c6cea` |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1036.dmg` | `73c286f250e6c9b6ce0f274e90e0ffbb42b509e81de39e4254454e5adbf95426` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1036.app.zip` | `f0d2494f75096182f97cee00085bfd738716c14e5d389986d7bdd91f7670f991` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1036.dmg` | `6e2a19c1cf6e5ec853d5a9f40dc6fb306cc21b0786046bf51e5418353a76779f` |
+
+Build `1036` includes the M6 foreground-activation fallback update: the Host
+continues after a refused macOS 14 cooperative request with the public AX
+`kAXFrontmostAttribute` request when Accessibility is trusted, then tries
+LaunchServices activation only for the bundle's sole running instance. It
+confirms the exact selected window after each step and logs fixed outcomes
+without app names. The Viewer waits 6 seconds before restoring focus guidance.
+Physical confirmation on the Intel Host and the remaining two-Mac M10
+acceptance rows are pending. These artifacts are for in-house diagnostics, not
+a public release.
 
 ### 0.2.1033 M6 in-house beta test artifacts
 
@@ -167,7 +223,8 @@ passed. Apple accepted all four submissions:
 | Host DMG | `d9611945-d79f-4157-9d59-3fde9b7fc3a3` | Accepted |
 | Viewer DMG | `f79d8adc-fb5e-455b-987a-d1c0c911bdfc` | Accepted |
 
-The artifacts are in `build/beta/`:
+At generation, the artifacts were in `build/beta/`; they were removed with the
+other old local distribution outputs before Build `1036`:
 
 | Artifact | SHA-256 |
 | --- | --- |
@@ -195,8 +252,8 @@ passed Gatekeeper, ticket, and final package audits. Apple submission IDs:
 Host app ZIP `82dcb863-4a7c-44b7-8537-51c44f9dba27`, Viewer app ZIP
 `90896cc5-18c8-41f6-ba82-da22b81c15ab`, Host DMG
 `4043def5-28d8-4587-9f9f-370807284366`, Viewer DMG
-`671645e8-caae-4863-8698-9ef4ab0569de`. The DMGs are in
-`build/debug-diagnostic/`:
+`671645e8-caae-4863-8698-9ef4ab0569de`. The DMGs were in
+`build/debug-diagnostic/` at generation time:
 
 | Delivered DMG | SHA-256 |
 | --- | --- |
@@ -436,14 +493,14 @@ diagnostic artifacts, not a public release.
 | M0 | Complete | — |
 | M1 | Complete | — |
 | M2 | Code gates and loopback smoke complete; operator confirms physical Bonjour/TLS works | Detailed run record not captured; no known M2 blocker |
-| M3 | Code/tests complete; operator confirms a physical Host frame appeared in Viewer | Physical permission-revocation and selected-window lifecycle checks |
+| M3 | Code/tests complete; operator confirms a physical Host frame appeared in Viewer | Physical offscreen-window selection/activation, permission-revocation, and selected-window lifecycle checks |
 | M4 | Deterministic gate complete; operator confirms a physical Host frame displayed | Physical resize/aspect and frame-pacing checks; codec fixture smoke is optional |
 | M5 | Viewer input transport gate complete | — |
 | M6 | Implementation/test gate complete | Real OS event posting (manual disposable-application test) |
 | M7 | Implementation/test gate complete | Physical two-machine clipboard walkthrough |
 | M8 | Deterministic measurement/resilience gate implemented | Physical clock-synchronized performance report |
 | M9 | Release-audit gate implemented; current `0.2.1011` notarized RC artifacts verified | Physical acceptance remains separate |
-| M10 | Production composition and pairing UI complete; Build `1032` is the current validated, Developer ID signed and notarized in-house Debug pair and includes the M6 global system-event input route; Build `1030` is superseded and its logs identify readiness instability but do not establish a click reaching the Host; Build `1029` was Apple accepted and promoted but is withheld; Build `1028` is the previous locally audited Developer ID signed pair; Build `1027` is an earlier unwithheld notarized pair | Physical background-selection with foreground input-delivery test; full background-stream, connected-UI, clipboard, performance, and disconnect-recovery acceptance on the physical pair; the deterministic end-to-end Viewer send-race path remains unverified |
+| M10 | Production composition and pairing UI complete; Build `1037` is the current validated, Developer ID signed, Apple-notarized in-house Debug pair; previous local distribution outputs were cleared before it | Physical offscreen/background-window selection and foreground input-delivery test; full background-stream, connected-UI, clipboard, performance, and disconnect-recovery acceptance on the physical pair; the deterministic end-to-end Viewer send-race path remains unverified |
 
 ### 0.2.1024 in-house Debug diagnostic artifacts
 
