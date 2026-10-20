@@ -12,17 +12,16 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 
 ## Summary
 
-The source plists now identify Version `0.2`, Build `1038` for the M7 Viewer
-picker-retention fix in commit `ee5f49d`. Full `.codex/ci.sh` validation passed
-for this source on 2026-10-20. No Build `1038` Debug diagnostic apps, ZIPs, or
-DMGs have been packaged or notarized. Build `0.2.1037` remains the latest
-validated in-house M10 Debug diagnostic pair. Its four Apple notarizations,
-stapling, Gatekeeper checks, and final package audit passed on 2026-10-20; those
-artifacts predate the M7 fix.
-Previous local distribution outputs were cleared before packaging; the `.build`
-validation caches were retained. Build `1037` artifact submission IDs and
-hashes are recorded below. Physical offscreen-window selection and full
-two-Mac M10 acceptance remain pending.
+Build `0.2.1038` is the current validated in-house M10 Debug diagnostic pair.
+Both role plists identify Version `0.2`, Build `1038`; the apps, ZIPs, and DMGs
+are in `build/debug-diagnostic/`. Full `.codex/ci.sh` validation passed on
+2026-10-20. Four Apple notarizations were accepted; all apps and DMGs were
+stapled and passed Gatekeeper and final package audit. Previous local
+distribution outputs were cleared before packaging; the `.build` validation
+caches were retained. Build `1038` artifact submission IDs and hashes are
+recorded below. This package includes the M7 Viewer picker-retention fix and
+the Build `1037` offscreen-window selection feature. Physical offscreen-window
+selection and full two-Mac M10 acceptance remain pending.
 The public source snapshot at commit `a63222e` remains included in the
 historical signed and notarized `0.2.1011` RC. Builds `1036`, `1035`, `1033`, `1032`,
 `1031`, and `1030` are historical; their local distribution outputs are not
@@ -129,6 +128,43 @@ rejections, these logs do not support attributing that later stop to the click.
 They do not record why the Host sent the close, and actual target-app response
 to the injected events remains unverified. Repeated Viewer main-actor stalls
 around 0.8–1.1 seconds were also present during the session.
+
+### 0.2.1038 M7/M10 in-house Debug diagnostic artifacts
+
+Build `1038` includes the M7 Viewer picker-retention fix from commit `ee5f49d`.
+Catalog refreshes keep the operator's highlighted window while it remains
+offered, fall back to the streaming window and then the first row when needed,
+skip rebuilding an unchanged catalog, and do not re-enable Select while a
+selection is in flight. The selected window remains under the existing Host
+authorization and foreground-input checks.
+
+Full `.codex/ci.sh` validation passed on 2026-10-20, including Host arm64 and
+x86_64 builds, Viewer arm64, deterministic package/app tests, M8 benchmark, and
+M9 packaging audit. The opt-in ScreenCaptureKit system smoke was skipped by
+design; this is not physical Host/Viewer acceptance. Previous local
+distribution outputs were cleared before packaging, and `.build` validation
+caches were retained. Both Debug apps, ZIPs, and DMGs were Developer ID signed,
+accepted by Apple, stapled, and passed Gatekeeper, ticket, and final package
+audits. Apple submission IDs:
+
+| Artifact | Apple submission ID | Status |
+| --- | --- | --- |
+| Host app ZIP | `7eb0f41a-3e67-4322-a916-e06caa7769d5` | Accepted |
+| Viewer app ZIP | `352e71ab-b3d4-43c7-8bff-5c410bc6064f` | Accepted |
+| Host DMG | `4a0ef2c9-a5bc-4e42-86c5-b4c34e72fcc3` | Accepted |
+| Viewer DMG | `71b29ebe-ff23-406e-b811-73350ac9cac5` | Accepted |
+
+The artifacts are in `build/debug-diagnostic/`:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1038.app.zip` | `cce2c9c15fe4001a6f0aebaef70fd34ebccad2c48e7dadd69775504698d7b078` |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1038.dmg` | `a9b16ccce3caadc228bf8ff8c07549b57975f466be6ef9649a5dd9615373c1b1` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1038.app.zip` | `9747e7066bf23dcf83fb68fd53088663f3006c1dc48108e4504956c866bf8621` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1038.dmg` | `d6ff1794340f1fe1daf995dfe46ee135cd853bf679b18762606a488b08c75bf7` |
+
+These artifacts are for in-house diagnostics, not a public release. Physical
+offscreen-window selection and full two-Mac acceptance remain pending.
 
 ### 0.2.1037 M3/M10 in-house Debug diagnostic artifacts
 
@@ -504,7 +540,7 @@ diagnostic artifacts, not a public release.
 | M7 | Implementation/test gate complete | Physical two-machine clipboard walkthrough |
 | M8 | Deterministic measurement/resilience gate implemented | Physical clock-synchronized performance report |
 | M9 | Release-audit gate implemented; current `0.2.1011` notarized RC artifacts verified | Physical acceptance remains separate |
-| M10 | Production composition and pairing UI complete; Build `1037` is the current validated, Developer ID signed, Apple-notarized in-house Debug pair; previous local distribution outputs were cleared before it | Physical offscreen/background-window selection and foreground input-delivery test; full background-stream, connected-UI, clipboard, performance, and disconnect-recovery acceptance on the physical pair; the deterministic end-to-end Viewer send-race path remains unverified |
+| M10 | Production composition and pairing UI complete; Build `1038` is the current validated, Developer ID signed, Apple-notarized in-house Debug pair; previous local distribution outputs were cleared before it | Physical offscreen/background-window selection and foreground input-delivery test; full background-stream, connected-UI, clipboard, performance, and disconnect-recovery acceptance on the physical pair; the deterministic end-to-end Viewer send-race path remains unverified |
 
 ### 0.2.1024 in-house Debug diagnostic artifacts
 
@@ -811,10 +847,9 @@ additional post-V1 feature was performed.
 - Commit `ee5f49d` keeps the chosen Viewer picker row across catalog refreshes
   while it remains offered, avoids rebuilding the picker for an unchanged
   catalog, and keeps Select disabled while a selection is in flight. The
-  source plists identify Build `1038` for this update, and full `.codex/ci.sh`
-  validation passed on 2026-10-20. No Build `1038` Debug diagnostic artifacts
-  have been packaged or notarized. Build `1037` remains the latest validated
-  artifact pair and predates this fix.
+  source plists identify Build `1038` for this update. Its full `.codex/ci.sh`
+  validation and notarized Debug diagnostic package passed; the physical
+  Viewer picker behavior remains pending two-Mac validation.
 - The physical Intel-Host/Apple-Silicon-Viewer clipboard walkthrough remains
   an environment evidence item.
 
