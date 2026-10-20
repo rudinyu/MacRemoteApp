@@ -41,8 +41,11 @@ count while WindowServer still lists the exact window number for the same
 live owner PID, and the restart budget resets once frames flow again. Each
 restart checks the same window ID, bundle ID, PID, layer, and valid geometry;
 it does not use the stream's `isActive` state as its own prerequisite.
-Confirmed owner change, target loss, or Screen Recording permission loss still
-fails closed. None of these capture rules relaxes input authorization or the
+Confirmed owner change or target loss still fails capture closed: it stops
+the stream, releases held input for the old target through the selection-
+change barrier, and clears the selection, while the authenticated session
+stays open for a new explicit selection. Screen Recording permission loss
+ends the session. None of these capture rules relaxes input authorization or the
 secure-input, lock, console-session, system-authentication-dialog, or PostEvent
 checks.
 

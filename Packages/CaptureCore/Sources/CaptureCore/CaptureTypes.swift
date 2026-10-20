@@ -203,6 +203,34 @@ enum SelectedWindowCaptureEligibility {
     }
 }
 
+/// Narrows the background part of the selection catalog. Offscreen titled
+/// windows include real minimized or other-Space documents but also windows an
+/// app keeps ordered out and never shows (Build 1038 testing: AX activation of
+/// such an app was accepted, yet the chosen window never appeared). Every
+/// on-screen window is kept. An app with no on-screen window contributes only
+/// its largest offscreen window, and an app that already has an on-screen
+/// window contributes no offscreen ones.
+enum CatalogBackgroundWindowReduction {
+    static func reduce(_ windows: [CaptureWindow]) -> [CaptureWindow] {
+        let onScreenOwners = Set(windows.filter(\.isOnScreen).map(\.processIdentifier))
+        var representative: [Int32: CaptureWindow] = [:]
+        for window in windows where !window.isOnScreen && !onScreenOwners.contains(window.processIdentifier) {
+            guard let current = representative[window.processIdentifier] else {
+                representative[window.processIdentifier] = window
+                continue
+            }
+            let area = window.bounds.width * window.bounds.height
+            let currentArea = current.bounds.width * current.bounds.height
+            if area > currentArea || (area == currentArea && window.identifier < current.identifier) {
+                representative[window.processIdentifier] = window
+            }
+        }
+        return windows.filter {
+            $0.isOnScreen || representative[$0.processIdentifier]?.identifier == $0.identifier
+        }
+    }
+}
+
 /// Classifies WindowServer records for one window number. A window number is
 /// owned by exactly one process, so a record with the selected number and the
 /// selected live owner PID proves the target still exists. A different owner

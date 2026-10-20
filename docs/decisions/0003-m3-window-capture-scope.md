@@ -51,3 +51,10 @@ Host log shows 0–2 eligible windows per discovery.
 - Privacy: the paired, authenticated Viewer now also receives titles of
   offscreen windows of regular apps, the same metadata class it already
   received for on-screen windows. No whole-desktop capture is added.
+- Build 1038 testing showed many offscreen titled windows are ones an app
+  keeps ordered out and never shows: AX activation of the app was accepted
+  but the chosen window never appeared. The catalog therefore keeps every
+  on-screen window, drops offscreen windows of apps that already have an
+  on-screen window, and keeps only the largest offscreen window of an app
+  with none.
+- A confirmed loss of the selected window ends the selection, not the session.

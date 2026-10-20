@@ -164,6 +164,18 @@ enum HostRuntimeCaptureLivenessPolicy {
         }
     }
 
+    /// Whether a capture that stopped for the selected window may end only
+    /// the selection instead of the authenticated session. Permission loss
+    /// always closes the session.
+    static func keepsSessionAfterSelectionLoss(for state: CaptureSessionState) -> Bool {
+        switch state {
+        case .failed(.permissionDenied), .stopped(.permissionDenied):
+            false
+        default:
+            true
+        }
+    }
+
     /// A fixed, log-safe category for why capture ended. Free-form platform
     /// error text is deliberately omitted.
     static func summary(for state: CaptureSessionState) -> String {
@@ -1183,17 +1195,29 @@ actor HostRuntime {
             if selectedWindow != nil, !selectionTransitionInProgress {
                 await synchronizeInputAuthorization(session)
                 let captureSnapshot = await captureSession.snapshot()
-                guard HostRuntimeCaptureLivenessPolicy.keepsAuthenticatedSession(
+                if !HostRuntimeCaptureLivenessPolicy.keepsAuthenticatedSession(
                     for: captureSnapshot.state
-                ) else {
-                    // Confirmed target loss or permission failure closes the
-                    // protected session. A short discovery gap and bounded
-                    // stream restart keep the authenticated session alive.
+                ) {
+                    let summary = HostRuntimeCaptureLivenessPolicy.summary(for: captureSnapshot.state)
+                    guard HostRuntimeCaptureLivenessPolicy.keepsSessionAfterSelectionLoss(
+                        for: captureSnapshot.state
+                    ) else {
+                        // Screen Recording permission loss still closes the
+                        // protected session.
+                        startupLogger.error(
+                            "Host ended the session because capture stopped (state: \(summary, privacy: .public))"
+                        )
+                        await teardown(session: session)
+                        return
+                    }
+                    // A closed window, exited app, or reused window number
+                    // ends only this selection. Capture and input stop for
+                    // it, and the Viewer can choose another window without
+                    // reconnecting.
                     startupLogger.error(
-                        "Host ended the session because capture stopped (state: \(HostRuntimeCaptureLivenessPolicy.summary(for: captureSnapshot.state), privacy: .public))"
+                        "Host ended the selection because capture stopped; the session stays open (state: \(summary, privacy: .public))"
                     )
-                    await teardown(session: session)
-                    return
+                    await endSelectionAfterCaptureLoss(session)
                 }
                 switch captureSnapshot.state {
                 case .capturing:
@@ -1300,6 +1324,18 @@ actor HostRuntime {
     /// Capture/encoder startup for one app may fail even though the LAN
     /// session is healthy. Release the old input target, return to the current
     /// authorized selection epoch, and let the Viewer choose a window again.
+    /// Ends a selection whose window stopped being capturable while keeping
+    /// the session. The input controller releases held state for the old
+    /// target before the selection is cleared, as for a window replacement.
+    private func endSelectionAfterCaptureLoss(_ session: SessionCoordinator) async {
+        guard activeSession === session else { return }
+        let fallbackGeneration = selectedWindowGeneration ?? advertisedWindowGeneration
+        let inputRuntime = self.inputRuntime
+        await inputRuntime?.selectionWillChange()
+        await recoverFromSelectionFailure(session, fallbackWindowGeneration: fallbackGeneration)
+        await inputRuntime?.selectionDidChange()
+    }
+
     private func recoverFromSelectionFailure(
         _ session: SessionCoordinator,
         fallbackWindowGeneration: UInt64

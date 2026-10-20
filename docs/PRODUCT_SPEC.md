@@ -114,8 +114,9 @@ available on every macOS version.
    stream. A short missing catalog snapshot does not revoke the active
    selection; if ScreenCaptureKit ends the stream, CaptureCore makes bounded
    restart attempts only after checking the same window ID, bundle ID, PID,
-   layer, and geometry. Confirmed target loss or Screen Recording permission
-   loss stops the stream and fails closed. The Host menu-bar icon is tinted and
+   layer, and geometry. Confirmed target loss stops the stream, releases held
+   input, and ends the selection while the session stays connected so another
+   window can be chosen; Screen Recording permission loss ends the session. The Host menu-bar icon is tinted and
    the status menu names the shared app and its capture state. There is never
    simultaneous multi-window control.
 

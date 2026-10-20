@@ -375,8 +375,10 @@ window on another Space), the target is temporarily unavailable, not lost: a
 liveness miss is not counted, and recovery retries every second without
 consuming the bounded restart budget. Only a closed window, an exited owner,
 a reused window number, or a permission failure is a confirmed loss that
-fails capture and ends the session; the Host logs that reason as a fixed
-category. The restart budget resets once frames flow again, so separate
+fails capture. A window loss ends only the selection (held input is released
+through the selection-change barrier and the Viewer receives a fresh
+catalog); a permission failure ends the session. The Host logs the reason as
+a fixed category. The restart budget resets once frames flow again, so separate
 interruptions do not share one budget for the whole selection.
 
 Stopping an engine can suspend while a replacement capture starts. Cleanup

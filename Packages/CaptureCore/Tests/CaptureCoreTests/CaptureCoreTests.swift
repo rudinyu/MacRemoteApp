@@ -743,6 +743,34 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertNotNil(exhausted, "recovery must stop after the configured retry budget")
     }
 
+    func testBackgroundCatalogKeepsOneLargestOffscreenWindowOnlyForAppsWithoutVisibleWindows() {
+        func window(_ id: UInt64, pid: Int32, app: String, width: Double, onScreen: Bool) -> CaptureWindow {
+            CaptureWindow(
+                identifier: id,
+                applicationIdentifier: app,
+                title: "Window \(id)",
+                bounds: WindowBounds(x: 0, y: 0, width: width, height: 600),
+                processIdentifier: pid,
+                eligible: true,
+                isOnScreen: onScreen
+            )
+        }
+        let finderVisible = window(1, pid: 10, app: "com.apple.finder", width: 800, onScreen: true)
+        let finderGhost = window(2, pid: 10, app: "com.apple.finder", width: 900, onScreen: false)
+        let weChatGhostSmall = window(3, pid: 20, app: "com.tencent.xinWeChat", width: 400, onScreen: false)
+        let weChatMain = window(4, pid: 20, app: "com.tencent.xinWeChat", width: 1000, onScreen: false)
+        let notesMinimized = window(5, pid: 30, app: "com.apple.Notes", width: 700, onScreen: false)
+
+        let reduced = CatalogBackgroundWindowReduction.reduce(
+            [finderVisible, finderGhost, weChatGhostSmall, weChatMain, notesMinimized]
+        )
+        XCTAssertEqual(
+            reduced.map(\.identifier),
+            [1, 4, 5],
+            "Keep visible windows, drop offscreen windows of apps that already have one, and keep one background entry per remaining app."
+        )
+    }
+
     func testBackgroundCatalogOffersOnlyTitledWindowsOfRegularApps() {
         XCTAssertTrue(
             WindowCandidateVisibility.permitsBackgroundCatalogWindow(

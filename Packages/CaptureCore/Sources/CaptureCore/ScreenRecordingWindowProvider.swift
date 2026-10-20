@@ -51,14 +51,15 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
             onScreenWindowsOnly: catalogQueriesOnScreenWindowsOnly
         )
         let displays = content.displays.map(Self.displayGeometry)
-        return content.windows.compactMap {
+        let evaluated = content.windows.compactMap {
             evaluateWindow(
                 $0,
                 displays: displays,
                 allowInactiveOffscreen: false,
                 allowBackgroundCatalogWindow: includesBackgroundWindows
             ).window
-        }.sorted {
+        }
+        return CatalogBackgroundWindowReduction.reduce(evaluated).sorted {
             if $0.applicationIdentifier == $1.applicationIdentifier {
                 return $0.identifier < $1.identifier
             }
@@ -192,6 +193,9 @@ public final class ScreenRecordingWindowProvider: WindowDiscoveryProvider, @unch
                 windows.append(window)
             }
         }
+        let reduced = CatalogBackgroundWindowReduction.reduce(windows)
+        counts.reclassifyAsOffScreen(UInt64(windows.count - reduced.count))
+        windows = reduced
         windows.sort {
             if $0.applicationIdentifier == $1.applicationIdentifier {
                 return $0.identifier < $1.identifier
@@ -398,6 +402,14 @@ struct ScreenRecordingWindowDiscoveryCountAccumulator {
     private(set) var missingApplication: UInt64 = 0
     private(set) var helperApplication: UInt64 = 0
     private(set) var invalidWindow: UInt64 = 0
+
+    /// Background windows dropped by `CatalogBackgroundWindowReduction` are
+    /// reported as offscreen rejections rather than eligible windows.
+    mutating func reclassifyAsOffScreen(_ count: UInt64) {
+        let moved = min(count, eligible)
+        eligible &-= moved
+        offScreen &+= moved
+    }
 
     mutating func record(_ rejection: WindowCandidateRejection?) {
         guard let rejection else {

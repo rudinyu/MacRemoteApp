@@ -111,6 +111,14 @@ final class HostRuntimeRecoveryPolicyTests: XCTestCase {
         )
     }
 
+    func testWindowLossEndsOnlyTheSelectionButPermissionLossEndsTheSession() {
+        XCTAssertTrue(HostRuntimeCaptureLivenessPolicy.keepsSessionAfterSelectionLoss(for: .failed(.windowUnavailable)))
+        XCTAssertTrue(HostRuntimeCaptureLivenessPolicy.keepsSessionAfterSelectionLoss(for: .failed(.captureFailed("x"))))
+        XCTAssertTrue(HostRuntimeCaptureLivenessPolicy.keepsSessionAfterSelectionLoss(for: .stopped(.cancelled)))
+        XCTAssertFalse(HostRuntimeCaptureLivenessPolicy.keepsSessionAfterSelectionLoss(for: .failed(.permissionDenied)))
+        XCTAssertFalse(HostRuntimeCaptureLivenessPolicy.keepsSessionAfterSelectionLoss(for: .stopped(.permissionDenied)))
+    }
+
     func testCaptureLossSummaryUsesFixedCategories() {
         XCTAssertEqual(
             HostRuntimeCaptureLivenessPolicy.summary(for: .failed(.windowUnavailable)),
