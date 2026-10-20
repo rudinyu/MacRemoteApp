@@ -12,12 +12,15 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 
 ## Summary
 
-Build `0.2.1037` is the current in-house M10 Debug diagnostic pair. Both role
-plists identify Version `0.2`, Build `1037`; the apps, ZIPs, and DMGs are in
-`build/debug-diagnostic/`. The full `.codex/ci.sh` validation, four Apple
-notarizations, stapling, Gatekeeper checks, and final package audit passed on
-2026-10-20. Previous local distribution outputs were cleared before packaging;
-the `.build` validation caches were retained. Artifact submission IDs and
+The source plists now identify Version `0.2`, Build `1038` for the M7 Viewer
+picker-retention fix in commit `ee5f49d`. Full `.codex/ci.sh` validation passed
+for this source on 2026-10-20. No Build `1038` Debug diagnostic apps, ZIPs, or
+DMGs have been packaged or notarized. Build `0.2.1037` remains the latest
+validated in-house M10 Debug diagnostic pair. Its four Apple notarizations,
+stapling, Gatekeeper checks, and final package audit passed on 2026-10-20; those
+artifacts predate the M7 fix.
+Previous local distribution outputs were cleared before packaging; the `.build`
+validation caches were retained. Build `1037` artifact submission IDs and
 hashes are recorded below. Physical offscreen-window selection and full
 two-Mac M10 acceptance remain pending.
 The public source snapshot at commit `a63222e` remains included in the
@@ -129,6 +132,7 @@ around 0.8–1.1 seconds were also present during the session.
 
 ### 0.2.1037 M3/M10 in-house Debug diagnostic artifacts
 
+At generation, both role plists identified Version `0.2`, Build `1037`.
 Build `1037` adds titled offscreen regular-app windows to the selection
 catalog. Selecting a minimized, hidden, or other-Space window explicitly asks
 the Host to reveal and foreground its app before capture; it does not bypass
@@ -804,6 +808,13 @@ additional post-V1 feature was performed.
   echo/conflict handling, explicit session UX projection, and Host/Viewer
   AppKit string-pasteboard bridges are implemented. The implementation/test
   gate is complete, including the two app-layer pasteboard bridges.
+- Commit `ee5f49d` keeps the chosen Viewer picker row across catalog refreshes
+  while it remains offered, avoids rebuilding the picker for an unchanged
+  catalog, and keeps Select disabled while a selection is in flight. The
+  source plists identify Build `1038` for this update, and full `.codex/ci.sh`
+  validation passed on 2026-10-20. No Build `1038` Debug diagnostic artifacts
+  have been packaged or notarized. Build `1037` remains the latest validated
+  artifact pair and predates this fix.
 - The physical Intel-Host/Apple-Silicon-Viewer clipboard walkthrough remains
   an environment evidence item.
 

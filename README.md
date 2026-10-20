@@ -10,16 +10,21 @@ Host; this is deliberately not a full remote-desktop product.
 Milestone state and open evidence gaps are tracked in one place:
 [`docs/STATUS.md`](docs/STATUS.md).
 
-Build `0.2.1037` is the current in-house M10 Debug diagnostic pair in
-`build/debug-diagnostic/`. Host and Viewer are Developer ID signed, Apple
-notarized and stapled, and passed the package audit. Full `.codex/ci.sh`
-validation passed. This build adds selection of titled offscreen windows from
-regular apps; explicit selection requests that the Host reveal and foreground
-the app before capture, while the existing input authorization checks remain
-independent. Physical offscreen-selection and full two-Mac input/recovery
-acceptance remain pending. Earlier local build outputs were cleared before
-creating this pair. See [`docs/STATUS.md`](docs/STATUS.md) for artifact hashes,
-Apple submission IDs, and remaining acceptance evidence.
+The source plists identify Version `0.2`, Build `1038` for the M7 Viewer
+picker-retention fix in commit `ee5f49d`; full `.codex/ci.sh` validation passed
+for this source on 2026-10-20. No Build `1038` Debug diagnostic apps, ZIPs, or
+DMGs have been packaged or notarized. Build `0.2.1037` remains the latest
+validated in-house M10 Debug diagnostic pair in `build/debug-diagnostic/`; its
+Host and Viewer apps are Developer ID signed, Apple notarized and stapled, and
+passed the package audit. That build adds selection of titled offscreen windows
+from regular apps; explicit selection requests that the Host reveal and
+foreground the app before capture, while the existing input authorization
+checks remain independent. The Build `1037` artifacts predate the M7 fix.
+Physical offscreen-selection and full two-Mac input/recovery acceptance remain
+pending. Earlier local build outputs were cleared before creating the Build
+`1037` pair. See
+[`docs/STATUS.md`](docs/STATUS.md) for artifact hashes, Apple submission IDs,
+and remaining acceptance evidence.
 
 P6 remains an explicit extension to foreground-only input authorization;
 secure-input, system-authentication-dialog, lock, session, target, permission,
