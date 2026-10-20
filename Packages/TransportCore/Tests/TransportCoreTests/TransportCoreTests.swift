@@ -651,6 +651,38 @@ final class TransportCoreTests: XCTestCase {
         }
     }
 
+    func testInMemoryTransportBuffersFramesForAPeerThatHasNotStartedYet() async throws {
+        let firstIdentity = try PeerIdentity(publicKeyRepresentation: Data("first".utf8))
+        let secondIdentity = try PeerIdentity(publicKeyRepresentation: Data("second".utf8))
+        let pair = InMemoryTransport.makePair(
+            firstAuthentication: .trusted(secondIdentity),
+            secondAuthentication: .trusted(firstIdentity)
+        )
+        let envelope = try Envelope(
+            channel: .control,
+            messageType: .ping,
+            sequence: 0,
+            timestamp: 1
+        )
+
+        // Concurrently started sessions can send their first frame before the
+        // peer endpoint calls start(); a connected endpoint must buffer it.
+        try await pair.first.start()
+        _ = try await pair.first.send(envelope)
+        try await pair.second.start()
+        var iterator = pair.second.incoming.makeAsyncIterator()
+        let receivedEnvelope = try await iterator.next()
+        XCTAssertEqual(receivedEnvelope, envelope)
+
+        await pair.second.close()
+        do {
+            _ = try await pair.first.send(envelope)
+            XCTFail("a closed peer must still reject frames")
+        } catch TransportError.alreadyClosed {
+            // Expected.
+        }
+    }
+
     func testInMemoryTransportEnforcesControlCapacityAndMediaReplacement() async throws {
         let controlPair = makeTrustedTransportPair(maxControlFrames: 1, maxMediaFrames: 2)
         try await controlPair.first.start()

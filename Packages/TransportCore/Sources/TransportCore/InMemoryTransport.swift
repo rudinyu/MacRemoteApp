@@ -112,7 +112,14 @@ public final class InMemoryTransport: SessionTransport, @unchecked Sendable {
 
     private func receive(_ envelope: Envelope) throws -> TransportSendResult {
         let lifecycle = lock.withLock { self.lifecycle }
-        guard lifecycle == .ready else {
+        // A connected endpoint buffers peer data before its own start(), as a
+        // socket does. Two sessions started concurrently otherwise race: the
+        // first Hello could reach a peer that is still idle and be reported
+        // as a closed transport.
+        switch lifecycle {
+        case .idle, .starting, .ready:
+            break
+        case .closing, .closed, .failed:
             throw TransportError.alreadyClosed
         }
         do {
