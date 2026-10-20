@@ -329,11 +329,24 @@ final class ViewerInputSurface: NSView {
     /// input method is active. Command/Control shortcuts always travel as
     /// physical keys so Host app shortcuts keep working.
     private func shouldRouteThroughLocalComposition(_ event: NSEvent) -> Bool {
+        Self.shouldRouteThroughLocalComposition(
+            inputReady: inputReady,
+            hasMarkedText: !markedTextValue.isEmpty,
+            modifierFlags: event.modifierFlags,
+            localCompositionActive: { isLocalTextCompositionActive?() == true }
+        )
+    }
+
+    static func shouldRouteThroughLocalComposition(
+        inputReady: Bool,
+        hasMarkedText: Bool,
+        modifierFlags: NSEvent.ModifierFlags,
+        localCompositionActive: () -> Bool
+    ) -> Bool {
         guard inputReady else { return false }
-        if !markedTextValue.isEmpty { return true }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let flags = modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard !flags.contains(.command), !flags.contains(.control) else { return false }
-        return isLocalTextCompositionActive?() == true
+        return hasMarkedText || localCompositionActive()
     }
 
     /// Gives the key to the Viewer's input method. Keys it composes or

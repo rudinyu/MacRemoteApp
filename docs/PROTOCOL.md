@@ -343,12 +343,12 @@ active input source interprets them.**
   the composed character is the one the Host's layout defines. Neither side
   collapses, reorders, or synthesizes events for composition.
 - Without `textInput`, input-method (IME) composition happens on the Host:
-  the Viewer surface does not hand keys to its input method. With `textInput`
-  (ADR-0008), a Viewer using a Chinese input method composes locally and
-  sends committed text; see below. Candidate windows, marked text, and input-source
-  switching are normally handled by the Host's active input source. With the
-  M10 synchronization capability, switching is Viewer-local and the actual
-  desired source is sent instead of replaying the toggle. Keyboard
+  the Viewer surface does not hand keys to its input method, and the Host's
+  active source owns marked text and candidate windows. With `textInput`
+  (ADR-0008), a Viewer using a Chinese input method composes locally and sends
+  committed text; marked text and candidates stay on the Viewer. Input-source
+  switching is Viewer-local when M10 synchronization is negotiated, and the
+  actual desired source is sent instead of replaying the toggle. Keyboard
   shortcuts consumed by the Viewer's own system or menus are not forwarded.
 - Caps Lock and Fn are not forwarded as key events. Their state reaches the
   Host only as the corresponding bit in each key event's `modifiers` mask;

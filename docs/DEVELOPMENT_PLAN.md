@@ -582,11 +582,14 @@ No feature additions beyond the accepted V1 specification and the user-approved
 M10 integration of P6 capture continuity and M7 pairing-trust clipboard policy.
 Any further request becomes a post-V1 milestone proposal.
 
-User-approved M10 exception (2026-10-04): Viewer-led Chinese/English input-source
-following is authorized as a narrow integration fix. Its contract and tests
-are defined in [ADR-0007](decisions/0007-m10-input-source-following.md). This
-does not add Viewer-side composition, text injection, background control, or
-other post-V1 capabilities.
+User-approved M10 extensions are limited to the recorded decisions:
+[ADR-0007](decisions/0007-m10-input-source-following.md) (2026-10-04) adds
+Viewer-led Chinese/English input-source following, and
+[ADR-0008](decisions/0008-m10-viewer-text-composition.md) (2026-10-20) adds
+optional Viewer-side IME composition with capability-gated committed-text
+input. ADR-0008 does not add background control; every text event remains
+subject to the existing Host target, foreground, permission, session, and
+secure-input checks. Other post-V1 capabilities remain out of scope.
 
 ### Exit criteria
 

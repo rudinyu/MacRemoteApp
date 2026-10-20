@@ -96,9 +96,12 @@ available on every macOS version.
 
 1. The Host lists eligible local applications/windows after Screen Recording
    authorization.
-2. The Operator selects one window. The catalog may include titled offscreen
-   windows of regular apps; selecting one asks the Host to reveal and foreground
-   that app before capture.
+2. The Operator selects one window. For a regular app with no on-screen
+   window, the catalog may include one offscreen window (a titled window is
+   preferred; otherwise it uses the largest untitled window). Selecting it
+   asks the Host to reveal and foreground that app before capture. If the exact
+   window cannot be revealed but the same app has a visible window, the Host
+   may capture that visible window; it never substitutes another app.
 3. The Host starts a stream for that window only. Selection and foreground
    activation do not authorize input; the existing independent input checks
    still apply.

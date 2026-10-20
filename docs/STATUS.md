@@ -12,19 +12,21 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 
 ## Summary
 
-Build `0.2.1039` is the current validated in-house M10 Debug diagnostic pair.
-Both role plists identify Version `0.2`, Build `1039`; the apps, ZIPs, and DMGs
-are in `build/debug-diagnostic/`. Full `.codex/ci.sh` validation passed on
-2026-10-20. Four Apple notarizations were accepted; all apps and DMGs were
-stapled and passed Gatekeeper and final package audit. Previous `build/`
-distribution outputs were cleared before packaging; the `.build` validation
-caches were retained. Build `1039` artifact submission IDs and hashes are
-recorded below. This build includes M3 background-window catalog and capture
-recovery corrections, M6's same-app visible-window fallback after reveal fails,
-M7 Viewer selection reconciliation when the Host replaces or closes the
-streaming window, and M10's fixed-category capture-loss scope in Debug logs.
-Foreground and per-event input authorization remain required. Physical
-offscreen-window selection and full two-Mac M10 acceptance remain pending.
+Build `0.2.1040` is the current in-house M10 Debug diagnostic pair. Both role
+plists identify Version `0.2`, Build `1040`; the apps, ZIPs, and DMGs are in
+`build/debug-diagnostic/`. Full `.codex/ci.sh` validation passed on 2026-10-20.
+Four Apple notarizations were accepted; both apps and DMGs were stapled and
+passed Gatekeeper and final package audit. Previous `build/` distribution
+outputs were cleared before packaging; `.build` validation caches were
+retained. Build `1040` adds one offscreen representative window for each
+regular app with no on-screen window (titled windows first, otherwise the
+largest untitled window) and optional Viewer-side Chinese IME composition that
+sends only committed text. Marked text and candidates stay on the Viewer;
+Command/Control shortcuts stay on the physical-key path. Every text event
+remains subject to the Host's existing selected-target, focus, permission, and
+secure-input checks. Physical background-window selection and two-Mac Chinese
+input acceptance remain pending. Build `1040` submission IDs and hashes are
+recorded below.
 The public source snapshot at commit `a63222e` remains included in the
 historical signed and notarized `0.2.1011` RC. Builds `1036`, `1035`, `1033`, `1032`,
 `1031`, and `1030` are historical; their local distribution outputs are not
@@ -131,6 +133,45 @@ rejections, these logs do not support attributing that later stop to the click.
 They do not record why the Host sent the close, and actual target-app response
 to the injected events remains unverified. Repeated Viewer main-actor stalls
 around 0.8–1.1 seconds were also present during the session.
+
+### 0.2.1040 M3/M10 in-house Debug diagnostic artifacts
+
+Build `1040` includes the M3 change that offers one offscreen representative
+window for a regular app that has no on-screen window, preferring titled
+windows and otherwise the largest untitled window. M10 adds optional negotiated
+Viewer-side Chinese IME composition: marked text and candidates stay on the
+Viewer, committed text travels through the ordered input path, and
+Command/Control shortcuts remain physical key events. Host authorization,
+foreground, permission, and secure-input checks still apply to every injected
+text event.
+
+Full `.codex/ci.sh` validation passed on 2026-10-20, including Host arm64 and
+x86_64 builds, Viewer arm64, deterministic package/app tests, M8 benchmark, and
+M9 packaging audit. The opt-in ScreenCaptureKit system smoke was skipped by
+design, and two-Mac physical acceptance remains pending. Previous `build/`
+distribution outputs were cleared before packaging; `.build` validation caches
+were retained. Both Debug apps, ZIPs, and DMGs were Developer ID signed,
+accepted by Apple, stapled, and passed Gatekeeper, ticket, and final package
+audits. Apple submission IDs:
+
+| Artifact | Apple submission ID | Status |
+| --- | --- | --- |
+| Host app ZIP | `ae9d6b72-c645-49e0-8440-cdd9225c6971` | Accepted |
+| Viewer app ZIP | `c4aae6ed-922d-4923-8204-fcdc84471d45` | Accepted |
+| Host DMG | `4fb006e7-7463-4194-8a17-e1d86f30a04a` | Accepted |
+| Viewer DMG | `43f2a367-1d64-4a0b-b211-5090cc4f0aca` | Accepted |
+
+The artifacts are in `build/debug-diagnostic/`:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1040.app.zip` | `33f043fbd3c6c5a1f8b78112cbab310fde3835af8b7622dad2f5521c1c8e0646` |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1040.dmg` | `b26680a605234d2af5b4e012ce35d2b91052f4f04ba735ea54aaba66042902d3` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1040.app.zip` | `3ad0a980d284840b44c3bedab02598cf08cf615dad0432019a95cd7dd8772d0a` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1040.dmg` | `02d3f9abc7c318ef848cded46d357f3b587b234101ea80bfc2c30ca0f1508783` |
+
+These artifacts are for in-house diagnostics, not a public release. Physical
+background-window selection and Chinese input acceptance remain pending.
 
 ### 0.2.1039 M3/M6/M7/M10 in-house Debug diagnostic artifacts
 

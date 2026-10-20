@@ -199,9 +199,11 @@ switch the Viewer to your Chinese input method and type in the remote view.
 The candidate window and the text being composed appear on the Viewer, near
 where you last clicked in the remote window; the chosen characters are sent to
 the Host app. Return, Delete, arrows, and Command/Control shortcuts still act
-on the Host app directly. Meanwhile the Host stays on an English source, so
-you do not need the Chinese input method on the Host. A few apps that ignore
-inserted text (for example some games) may not accept it.
+on the Host app directly. With **Follow Viewer input source** enabled, the
+Host is synchronized to an English source while the Viewer composes Chinese;
+if source following is unavailable, set the Host to English manually. The Host
+does not need the Chinese input method. A few apps that ignore inserted text
+(for example some games) may not accept it.
 
 With older builds, composition and candidate selection occur on the Host, and
 the candidate window may not be visible because the stream captures only the

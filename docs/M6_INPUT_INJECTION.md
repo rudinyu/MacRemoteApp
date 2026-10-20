@@ -164,7 +164,8 @@ For the M6 boundary this means:
 
 - `HostInputMapper` copies `keyCode` and the device-independent `modifiers`
   mask into `HostInputCommand.key` unchanged. It does not remap key codes
-  for ANSI/ISO/JIS differences and has no character or text command.
+  for ANSI/ISO/JIS differences. The original M6 physical-key path has no text
+  command.
 - `CoreGraphicsAccessibilityInputAdapter` posts that key code with a `nil`
   event source, so the target application uses the Host's keyboard layout,
   keyboard type, and input method. Dead-key and IME composition therefore
@@ -172,9 +173,13 @@ For the M6 boundary this means:
   events the Viewer received.
 - Modifier key events are admitted and released like other keys. A reset
   releases admitted keys with an empty modifier mask.
-- Viewer-side IME text entry, character translation, and a text-insertion
-  message are out of V1 scope. Any proposal to add one needs a recorded
-  design decision and the user's approval before a wire change.
+- Viewer-side IME composition and committed-text events are a separate,
+  user-approved M10 extension in
+  [ADR-0008](decisions/0008-m10-viewer-text-composition.md). They are used only
+  when the optional `textInput` capability is negotiated; marked text remains
+  on the Viewer, and committed text passes the same Host authorization and
+  secure-input checks as keyboard input. This does not add general character
+  translation or change the M6 physical-key path.
 - Key codes and modifier masks never appear in logs, errors, status, or
   receipts. The secure-input rejection applies regardless of layout or input
   method.
@@ -192,7 +197,9 @@ conditions apply immediately before selection, inside the session admission
 and window-replacement fences. Chinese requires the matching enabled mode;
 EN on an already-English Host is unchanged. Real source selection/composition
 still requires physical acceptance, and automated tests must not change the
-desktop's actual source.
+desktop's actual source. With ADR-0008 negotiated, Chinese composition occurs
+on the Viewer and only committed text is sent; older peers continue to compose
+on the Host.
 
 ## Verification
 

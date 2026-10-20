@@ -897,6 +897,31 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
     }
 
     @MainActor
+    func testCommandAndControlShortcutsBypassLocalCompositionWithMarkedText() {
+        for modifiers in [NSEvent.ModifierFlags.command, .control] {
+            XCTAssertFalse(
+                ViewerInputSurface.shouldRouteThroughLocalComposition(
+                    inputReady: true,
+                    hasMarkedText: true,
+                    modifierFlags: modifiers,
+                    localCompositionActive: { true }
+                ),
+                "Command and Control shortcuts must remain physical keys during composition."
+            )
+        }
+
+        XCTAssertTrue(
+            ViewerInputSurface.shouldRouteThroughLocalComposition(
+                inputReady: true,
+                hasMarkedText: true,
+                modifierFlags: [],
+                localCompositionActive: { false }
+            ),
+            "Unmodified keys must continue composing while marked text exists."
+        )
+    }
+
+    @MainActor
     func testSurfaceSendsOnlyCommittedTextNeverMarkedText() {
         let surface = ViewerInputSurface(
             frame: NSRect(x: 0, y: 0, width: 400, height: 300),

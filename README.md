@@ -10,17 +10,16 @@ Host; this is deliberately not a full remote-desktop product.
 Milestone state and open evidence gaps are tracked in one place:
 [`docs/STATUS.md`](docs/STATUS.md).
 
-Build `0.2.1039` is the current in-house M10 Debug diagnostic pair in
+Build `0.2.1040` is the current in-house M10 Debug diagnostic pair in
 `build/debug-diagnostic/`. Full `.codex/ci.sh` validation passed on 2026-10-20.
 The Host and Viewer apps, ZIPs, and DMGs are Developer ID signed, accepted by
-Apple, stapled, and passed Gatekeeper and final package audits. Build `1039`
-includes the M3 background-window catalog and capture-recovery corrections,
-M6's same-app visible-window fallback after a background target cannot be
-revealed, M7 Viewer selection reconciliation when the Host replaces or closes
-the streaming window, and M10's fixed-category capture-loss log scope. The
-foreground and per-event input authorization checks remain in force. Physical
-offscreen-selection and full two-Mac input/recovery acceptance remain pending.
-Earlier local build outputs were cleared before creating this pair; `.build`
+Apple, stapled, and passed Gatekeeper and final package audits. Build `1040`
+adds untitled background-window selection for regular apps with
+no on-screen window, and optional Viewer-side Chinese composition that sends
+only committed text. Marked text and candidates stay on the Viewer; Host
+foreground, permission, target, and secure-input checks still apply. Physical
+window-selection and two-Mac Chinese-input acceptance remain pending. Earlier
+distribution outputs were cleared before creating this pair; `.build`
 validation caches were retained. See
 [`docs/STATUS.md`](docs/STATUS.md) for artifact hashes, Apple submission IDs,
 and remaining acceptance evidence.
@@ -37,11 +36,12 @@ separate Viewer-local opt-in. Physical background-stream, input, and clipboard
 acceptance remains pending. See the
 [P6 contract](docs/P6_BACKGROUND_CONTROL.md).
 
-Viewer-led Chinese/English input-source following is supported. The Host sets
-the requested state instead of replaying a toggle:
-an already-English Host stays English, while Chinese requires the same enabled
-input method on both Macs. Keyboard delivery waits for the matching Host
-acknowledgement; mouse control remains independent. Settings includes
+Viewer-led Chinese/English input-source following is supported. On Build 1040
+peers, Chinese composition occurs on the Viewer and committed text is sent to
+the Host; when input-source following is active, the Host is synchronized to
+English. Older peers continue to use Host-side composition. The Host sets the
+requested state instead of replaying a toggle; keyboard delivery waits for the
+matching Host acknowledgement and mouse control remains independent. Settings includes
 **Follow Viewer input source**, and the remote view offers retry after a
 sync failure. See the
 [input guide](docs/USER_GUIDE.md) and

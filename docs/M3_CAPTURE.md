@@ -15,9 +15,10 @@ clipboard content, or introduce whole-desktop capture.
   authorization/injection adapters.
 - The system provider excludes desktop windows and requires a layer-0 window,
   a non-empty application bundle identifier, positive bounds, and a user-facing
-  app. The catalog includes on-screen windows and titled offscreen windows of
-  regular apps; it excludes untitled offscreen utility surfaces and offscreen
-  windows of agent/accessory apps. The default minimum selectable window is
+  app. The catalog includes on-screen windows and at most one offscreen window
+  per regular app that has no on-screen window. It prefers a titled window;
+  when none is titled, it offers the largest untitled window. Agent/accessory
+  app windows remain excluded. The default minimum selectable window is
   160×80 points, which prevents common 1×33 preview/service windows while
   preserving normal app windows such as LINE and ChatGPT.
 - `CaptureWindow.isOnScreen` records the catalog visibility. Selecting an
@@ -103,8 +104,9 @@ Deterministic tests use fake window and capture providers to cover:
 - selected-window start/stop and generation-tagged frame delivery;
 - permission loss and window disappearance fail-closed behavior;
 - rejection of ineligible windows;
-- catalog policy for titled offscreen windows of regular apps and visibility
-  metadata;
+- catalog policy for one representative offscreen window per regular app,
+  preferring titles and falling back to the largest untitled window, plus
+  visibility metadata;
 - bounded output configuration;
 - pixel output sizing at backing scale 1 and 2, oversized-window downscaling
   with preserved aspect ratio, display selection by largest overlap, and
