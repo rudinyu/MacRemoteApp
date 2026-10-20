@@ -460,7 +460,7 @@ final class M10ViewerDebugDiagnosticsTests: XCTestCase {
             .mouseMove, .buttonDown, .buttonUp, .scroll, .keyDown, .keyUp
         ])
         XCTAssertEqual(Set(M10ViewerInputEventKind.allCases.map(\.rawValue)), [
-            "mouse_move", "button_down", "button_up", "scroll", "key_down", "key_up", "focus_intent", "other"
+            "mouse_move", "button_down", "button_up", "scroll", "key_down", "key_up", "focus_intent", "text", "other"
         ])
     }
 

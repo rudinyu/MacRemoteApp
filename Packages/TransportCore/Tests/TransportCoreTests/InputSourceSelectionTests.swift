@@ -222,6 +222,62 @@ final class InputSourceSelectionTests: XCTestCase {
         await sessions.viewer.stop()
     }
 
+    func testViewerComposedTextRequiresTextInputCapability() async throws {
+        let text = InputEventMessage(kind: .text, windowGeneration: 31, text: "你好")
+
+        let older = try await makeSessions(
+            hostCapabilities: [.pingPong, .keyboardInput],
+            viewerCapabilities: [.pingPong, .keyboardInput, .textInput]
+        )
+        do {
+            try await older.host.authorize(windowGeneration: 31, capabilities: [.keyboardInput])
+            let snapshot = try await waitForSnapshot(of: older.viewer) {
+                $0.authorized && $0.authorizedWindowGeneration == 31
+            }
+            XCTAssertFalse(snapshot.negotiatedCapabilities.contains(.textInput))
+            do {
+                _ = try await older.viewer.makeInputAdmission(
+                    for: text,
+                    expectedAuthorizationGeneration: snapshot.authorizationGeneration
+                )
+                XCTFail("text must not be sent to a Host without the textInput capability")
+            } catch {
+                // Expected: not negotiated.
+            }
+        } catch {
+            await older.host.stop()
+            await older.viewer.stop()
+            throw error
+        }
+        await older.host.stop()
+        await older.viewer.stop()
+
+        let current = try await makeSessions(
+            hostCapabilities: [.pingPong, .keyboardInput, .textInput],
+            viewerCapabilities: [.pingPong, .keyboardInput, .textInput]
+        )
+        do {
+            try await current.host.authorize(windowGeneration: 31, capabilities: [.keyboardInput, .textInput])
+            let snapshot = try await waitForSnapshot(of: current.viewer) {
+                $0.authorized && $0.authorizedWindowGeneration == 31
+            }
+            let admission = try await current.viewer.makeInputAdmission(
+                for: text,
+                expectedAuthorizationGeneration: snapshot.authorizationGeneration
+            )
+            try await current.viewer.sendInput(text, using: admission)
+            let received = try await nextInputEvent(from: current.host.incomingMessages, timeout: .seconds(3))
+            XCTAssertEqual(received.kind, .text)
+            XCTAssertEqual(received.text, "你好")
+        } catch {
+            await current.host.stop()
+            await current.viewer.stop()
+            throw error
+        }
+        await current.host.stop()
+        await current.viewer.stop()
+    }
+
     func testInputSourceSyncCapabilityIsOptionalForOlderPeers() async throws {
         let sessions = try await makeSessions(
             hostCapabilities: [.pingPong, .keyboardInput],

@@ -8,6 +8,10 @@ keyboard journey. It supersedes the rule that the operator must manually
 align Host input sources; physical key transport and Host-side IME composition
 remain unchanged. It does not authorize Viewer-side text composition, Unicode
 text insertion, dictation, background control, or installation of input methods.
+[ADR-0008](0008-m10-viewer-text-composition.md) later authorizes Viewer-side
+composition with committed-text input events for peers negotiating
+`textInput`; while it is active, this following targets an English Host
+source.
 
 ## Decision
 

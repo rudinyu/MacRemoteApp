@@ -192,12 +192,22 @@ When both updated peers authorize input-source synchronization, click inside
 the Viewer remote surface and use the Viewer's normal Chinese/English switch.
 The Host follows the selected state, not another toggle: if Viewer becomes EN
 and Host is already EN, Host stays EN. Keyboard delivery waits for the matching
-Host acknowledgement. Composition and candidate selection still occur on the
-Host. Visibility of a separate IME candidate panel needs checking with the
-target app; the stream captures the selected window, not the entire desktop.
+Host acknowledgement.
 
-For Chinese, add and enable the same input method/mode on **both Macs** in
-System Settings > Keyboard > Text Input. Pinyin and Zhuyin are not interchangeable.
+With current Host and Viewer builds, Chinese is composed **on the Viewer**:
+switch the Viewer to your Chinese input method and type in the remote view.
+The candidate window and the text being composed appear on the Viewer, near
+where you last clicked in the remote window; the chosen characters are sent to
+the Host app. Return, Delete, arrows, and Command/Control shortcuts still act
+on the Host app directly. Meanwhile the Host stays on an English source, so
+you do not need the Chinese input method on the Host. A few apps that ignore
+inserted text (for example some games) may not accept it.
+
+With older builds, composition and candidate selection occur on the Host, and
+the candidate window may not be visible because the stream captures only the
+selected window. Then add and enable the same input method/mode on **both
+Macs** in System Settings > Keyboard > Text Input. Pinyin and Zhuyin are not
+interchangeable.
 If the Host lacks the matching enabled source, keyboard input pauses with an
 input-source status; mouse control can remain available. Enable the matching
 source locally on Host, then use `Retry source sync` in the Viewer or return

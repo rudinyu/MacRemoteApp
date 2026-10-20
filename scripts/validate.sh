@@ -495,13 +495,26 @@ if [[ -n "${pasteboard_scope_hits}" ]]; then
 fi
 
 echo "Checking keyboard layout policy boundary"
-# V1 forwards physical key positions; the Host's active input source
-# interprets them. The input path must not translate characters, insert text,
-# adopt a Viewer-side input method, or bypass secure input.
+# Physical key positions are forwarded and the Host's active input source
+# interprets them. The input path must not translate characters or bypass
+# secure input. ADR-0008 allows exactly two text paths: the Viewer surface is
+# an NSTextInputClient for the Viewer's own input method, and the Host adapter
+# posts committed text with keyboardSetUnicodeString. Those APIs are rejected
+# everywhere else in the input path.
 keyboard_policy_hits="$(find Packages/InputCore/Sources Apps/Host Apps/Viewer \
     -type f \( -path 'Packages/InputCore/Sources/*' -o -name 'HostInput*.swift' \
     -o -name 'ViewerInput*.swift' \) -name '*.swift' \
-    -exec grep -nE 'keyboardSetUnicodeString|keyboardGetUnicodeString|charactersIgnoringModifiers|\.characters\b|interpretKeyEvents|NSTextInputClient|insertText|UCKeyTranslate|DisableSecureEventInput' {} + || true)"
+    -exec grep -nE 'keyboardGetUnicodeString|charactersIgnoringModifiers|\.characters\b|interpretKeyEvents|UCKeyTranslate|DisableSecureEventInput' {} + || true)"
+text_insertion_hits="$(find Packages/InputCore/Sources Apps/Host Apps/Viewer \
+    -type f \( -path 'Packages/InputCore/Sources/*' -o -name 'HostInput*.swift' \
+    -o -name 'ViewerInput*.swift' \) -name '*.swift' \
+    ! -path 'Packages/InputCore/Sources/InputCore/CoreGraphicsAccessibilityInput.swift' \
+    ! -path 'Apps/Viewer/ViewerInputSurface.swift' \
+    -exec grep -nE 'keyboardSetUnicodeString|NSTextInputClient|insertText' {} + || true)"
+unicode_post_hits="$(grep -nE 'NSTextInputClient|insertText' \
+    Packages/InputCore/Sources/InputCore/CoreGraphicsAccessibilityInput.swift || true)"
+surface_post_hits="$(grep -nE 'keyboardSetUnicodeString' Apps/Viewer/ViewerInputSurface.swift || true)"
+keyboard_policy_hits="${keyboard_policy_hits}${text_insertion_hits}${unicode_post_hits}${surface_post_hits}"
 input_source_api_hits="$(find Packages/InputCore/Sources Apps/Host Apps/Viewer \
     -type f \( -path 'Packages/InputCore/Sources/*' -o -name 'HostInput*.swift' \
     -o -name 'ViewerInput*.swift' \) -name '*.swift' \

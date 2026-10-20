@@ -339,6 +339,8 @@ public enum HostInputCommand: Equatable, Sendable {
     case scroll(target: HostInputTarget, location: InputScreenPoint, deltaX: Int32, deltaY: Int32)
     case key(target: HostInputTarget, keyCode: UInt16, modifiers: UInt32, pressed: Bool)
     case focusIntent(target: HostInputTarget)
+    /// Committed text composed by the Viewer's input method (ADR-0008).
+    case text(target: HostInputTarget, text: String)
 }
 
 public struct HostInputInjectionReceipt: Equatable, Sendable {
@@ -500,6 +502,14 @@ public enum HostInputMapper {
                 throw HostInputError.capabilityUnavailable(.mouse)
             }
             return .focusIntent(target: HostInputTarget(selection: selection))
+        case .text:
+            guard context.keyboardInputEnabled else {
+                throw HostInputError.capabilityUnavailable(.keyboard)
+            }
+            guard let text = record.text, InputEventRecord.isValidText(text) else {
+                throw HostInputError.invalidEvent
+            }
+            return .text(target: HostInputTarget(selection: selection), text: text)
         }
     }
 

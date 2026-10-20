@@ -129,6 +129,8 @@ enum M10HostInputEventKind: String, CaseIterable, Equatable, Hashable, Sendable 
     case keyDown = "key_down"
     case keyUp = "key_up"
     case focusIntent = "focus_intent"
+    /// Viewer-composed text (ADR-0008). Only the count is recorded.
+    case text
     case other
 
     static func forMessage(_ input: InputEventMessage) -> Self {
@@ -144,6 +146,7 @@ enum M10HostInputEventKind: String, CaseIterable, Equatable, Hashable, Sendable 
         case .keyDown: .keyDown
         case .keyUp: .keyUp
         case .focusIntent: .focusIntent
+        case .text: .text
         }
     }
 }

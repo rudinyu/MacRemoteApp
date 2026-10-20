@@ -222,6 +222,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         .mouseInput,
         .keyboardInput,
         .inputSourceSync,
+        .textInput,
         .textClipboard,
         .keyframeRequest,
         .receiverReport,
@@ -313,7 +314,7 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var hostInputFocusEligible = false
     private var hostInputStatusGeneration: UInt64?
     private var isShuttingDown = false
-    private let inputSourceProvider = SystemInputSourceProvider()
+    private let inputSourceProvider = ViewerHostInputSourceTargetProvider(base: SystemInputSourceProvider())
     private var inputSourceObserver: SystemInputSourceObserver?
     private var inputSourceSyncGate = ViewerInputSourceSyncGate()
     private var inputSourceRetryGate = ViewerInputSourceRetryGate()
@@ -594,6 +595,9 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         content.onJISEisuKey = { [weak self] in
             self?.handleJISEisuKey() ?? false
+        }
+        content.surface.isLocalTextCompositionActive = { [weak self] in
+            self?.inputSourceProvider.isLocalTextCompositionActive ?? false
         }
         content.onJISKanaKey = { [weak self] in
             self?.handleJISKanaKey() ?? false
@@ -2399,6 +2403,12 @@ final class ViewerRuntime: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 )
             }
         }
+        // ADR-0008: compose with the Viewer's input method only when the Host
+        // accepts committed text and keyboard input is currently enabled.
+        inputSourceProvider.setLocalTextCompositionAvailable(
+            snapshot.negotiatedCapabilities.contains(.textInput) &&
+                inputCapabilities.keyboardInputEnabled
+        )
         if case let .ready(windowGeneration) = readiness,
            let sessionLifetimeID {
             updateInputSendScope(

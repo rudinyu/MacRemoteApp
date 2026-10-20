@@ -547,7 +547,16 @@ in [Input safety](SECURITY.md#input-safety).
 
 The approved M10 extension in
 [ADR-0007](decisions/0007-m10-input-source-following.md) keeps physical key
-transport and Host-side IME composition. `RemoteProtocol` defines a bounded
+transport and Host-side IME composition for peers without `textInput`.
+[ADR-0008](decisions/0008-m10-viewer-text-composition.md) adds Viewer-side
+composition: when `textInput` is negotiated and the Viewer's source is a
+Chinese input method, `ViewerInputSurface` acts as an `NSTextInputClient`,
+keeps marked text and candidates local, sends committed text as `InputEvent`
+kind `text` through the same ordered input queue, and forwards keys the input
+method does not use as physical keys. `ViewerHostInputSourceTargetProvider`
+makes source following target an English Host source meanwhile. The Host
+adapter posts committed text as Unicode keyboard events under the same
+per-event checks. `RemoteProtocol` defines a bounded
 source-selection request and acknowledgement; `TransportCore` owns their
 direction, negotiated capability, selected-window, authorization-epoch, and
 protected-queue gates. `InputCore` owns source classification, enabled-source

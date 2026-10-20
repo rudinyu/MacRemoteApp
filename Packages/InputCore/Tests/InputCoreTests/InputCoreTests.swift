@@ -1544,6 +1544,67 @@ final class InputCoreTests: XCTestCase {
         XCTAssertEqual(tracker.toggle(keyCode: 56), .pressed)
     }
 
+    func testTextRecordsValidateAndMapOnlyWithKeyboardCapability() throws {
+        let record = InputEventRecord(
+            sequence: 1,
+            timestampNanoseconds: 1_000,
+            windowGeneration: 9,
+            kind: .text,
+            text: "你好"
+        )
+        XCTAssertNoThrow(try record.validate())
+        guard case let .text(_, text) = try HostInputMapper.command(for: record, in: authorizedHostContext()) else {
+            return XCTFail("expected a text command")
+        }
+        XCTAssertEqual(text, "你好")
+
+        XCTAssertThrowsError(
+            try HostInputMapper.command(for: record, in: authorizedHostContext(keyboardInputEnabled: false)),
+            "Committed text is keyboard input and needs the keyboard capability."
+        )
+        for invalid in [
+            InputEventRecord(sequence: 2, timestampNanoseconds: 1, windowGeneration: 9, kind: .text),
+            InputEventRecord(sequence: 3, timestampNanoseconds: 1, windowGeneration: 9, kind: .text, text: "a\nb"),
+            InputEventRecord(sequence: 4, timestampNanoseconds: 1, windowGeneration: 9, kind: .keyDown, keyCode: 0, modifiers: 0, text: "a")
+        ] {
+            XCTAssertThrowsError(try invalid.validate())
+        }
+    }
+
+    func testCommittedTextSplitsOnCharacterBoundaries() {
+        let long = String(repeating: "中", count: 100) // 300 UTF-8 bytes
+        let pieces = InputEventRecord.splitText(long)
+        XCTAssertEqual(pieces.joined(), long)
+        XCTAssertTrue(pieces.allSatisfy { $0.utf8.count <= InputEventRecord.maximumTextBytes })
+        XCTAssertEqual(InputEventRecord.splitText("a\nb\tc"), ["abc"], "Control characters travel as key events instead.")
+        XCTAssertEqual(InputEventRecord.splitText("\n"), [])
+
+        let emoji = "👩‍💻"
+        let chunks = UnicodeTextEventChunks.chunks(of: String(repeating: emoji, count: 4) + "字")
+        XCTAssertEqual(chunks.joined(), String(repeating: emoji, count: 4) + "字")
+        XCTAssertTrue(chunks.allSatisfy { $0.utf16.count <= UnicodeTextEventChunks.maximumUTF16Units })
+        XCTAssertTrue(chunks.allSatisfy { chunk in chunk.allSatisfy { $0 == Character(emoji) || $0 == "字" } },
+                      "A composed character must never be split across Quartz events.")
+    }
+
+    func testNormalizerProducesSequencedTextRecordsOnlyWhenReady() throws {
+        var normalizer = InputEventNormalizer(
+            contentRect: InputContentRect(originX: 0, originY: 0, width: 100, height: 100),
+            readiness: .ready(windowGeneration: 5)
+        )
+        let first = try normalizer.text("你", timestampNanoseconds: 1)
+        let second = try normalizer.text("好", timestampNanoseconds: 2)
+        XCTAssertEqual(first.kind, .text)
+        XCTAssertEqual(first.windowGeneration, 5)
+        XCTAssertLessThan(first.sequence, second.sequence)
+
+        var notReady = InputEventNormalizer(
+            contentRect: InputContentRect(originX: 0, originY: 0, width: 100, height: 100),
+            readiness: .awaitingAuthorization
+        )
+        XCTAssertThrowsError(try notReady.text("你", timestampNanoseconds: 1))
+    }
+
     func testHostMapsNormalizedPointerToSelectedWindowScreenCoordinates() throws {
         let context = authorizedHostContext()
         let record = InputEventRecord(

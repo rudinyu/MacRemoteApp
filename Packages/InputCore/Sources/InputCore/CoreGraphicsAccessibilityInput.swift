@@ -1132,6 +1132,32 @@ struct HostPointerEventState: Sendable {
     }
 }
 
+/// Splits text into pieces that one Quartz keyboard event can carry. A
+/// Unicode string on a CGEvent is limited to 20 UTF-16 code units; pieces
+/// break only between characters so surrogate pairs and composed glyphs stay
+/// intact.
+enum UnicodeTextEventChunks {
+    static let maximumUTF16Units = 20
+
+    static func chunks(of text: String) -> [String] {
+        var result: [String] = []
+        var current = ""
+        var currentUnits = 0
+        for character in text {
+            let units = character.utf16.count
+            if currentUnits + units > maximumUTF16Units, !current.isEmpty {
+                result.append(current)
+                current = ""
+                currentUnits = 0
+            }
+            current.append(character)
+            currentUnits += units
+        }
+        if !current.isEmpty { result.append(current) }
+        return result
+    }
+}
+
 enum HostInputEventDeliveryRoute: Equatable {
     case system
     case targetProcessCleanup
@@ -1335,6 +1361,34 @@ public final class CoreGraphicsAccessibilityInputAdapter: HostInputInjectionAdap
             // Mouse events carry the modifier state the Viewer reported on its
             // latest keyboard event, so Shift-click and Command-click work.
             updatePointerState { $0.didPostKey(modifiers: UInt64(modifiers)) }
+        case let .text(target, text):
+            // Committed text from the Viewer's input method (ADR-0008). Each
+            // chunk is a key-down/key-up pair carrying a Unicode string, so no
+            // Host input method composes it again; every event passes the same
+            // final keyboard target/permission/focus/secure-input check.
+            _ = adoptPointerState(for: target)
+            for chunk in UnicodeTextEventChunks.chunks(of: text) {
+                var units = Array(chunk.utf16)
+                for pressed in [true, false] {
+                    guard let event = CGEvent(
+                        keyboardEventSource: nil,
+                        virtualKey: 0,
+                        keyDown: pressed
+                    ) else {
+                        throw HostInputAdapterError.eventCreationFailed
+                    }
+                    event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+                    event.flags = []
+                    try post(
+                        event,
+                        target: target,
+                        requiredCapability: .keyboard,
+                        location: nil,
+                        allowUnauthorizedStateRelease: allowUnauthorizedStateRelease,
+                        allowNotForegroundStateRelease: allowNotForegroundStateRelease
+                    )
+                }
+            }
         }
     }
 

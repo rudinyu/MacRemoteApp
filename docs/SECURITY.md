@@ -330,6 +330,17 @@ invalidates pending keyboard delivery; an operation already admitted by Host
 can complete. There is no background restoration of the Host's prior source. See
 [ADR-0007](decisions/0007-m10-input-source-following.md).
 
+Viewer-side composition ([ADR-0008](decisions/0008-m10-viewer-text-composition.md))
+adds committed-text `InputEvent`s for peers negotiating `textInput`. Text is
+keyboard input: it requires `keyboardInput` and `textInput`, the selected
+generation, and the same final target, permission, foreground, console, and
+secure-input checks immediately before each Unicode keyboard event is posted;
+a detected secure-input field rejects it. Text is bounded (1–256 UTF-8 bytes,
+no control characters), shares the ordered input stream and invalidation
+paths with keys, creates no held state, and is never logged, included in
+errors, status, receipts, or diagnostics. Marked text never leaves the Viewer
+and is discarded on focus loss.
+
 - Screen Recording is required for Host-side ScreenCaptureKit capture.
 - PostEvent permission is required for Host-side Quartz keyboard, pointer, and
   scroll injection. Accessibility is optional for ordinary foreground

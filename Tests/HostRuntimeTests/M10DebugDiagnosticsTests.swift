@@ -499,8 +499,13 @@ final class M10DebugDiagnosticsTests: XCTestCase {
         XCTAssertEqual(messages.map(M10HostInputEventKind.forMessage), [
             .mouseMove, .buttonDown, .buttonUp, .scroll, .keyDown, .keyUp
         ])
+        XCTAssertEqual(
+            M10HostInputEventKind.forMessage(InputEventMessage(kind: .text, windowGeneration: 1, text: "字")),
+            .text,
+            "Viewer-composed text is counted by kind only; its content is never recorded."
+        )
         XCTAssertEqual(Set(M10HostInputEventKind.allCases.map(\.rawValue)), [
-            "mouse_move", "button_down", "button_up", "scroll", "key_down", "key_up", "focus_intent", "other"
+            "mouse_move", "button_down", "button_up", "scroll", "key_down", "key_up", "focus_intent", "text", "other"
         ])
     }
 

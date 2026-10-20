@@ -16,3 +16,4 @@ evidence gaps live in [the status page](../STATUS.md).
 | [ADR-0005](0005-m6-host-input-binding.md) | M6 | Host input admission, mapping, and cleanup binding | [Protocol](../PROTOCOL.md#input-contract) |
 | [ADR-0006](0006-m8-transport-baseline-and-benchmark.md) | M8 | Transport baseline, clock-sync probes, video queue | [Architecture](../ARCHITECTURE.md#architecture-decisions-to-record-during-implementation) |
 | [ADR-0007](0007-m10-input-source-following.md) | M10 | Viewer-led Chinese/English input-source synchronization | [Protocol](../PROTOCOL.md#viewer-led-input-source-synchronization-m10) |
+| [ADR-0008](0008-m10-viewer-text-composition.md) | M10 | Viewer-side text composition and committed-text input events | [Protocol](../PROTOCOL.md#viewer-side-text-composition-m10) |

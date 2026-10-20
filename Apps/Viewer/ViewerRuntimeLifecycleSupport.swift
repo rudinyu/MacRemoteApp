@@ -782,7 +782,7 @@ final class ViewerInputSendQueue {
         case .pointerButton:
             guard let button = record.button, let pressed = record.pressed else { return nil }
             return pressed ? .began(.pointerButton(button)) : .ended(.pointerButton(button))
-        case .pointerMove, .scroll, .focusIntent:
+        case .pointerMove, .scroll, .focusIntent, .text:
             return nil
         }
     }
@@ -801,5 +801,73 @@ final class ViewerPresentationLifetime {
 
     func accepts(_ candidate: UUID) -> Bool {
         token == candidate
+    }
+}
+
+/// ADR-0008 bridge between local composition and ADR-0007 source following.
+/// While the session negotiates `textInput` and the Viewer's own source is a
+/// Chinese input method, the Viewer composes locally and sends committed text,
+/// so the Host must stay on an English source: a Host input method would
+/// otherwise re-compose forwarded keys. Source following reads the Viewer
+/// source through this provider, which then reports an enabled English source.
+final class ViewerHostInputSourceTargetProvider: InputSourceProvider, @unchecked Sendable {
+    private let base: any InputSourceProvider
+    private let lock = NSLock()
+    private var localTextCompositionAvailable = false
+
+    init(base: any InputSourceProvider) {
+        self.base = base
+    }
+
+    func setLocalTextCompositionAvailable(_ available: Bool) {
+        lock.lock()
+        localTextCompositionAvailable = available
+        lock.unlock()
+    }
+
+    private var compositionAvailable: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return localTextCompositionAvailable
+    }
+
+    /// True when keystrokes should compose with the Viewer's input method.
+    @MainActor
+    var isLocalTextCompositionActive: Bool {
+        compositionAvailable && base.currentInputSource()?.kind == .chinese
+    }
+
+    @MainActor
+    func currentInputSource() -> InputSourceDescriptor? {
+        guard let current = base.currentInputSource() else { return nil }
+        guard compositionAvailable, current.kind == .chinese else { return current }
+        return Self.hostEnglishTarget(from: base.enabledInputSources())
+    }
+
+    /// The Viewer's enabled English source, used as the Host target. The Host
+    /// applies ADR-0007's bounded English fallback if it lacks that exact one.
+    static func hostEnglishTarget(from enabled: [InputSourceDescriptor]) -> InputSourceDescriptor? {
+        enabled
+            .filter { $0.kind == .english }
+            .sorted { $0.identifier < $1.identifier }
+            .first
+    }
+
+    @MainActor
+    func enabledInputSources() -> [InputSourceDescriptor] {
+        base.enabledInputSources()
+    }
+
+    @MainActor
+    func selectInputSource(_ descriptor: InputSourceDescriptor) -> InputSourceSelectionOutcome {
+        base.selectInputSource(descriptor)
+    }
+
+    @MainActor
+    func selectInputSource(
+        _ descriptor: InputSourceDescriptor,
+        validatingImmediatelyBeforeSelection isStillEligible: @MainActor () -> Bool
+    ) -> InputSourceSelectionOutcome {
+        base.selectInputSource(descriptor, validatingImmediatelyBeforeSelection: isStillEligible)
     }
 }

@@ -2599,6 +2599,10 @@ public actor SessionCoordinator {
             switch input.kind {
             case .keyDown, .keyUp:
                 return Set<Capability>([.keyboardInput]).union(controlRequirement)
+            case .text:
+                // Viewer-composed text (ADR-0008) is keyboard input that only
+                // peers negotiating `textInput` may send or receive.
+                return Set<Capability>([.keyboardInput, .textInput]).union(controlRequirement)
             case .pointerMove, .pointerButton, .scroll, .focusIntent:
                 return Set<Capability>([.mouseInput]).union(controlRequirement)
             }

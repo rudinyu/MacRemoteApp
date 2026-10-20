@@ -355,6 +355,14 @@ final class ViewerInputTransport {
                 windowGeneration: record.windowGeneration,
                 controlGeneration: controlGeneration
             )
+        case .text:
+            guard let text = record.text else { throw InputCoreError.invalidEvent }
+            return InputEventMessage(
+                kind: .text,
+                windowGeneration: record.windowGeneration,
+                controlGeneration: controlGeneration,
+                text: text
+            )
         }
     }
 }

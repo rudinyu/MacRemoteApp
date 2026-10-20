@@ -7,6 +7,39 @@ final class RemoteProtocolTests: XCTestCase {
         XCTAssertEqual(RemoteProtocolModule.name, "RemoteProtocol")
     }
 
+    func testTextInputEventRoundTripsAndRejectsUnsafeOrMixedPayloads() throws {
+        XCTAssertEqual(Capability(rawValue: 0x000B), .textInput)
+        XCTAssertEqual(Capability.textInput.rawValue, 0x000B)
+
+        let committed = InputEventMessage(kind: .text, windowGeneration: 7, text: "你好，世界")
+        let decoded = try InputEventMessage.decode(committed.encoded())
+        XCTAssertEqual(decoded.kind, .text)
+        XCTAssertEqual(decoded.text, "你好，世界")
+        XCTAssertNil(decoded.keyCode)
+
+        let maximal = String(repeating: "中", count: InputEventMessage.maximumTextBytes / 3)
+        XCTAssertNoThrow(try InputEventMessage(kind: .text, windowGeneration: 7, text: maximal).encoded())
+
+        for unsafe in ["", "line\nbreak", "tab\tstop", "\u{7F}", String(repeating: "a", count: 257)] {
+            XCTAssertThrowsError(
+                try InputEventMessage(kind: .text, windowGeneration: 7, text: unsafe).encoded(),
+                "Unsafe text payload must be rejected: \(unsafe.debugDescription)"
+            )
+        }
+        XCTAssertThrowsError(
+            try InputEventMessage(kind: .text, windowGeneration: 7).encoded(),
+            "A text event requires text."
+        )
+        XCTAssertThrowsError(
+            try InputEventMessage(kind: .text, windowGeneration: 7, keyCode: 0, modifiers: 0, text: "a").encoded(),
+            "A text event must not carry key fields."
+        )
+        XCTAssertThrowsError(
+            try InputEventMessage(kind: .keyDown, windowGeneration: 7, keyCode: 0, modifiers: 0, text: "a").encoded(),
+            "Only text events may carry text."
+        )
+    }
+
     func testPairingCommitRevealMessagesRoundTripAndBoundContributions() throws {
         let contribution = Data(repeating: 0xAB, count: 32)
         let challenge = PairingChallengeMessage(

@@ -119,6 +119,8 @@ public enum InputEventKind: UInt8, Equatable, Hashable, Sendable {
     case keyDown = 4
     case keyUp = 5
     case focusIntent = 6
+    /// Committed text from the Viewer's own input method (ADR-0008).
+    case text = 7
 }
 
 public struct InputEventLimits: Equatable, Sendable {
@@ -263,6 +265,19 @@ public struct InputEventRecord: Equatable, Sendable {
     public let deltaY: Int32?
     public let keyCode: UInt16?
     public let modifiers: UInt32?
+    /// Committed text for kind `text` only. Never logged.
+    public let text: String?
+
+    /// Matches the RemoteProtocol `InputEvent` text bound (ADR-0008).
+    public static let maximumTextBytes = 256
+
+    /// Non-empty, at most `maximumTextBytes` UTF-8 bytes, no control
+    /// characters. Control keys such as Return travel as key events.
+    public static func isValidText(_ text: String) -> Bool {
+        let byteCount = text.utf8.count
+        guard byteCount > 0, byteCount <= maximumTextBytes else { return false }
+        return !text.unicodeScalars.contains { $0.properties.generalCategory == .control }
+    }
 
     public init(
         sequence: UInt64,
@@ -276,7 +291,8 @@ public struct InputEventRecord: Equatable, Sendable {
         deltaX: Int32? = nil,
         deltaY: Int32? = nil,
         keyCode: UInt16? = nil,
-        modifiers: UInt32? = nil
+        modifiers: UInt32? = nil,
+        text: String? = nil
     ) {
         self.sequence = sequence
         self.timestampNanoseconds = timestampNanoseconds
@@ -290,10 +306,16 @@ public struct InputEventRecord: Equatable, Sendable {
         self.deltaY = deltaY
         self.keyCode = keyCode
         self.modifiers = modifiers
+        self.text = text
     }
 
     public func validate(limits: InputEventLimits = .default) throws {
         guard windowGeneration > 0 else { throw InputCoreError.invalidEvent }
+        if kind == .text {
+            guard let text, Self.isValidText(text) else { throw InputCoreError.invalidEvent }
+        } else {
+            guard text == nil else { throw InputCoreError.invalidEvent }
+        }
         switch kind {
         case .pointerMove:
             guard x != nil, y != nil,
@@ -324,7 +346,7 @@ public struct InputEventRecord: Equatable, Sendable {
                   deltaX == nil, deltaY == nil else {
                 throw InputCoreError.invalidEvent
             }
-        case .focusIntent:
+        case .focusIntent, .text:
             guard x == nil, y == nil,
                   button == nil, pressed == nil,
                   deltaX == nil, deltaY == nil,
@@ -355,7 +377,28 @@ public struct InputEventRecord: Equatable, Sendable {
         if deltaY != nil { size += fieldSize(8, valueBytes: 4) }
         if keyCode != nil { size += fieldSize(9, valueBytes: 2) }
         if modifiers != nil { size += fieldSize(10, valueBytes: 4) }
+        if let text { size += fieldSize(12, valueBytes: text.utf8.count) }
         return size
+    }
+
+    /// Splits a committed string into wire-sized pieces on character
+    /// boundaries, dropping control characters (Return and Tab are sent as key
+    /// events instead).
+    public static func splitText(_ text: String) -> [String] {
+        var pieces: [String] = []
+        var current = ""
+        for character in text {
+            if character.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) {
+                continue
+            }
+            if (current + String(character)).utf8.count > maximumTextBytes, !current.isEmpty {
+                pieces.append(current)
+                current = ""
+            }
+            current.append(character)
+        }
+        if !current.isEmpty { pieces.append(current) }
+        return pieces.filter(isValidText)
     }
 
     private func fieldSize(_ fieldID: UInt8, valueBytes: Int) -> Int {
@@ -495,6 +538,12 @@ public struct InputEventNormalizer: Sendable {
         try makeRecord(timestampNanoseconds: timestampNanoseconds, kind: .focusIntent)
     }
 
+    /// Committed text from the Viewer's input method. Callers split longer
+    /// commits with `InputEventRecord.splitText(_:)`.
+    public mutating func text(_ text: String, timestampNanoseconds: UInt64) throws -> InputEventRecord {
+        try makeRecord(timestampNanoseconds: timestampNanoseconds, kind: .text, text: text)
+    }
+
     private func coordinate(for point: InputPoint) throws -> NormalizedInputCoordinate {
         guard contentRect.isValid else { throw InputCoreError.invalidSurface }
         guard point.x.isFinite, point.y.isFinite else {
@@ -521,7 +570,8 @@ public struct InputEventNormalizer: Sendable {
         deltaX: Int32? = nil,
         deltaY: Int32? = nil,
         keyCode: UInt16? = nil,
-        modifiers: UInt32? = nil
+        modifiers: UInt32? = nil,
+        text: String? = nil
     ) throws -> InputEventRecord {
         guard case let .ready(windowGeneration) = readiness else {
             throw InputCoreError.inputNotReady(readiness)
@@ -542,7 +592,8 @@ public struct InputEventNormalizer: Sendable {
             deltaX: deltaX,
             deltaY: deltaY,
             keyCode: keyCode,
-            modifiers: modifiers
+            modifiers: modifiers,
+            text: text
         )
         try record.validate(limits: limits)
         guard record.estimatedEncodedPayloadBytes <= limits.maxEncodedPayloadBytes else {

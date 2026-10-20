@@ -37,6 +37,13 @@ final class ViewerInputSurface: NSView {
     private var admittedModifierKeyCodes: Set<UInt16> = []
     private var locallyConsumedSourceKeys: Set<UInt16> = []
     private var isRemoteSurfaceFocused = false
+    // ADR-0008 local composition state. Marked text never leaves the Viewer;
+    // only text the input method commits is sent.
+    private var markedTextValue = ""
+    private var compositionConsumedKeyCodes: Set<UInt16> = []
+    private var compositionForwardRequested = false
+    private var lastPointerPointInSurface: NSPoint?
+    private let markedTextLabel = NSTextField(labelWithString: "")
     private(set) var inputCapabilities: ViewerInputCapabilities
 
     private(set) var inputReadiness: InputReadiness {
@@ -52,6 +59,9 @@ final class ViewerInputSurface: NSView {
     var onRemoteFocusChange: (@MainActor (Bool) -> Void)?
     var onJISEisuKey: (@MainActor () -> Bool)?
     var onJISKanaKey: (@MainActor () -> Bool)?
+    /// True when the session negotiated `textInput` and the Viewer's current
+    /// input source is a Chinese input method, so keystrokes compose locally.
+    var isLocalTextCompositionActive: (@MainActor () -> Bool)?
 
     var inputReady: Bool {
         inputReadiness.isReady &&
@@ -109,6 +119,9 @@ final class ViewerInputSurface: NSView {
             beginModifierResynchronization()
             admittedModifierKeyCodes.removeAll(keepingCapacity: false)
             rateLimiter.reset()
+        }
+        if !willBeReady || !capabilities.keyboardInputEnabled {
+            discardLocalComposition()
         }
         normalizer.update(contentRect: contentRect, readiness: readiness)
         inputReadiness = readiness
@@ -252,6 +265,7 @@ final class ViewerInputSurface: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
+        lastPointerPointInSurface = convert(event.locationInWindow, from: nil)
         guard inputCapabilities.mouseInputEnabled else { return }
         emit(throttleMovementWhenRateLimited: true) {
             try normalizer.pointerMove(at: point(for: event), timestampNanoseconds: now())
@@ -297,13 +311,80 @@ final class ViewerInputSurface: NSView {
                 return
             }
         }
+        if shouldRouteThroughLocalComposition(event) {
+            routeThroughLocalComposition(event)
+            return
+        }
         emitKey(event, pressed: true)
     }
 
     override func keyUp(with event: NSEvent) {
         guard inputCapabilities.keyboardInputEnabled else { return }
         if locallyConsumedSourceKeys.remove(event.keyCode) != nil { return }
+        if compositionConsumedKeyCodes.remove(event.keyCode) != nil { return }
         emitKey(event, pressed: false)
+    }
+
+    /// Keys compose locally while marked text exists or while a Chinese
+    /// input method is active. Command/Control shortcuts always travel as
+    /// physical keys so Host app shortcuts keep working.
+    private func shouldRouteThroughLocalComposition(_ event: NSEvent) -> Bool {
+        guard inputReady else { return false }
+        if !markedTextValue.isEmpty { return true }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard !flags.contains(.command), !flags.contains(.control) else { return false }
+        return isLocalTextCompositionActive?() == true
+    }
+
+    /// Gives the key to the Viewer's input method. Keys it composes or
+    /// commits stay local (their key-ups are swallowed); keys it does not use,
+    /// such as Return, Delete, arrows, or Escape with no marked text, are
+    /// forwarded as physical keys.
+    private func routeThroughLocalComposition(_ event: NSEvent) {
+        compositionForwardRequested = false
+        let handled = inputContext?.handleEvent(event) ?? false
+        if !handled || (compositionForwardRequested && markedTextValue.isEmpty) {
+            emitKey(event, pressed: true)
+        } else {
+            compositionConsumedKeyCodes.insert(event.keyCode)
+        }
+    }
+
+    private func sendCommittedText(_ text: String) {
+        for piece in InputEventRecord.splitText(text) {
+            emit { try normalizer.text(piece, timestampNanoseconds: now()) }
+        }
+    }
+
+    private func discardLocalComposition() {
+        guard !markedTextValue.isEmpty else { return }
+        inputContext?.discardMarkedText()
+        markedTextValue = ""
+        updateMarkedTextLabel()
+    }
+
+    private func updateMarkedTextLabel() {
+        markedTextLabel.stringValue = markedTextValue
+        markedTextLabel.isHidden = markedTextValue.isEmpty
+        guard !markedTextValue.isEmpty else { return }
+        markedTextLabel.sizeToFit()
+        let anchor = compositionAnchorRect()
+        markedTextLabel.frame = NSRect(
+            x: min(max(0, anchor.minX), max(0, bounds.width - markedTextLabel.frame.width)),
+            y: min(max(0, anchor.maxY), max(0, bounds.height - markedTextLabel.frame.height)),
+            width: markedTextLabel.frame.width + 8,
+            height: markedTextLabel.frame.height + 4
+        )
+    }
+
+    /// Where the input method should place its candidate window: the last
+    /// pointer location in the remote content (normally where the operator
+    /// clicked to place the caret), otherwise the lower-left of the surface.
+    private func compositionAnchorRect() -> NSRect {
+        if let point = lastPointerPointInSurface, bounds.contains(point) {
+            return NSRect(x: point.x, y: point.y, width: 1, height: 18)
+        }
+        return NSRect(x: 16, y: max(0, bounds.height - 40), width: 1, height: 18)
     }
 
     override func flagsChanged(with event: NSEvent) {
@@ -344,6 +425,16 @@ final class ViewerInputSurface: NSView {
     }
 
     private func configureSurface() {
+        markedTextLabel.isHidden = true
+        markedTextLabel.drawsBackground = true
+        markedTextLabel.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.92)
+        markedTextLabel.textColor = .textColor
+        markedTextLabel.font = .systemFont(ofSize: 15)
+        markedTextLabel.isBezeled = false
+        markedTextLabel.isEditable = false
+        markedTextLabel.isSelectable = false
+        markedTextLabel.setAccessibilityLabel("Local input method composition")
+        addSubview(markedTextLabel)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
         toolTip = inputReadiness.label
@@ -352,6 +443,7 @@ final class ViewerInputSurface: NSView {
     }
 
     private func emitButtonDown(_ event: NSEvent, button: UInt8) {
+        lastPointerPointInSurface = convert(event.locationInWindow, from: nil)
         guard inputReady,
               inputCapabilities.mouseInputEnabled,
               let window,
@@ -528,6 +620,7 @@ final class ViewerInputSurface: NSView {
     }
 
     private func updateRemoteSurfaceFocus(_ focused: Bool) {
+        if !focused { discardLocalComposition() }
         guard focused != isRemoteSurfaceFocused else { return }
         isRemoteSurfaceFocused = focused
         onRemoteFocusChange?(focused)
@@ -574,4 +667,65 @@ final class ViewerInputSurface: NSView {
         .control,
         .shift
     ]
+}
+
+/// ADR-0008: the remote surface is a text input client for the Viewer's own
+/// input method. Composition (marked text) is shown locally and never sent;
+/// committed text is sent to the Host as `text` input events.
+extension ViewerInputSurface: @preconcurrency NSTextInputClient {
+    func insertText(_ string: Any, replacementRange: NSRange) {
+        let text = (string as? NSAttributedString)?.string ?? (string as? String) ?? ""
+        markedTextValue = ""
+        updateMarkedTextLabel()
+        sendCommittedText(text)
+    }
+
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        markedTextValue = (string as? NSAttributedString)?.string ?? (string as? String) ?? ""
+        updateMarkedTextLabel()
+    }
+
+    func unmarkText() {
+        let text = markedTextValue
+        markedTextValue = ""
+        updateMarkedTextLabel()
+        sendCommittedText(text)
+    }
+
+    override func doCommand(by selector: Selector) {
+        // The input method did not use this key (Return, Delete, an arrow,
+        // Escape...). Forward the original physical key instead.
+        compositionForwardRequested = true
+    }
+
+    func hasMarkedText() -> Bool {
+        !markedTextValue.isEmpty
+    }
+
+    func markedRange() -> NSRange {
+        markedTextValue.isEmpty
+            ? NSRange(location: NSNotFound, length: 0)
+            : NSRange(location: 0, length: (markedTextValue as NSString).length)
+    }
+
+    func selectedRange() -> NSRange {
+        NSRange(location: (markedTextValue as NSString).length, length: 0)
+    }
+
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] {
+        []
+    }
+
+    func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
+        nil
+    }
+
+    func characterIndex(for point: NSPoint) -> Int {
+        NSNotFound
+    }
+
+    func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        guard let window else { return .zero }
+        return window.convertToScreen(convert(compositionAnchorRect(), to: nil))
+    }
 }

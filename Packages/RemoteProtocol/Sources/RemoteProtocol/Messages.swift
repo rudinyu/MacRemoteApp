@@ -856,6 +856,13 @@ public struct InputEventMessage: MessagePayloadValue {
     public let modifiers: UInt32?
     /// P6 local-control epoch. Legacy sessions omit this optional field.
     public let controlGeneration: UInt64?
+    /// Committed text for kind `text` only (ADR-0008): 1–256 UTF-8 bytes
+    /// with no control characters. Never logged.
+    public let text: String?
+
+    /// Upper bound for one `text` event; longer commits are split by the
+    /// Viewer on character boundaries.
+    public static let maximumTextBytes = 256
 
     public init(
         kind: InputEventKind,
@@ -868,7 +875,8 @@ public struct InputEventMessage: MessagePayloadValue {
         deltaY: Int32? = nil,
         keyCode: UInt16? = nil,
         modifiers: UInt32? = nil,
-        controlGeneration: UInt64? = nil
+        controlGeneration: UInt64? = nil,
+        text: String? = nil
     ) {
         self.kind = kind
         self.windowGeneration = windowGeneration
@@ -881,6 +889,14 @@ public struct InputEventMessage: MessagePayloadValue {
         self.keyCode = keyCode
         self.modifiers = modifiers
         self.controlGeneration = controlGeneration
+        self.text = text
+    }
+
+    /// Whether `text` is an acceptable committed-text payload.
+    public static func isValidText(_ text: String) -> Bool {
+        let byteCount = text.utf8.count
+        guard byteCount > 0, byteCount <= maximumTextBytes else { return false }
+        return !text.unicodeScalars.contains { $0.properties.generalCategory == .control }
     }
 
     public func encoded(using limits: ProtocolLimits = .default) throws -> Data {
@@ -899,12 +915,24 @@ public struct InputEventMessage: MessagePayloadValue {
         if let controlGeneration {
             try fields.append(fieldID: 11, mandatory: false, value: WireValue.uint64(controlGeneration))
         }
+        if let text {
+            try fields.append(
+                fieldID: 12,
+                mandatory: false,
+                value: try WireValue.string(
+                    text,
+                    message: .inputEvent,
+                    fieldID: 12,
+                    maximumBytes: Self.maximumTextBytes
+                )
+            )
+        }
         return fields.data
     }
 
     public static func decode(_ data: Data, using limits: ProtocolLimits = .default) throws -> InputEventMessage {
         let fields = try MessageFieldReader(data: data, message: .inputEvent, limits: limits)
-        try fields.ensureKnown(Set(1 ... 11))
+        try fields.ensureKnown(Set(1 ... 12))
         guard let kind = InputEventKind(rawValue: try WireValue.decodeByte(try fields.required(1), message: .inputEvent, fieldID: 1)) else {
             throw ProtocolError.invalidFieldValue(message: .inputEvent, fieldID: 1)
         }
@@ -921,6 +949,14 @@ public struct InputEventMessage: MessagePayloadValue {
             modifiers: try fields.optional(10).map { try WireValue.decodeUInt32($0, message: .inputEvent, fieldID: 10) },
             controlGeneration: try fields.optional(11).map {
                 try WireValue.decodeUInt64($0, message: .inputEvent, fieldID: 11)
+            },
+            text: try fields.optional(12).map {
+                try WireValue.decodeString(
+                    $0,
+                    message: .inputEvent,
+                    fieldID: 12,
+                    maximumBytes: Self.maximumTextBytes
+                )
             }
         )
         try message.validateShape()
@@ -930,6 +966,19 @@ public struct InputEventMessage: MessagePayloadValue {
     private func validateShape() throws {
         if let controlGeneration, controlGeneration == 0 {
             throw ProtocolError.invalidFieldValue(message: .inputEvent, fieldID: 11)
+        }
+        if kind == .text {
+            guard let text, Self.isValidText(text),
+                  x == nil, y == nil,
+                  button == nil, pressed == nil,
+                  deltaX == nil, deltaY == nil,
+                  keyCode == nil, modifiers == nil else {
+                throw ProtocolError.invalidFieldValue(message: .inputEvent, fieldID: 12)
+            }
+            return
+        }
+        guard text == nil else {
+            throw ProtocolError.invalidFieldValue(message: .inputEvent, fieldID: 12)
         }
         switch kind {
         case .pointerMove:
@@ -965,6 +1014,9 @@ public struct InputEventMessage: MessagePayloadValue {
                   keyCode == nil, modifiers == nil else {
                 throw ProtocolError.invalidFieldValue(message: .inputEvent, fieldID: 3)
             }
+        case .text:
+            // Validated above.
+            break
         }
     }
 }

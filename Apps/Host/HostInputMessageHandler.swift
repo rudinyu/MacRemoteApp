@@ -168,6 +168,15 @@ final class HostInputMessageHandler: @unchecked Sendable {
                 windowGeneration: message.windowGeneration,
                 kind: .focusIntent
             )
+        case .text:
+            guard let text = message.text else { throw HostInputError.invalidEvent }
+            return InputEventRecord(
+                sequence: sequence,
+                timestampNanoseconds: timestampNanoseconds,
+                windowGeneration: message.windowGeneration,
+                kind: .text,
+                text: text
+            )
         }
     }
 }

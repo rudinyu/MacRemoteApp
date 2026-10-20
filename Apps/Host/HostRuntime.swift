@@ -296,6 +296,7 @@ actor HostRuntime {
         .mouseInput,
         .keyboardInput,
         .inputSourceSync,
+        .textInput,
         .textClipboard,
         .keyframeRequest,
         .receiverReport,
@@ -307,7 +308,8 @@ actor HostRuntime {
     private static let viewerKeyframeRequestMinimumIntervalNanoseconds: UInt64 = 250_000_000
     private static let inputCapabilities: Set<Capability> = [
         .mouseInput,
-        .keyboardInput
+        .keyboardInput,
+        .textInput
     ]
 
     private var configuration: Configuration
@@ -1535,6 +1537,10 @@ actor HostRuntime {
         } else {
             desired.remove(.inputSourceSync)
         }
+        // Viewer-composed text (ADR-0008) is keyboard input.
+        if !desired.contains(.keyboardInput) {
+            desired.remove(.textInput)
+        }
         if processControlNegotiated && permission == .authorized &&
             (processControlGranted || wasAuthorizedForProcessControl) {
             desired.insert(.backgroundControl)
@@ -2018,6 +2024,7 @@ actor HostRuntime {
             authorizedCapabilities.remove(.backgroundControl)
         } else if !authorizedCapabilities.contains(.keyboardInput) {
             authorizedCapabilities.remove(.inputSourceSync)
+            authorizedCapabilities.remove(.textInput)
         }
         if !clipboardAuthorizedForSession {
             authorizedCapabilities.remove(.textClipboard)

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import InputCore
 import RemoteProtocol
@@ -895,6 +896,58 @@ final class ViewerRuntimeLifecycleTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testSurfaceSendsOnlyCommittedTextNeverMarkedText() {
+        let surface = ViewerInputSurface(
+            frame: NSRect(x: 0, y: 0, width: 400, height: 300),
+            contentRect: InputContentRect(originX: 0, originY: 0, width: 400, height: 300),
+            readiness: .ready(windowGeneration: 3),
+            capabilities: ViewerInputCapabilities(mouseInputEnabled: true, keyboardInputEnabled: true)
+        )
+        var records: [InputEventRecord] = []
+        surface.onInputEvent = { records.append($0) }
+
+        surface.setMarkedText("ㄋㄧˇ", selectedRange: NSRange(location: 3, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(surface.hasMarkedText())
+        XCTAssertTrue(records.isEmpty, "Composition in progress must stay on the Viewer.")
+
+        surface.insertText("你", replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertFalse(surface.hasMarkedText())
+        XCTAssertEqual(records.map(\.kind), [.text])
+        XCTAssertEqual(records.last?.text, "你")
+        XCTAssertEqual(records.last?.windowGeneration, 3)
+
+        surface.setMarkedText("hao", selectedRange: NSRange(location: 3, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        surface.unmarkText()
+        XCTAssertEqual(records.last?.text, "hao", "Unmarking commits the composition as text.")
+
+        surface.insertText("\n", replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertEqual(records.count, 2, "Control characters are not sent as text; Return travels as a key.")
+    }
+
+    @MainActor
+    func testLocalCompositionKeepsTheHostOnEnglishWhileTheViewerUsesChinese() {
+        let zhuyin = InputSourceDescriptor(identifier: "com.apple.inputmethod.TCIM.Zhuyin", kind: .chinese)
+        let abc = InputSourceDescriptor(identifier: "com.apple.keylayout.ABC", kind: .english)
+        let base = FakeViewerInputSourceProvider(current: zhuyin, enabled: [zhuyin, abc])
+        let provider = ViewerHostInputSourceTargetProvider(base: base)
+
+        XCTAssertEqual(provider.currentInputSource(), zhuyin, "Without textInput, ADR-0007 following is unchanged.")
+        XCTAssertFalse(provider.isLocalTextCompositionActive)
+
+        provider.setLocalTextCompositionAvailable(true)
+        XCTAssertTrue(provider.isLocalTextCompositionActive)
+        XCTAssertEqual(
+            provider.currentInputSource(),
+            abc,
+            "While the Viewer composes locally, source following must ask the Host for English."
+        )
+
+        base.current = abc
+        XCTAssertFalse(provider.isLocalTextCompositionActive, "English typing stays on physical keys.")
+        XCTAssertEqual(provider.currentInputSource(), abc)
+    }
+
     func testCatalogRefreshKeepsTheOperatorsHighlightedWindow() {
         // Host sorts by bundle id, so a refresh that reset the picker sent
         // com.apple.finder instead of the WeChat window the operator chose.
@@ -1623,5 +1676,29 @@ private actor SendRecorder {
 
     func snapshot() -> [Sent] {
         values
+    }
+}
+
+private final class FakeViewerInputSourceProvider: InputSourceProvider, @unchecked Sendable {
+    var current: InputSourceDescriptor?
+    let enabled: [InputSourceDescriptor]
+
+    init(current: InputSourceDescriptor?, enabled: [InputSourceDescriptor]) {
+        self.current = current
+        self.enabled = enabled
+    }
+
+    func currentInputSource() -> InputSourceDescriptor? { current }
+    func enabledInputSources() -> [InputSourceDescriptor] { enabled }
+    func selectInputSource(_ descriptor: InputSourceDescriptor) -> InputSourceSelectionOutcome {
+        current = descriptor
+        return .applied
+    }
+    func selectInputSource(
+        _ descriptor: InputSourceDescriptor,
+        validatingImmediatelyBeforeSelection isStillEligible: @MainActor () -> Bool
+    ) -> InputSourceSelectionOutcome {
+        current = descriptor
+        return .applied
     }
 }

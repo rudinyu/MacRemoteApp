@@ -175,6 +175,9 @@ public enum Capability: Equatable, Hashable, Sendable {
     case inputSourceSync
     /// Optional: process-targeted input requires a separate durable Host grant.
     case backgroundControl
+    /// Optional: the Viewer composes text with its own input method and sends
+    /// committed text as `InputEvent` kind `text` (ADR-0008).
+    case textInput
     case unknown(UInt16)
 
     public init(rawValue: UInt16) {
@@ -189,6 +192,7 @@ public enum Capability: Equatable, Hashable, Sendable {
         case 0x0008: self = .receiverReport
         case 0x0009: self = .inputSourceSync
         case 0x000A: self = .backgroundControl
+        case 0x000B: self = .textInput
         default: self = .unknown(rawValue)
         }
     }
@@ -205,6 +209,7 @@ public enum Capability: Equatable, Hashable, Sendable {
         case .receiverReport: return 0x0008
         case .inputSourceSync: return 0x0009
         case .backgroundControl: return 0x000A
+        case .textInput: return 0x000B
         case let .unknown(rawValue): return rawValue
         }
     }
@@ -254,6 +259,8 @@ public enum InputEventKind: UInt8, Equatable, Hashable, Sendable {
     case keyDown = 4
     case keyUp = 5
     case focusIntent = 6
+    /// Committed text from the Viewer's own input method (ADR-0008).
+    case text = 7
 }
 
 public enum KeyboardInputSourceKind: UInt8, Equatable, Hashable, Sendable {

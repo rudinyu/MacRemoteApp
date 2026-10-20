@@ -12,7 +12,8 @@ negotiation alone grants no permission.
 
 Optional `backgroundControl` capability
 `0x000A` is separate from `keyframeRequest` (`0x0007`), `receiverReport`
-(`0x0008`), and `inputSourceSync` (`0x0009`). It grants nothing by negotiation
+(`0x0008`), `inputSourceSync` (`0x0009`), and `textInput` (`0x000B`, see
+[Viewer-side text composition](#viewer-side-text-composition-m10)). It grants nothing by negotiation
 alone: Host-accepted pairing trust, current selection authorization, and the
 final platform safety checks remain required.
 
@@ -150,7 +151,7 @@ The exact binary field widths and serialization format are fixed by M1 in
 | `StreamConfig` | Host → Viewer | Negotiated dimensions, frame rate, codec limits, and stream state |
 | `VideoConfig` | Host → Viewer | H.264 decoder configuration and codec generation identifier |
 | `VideoFrame` | Host → Viewer | One encoded access unit with timing and keyframe metadata |
-| `InputEvent` | Viewer → Host | Validated mouse, keyboard, modifier, and scroll event model |
+| `InputEvent` | Viewer → Host | Validated mouse, keyboard, modifier, and scroll event model; with `textInput`, committed text (kind 7) |
 | `InputSourceSelection` | Viewer → Host | Optional, authorized request to set the Host input source to the Viewer's desired Chinese/English state |
 | `InputSourceAcknowledgement` | Host → Viewer | Optional, scoped result for that exact input-source request |
 | `ClipboardOffer` | Both | Text clipboard generation/metadata and opt-in state |
@@ -341,10 +342,10 @@ active input source interprets them.**
   E down/up). Dead-key state lives in the Host application's text system, so
   the composed character is the one the Host's layout defines. Neither side
   collapses, reorders, or synthesizes events for composition.
-- Input-method (IME) composition happens on the Host. The Viewer input
-  surface is not an `NSTextInputClient` and does not call
-  `interpretKeyEvents`, so a Viewer-side input method does not compose text
-  for the remote surface. Candidate windows, marked text, and input-source
+- Without `textInput`, input-method (IME) composition happens on the Host:
+  the Viewer surface does not hand keys to its input method. With `textInput`
+  (ADR-0008), a Viewer using a Chinese input method composes locally and
+  sends committed text; see below. Candidate windows, marked text, and input-source
   switching are normally handled by the Host's active input source. With the
   M10 synchronization capability, switching is Viewer-local and the actual
   desired source is sent instead of replaying the toggle. Keyboard
@@ -352,11 +353,9 @@ active input source interprets them.**
 - Caps Lock and Fn are not forwarded as key events. Their state reaches the
   Host only as the corresponding bit in each key event's `modifiers` mask;
   the Host's own lock state is not toggled.
-- Text entry through a Viewer-side IME, dictation, character-level
-  translation, and a text-insertion wire message are out of V1 scope. No
-  such message exists. Adding one requires a separate recorded design
-  decision (capability negotiation, byte bounds, redaction, and the
-  secure-input rule) and the user's explicit approval before any wire change.
+- Dictation and character-level translation of physical keys remain out of
+  scope. Text entry through a Viewer-side input method is defined only by
+  ADR-0008 and only for peers negotiating `textInput`.
 - Key codes and modifier masks are raw input values: they are never logged,
   included in error strings, or reported in Host status/receipts. Secure-input
   rejection applies to every key regardless of layout; no layout or IME path
@@ -366,8 +365,9 @@ Verification: `InputCoreTests` feed Option/dead-key and shortcut sequences
 through `HostInputController` and assert the adapter receives only typed key
 commands with unchanged key codes, masks, and order; layout-specific ISO/JIS
 codes pass through unmapped; and key rejection/status/receipt text contains no
-key value. `scripts/validate.sh` rejects character translation, text-insertion,
-and secure-input-bypass APIs in the input path. Behavior with a real Host
+key value. `scripts/validate.sh` rejects character translation and
+secure-input-bypass APIs in the input path and limits the ADR-0008 text APIs to
+the Viewer surface and the Host adapter. Behavior with a real Host
 layout or input method is part of the M6 manual OS evidence.
 
 ### Viewer-led input-source synchronization (M10)
@@ -378,7 +378,19 @@ ordering gate, older-peer compatibility, and security requirements. The Host
 follows the actual Viewer Chinese/English source state; an already-matching
 state is a no-op, not another toggle. Chinese alignment requires the matching
 enabled input method/mode. Composition and candidate selection remain on the
-Host, and no Unicode text-insertion message is introduced.
+Host, and no Unicode text-insertion message is introduced by this extension.
+
+### Viewer-side text composition (M10)
+
+[ADR-0008](decisions/0008-m10-viewer-text-composition.md) adds optional
+capability `textInput` (`0x000B`). `InputEvent` kind `text` (`7`) carries
+optional field 12 `text`: UTF-8, 1–256 bytes, no control characters, and no
+other key/pointer fields; other kinds must omit field 12. It requires
+selected-window authorization plus `keyboardInput` and `textInput`, and it
+shares the input stream, ordering, rate limits, admission fence, and queue
+invalidation with key events. Only committed text is sent; marked text and
+candidates stay on the Viewer. The Host posts it as Unicode keyboard events
+under the same per-event checks, including secure input. Text is never logged.
 
 ## Clipboard contract
 
