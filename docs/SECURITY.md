@@ -55,7 +55,12 @@ windows of regular apps (minimized, hidden, or on another Space). Their
 titles are the same metadata class as on-screen titles; untitled offscreen
 windows and agent/accessory app windows are not listed. Selecting an
 offscreen window permits only the bounded reveal and activation described
-above; it never authorizes input by itself.
+above, run once per selection; it never authorizes input by itself. If the
+listed window cannot be revealed but that app (same PID and bundle) now has
+an on-screen window, the Host captures the app's largest visible window
+instead. It never substitutes a window of another app or process, and the
+per-event foreground and identity checks apply to the window actually
+captured.
 
 P6 input requires current local admission, a live matching target and
 generation, valid geometry, PostEvent permission, foreground eligibility, a

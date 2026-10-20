@@ -57,4 +57,8 @@ Host log shows 0–2 eligible windows per discovery.
   on-screen window, drops offscreen windows of apps that already have an
   on-screen window, and keeps only the largest offscreen window of an app
   with none.
-- A confirmed loss of the selected window ends the selection, not the session.
+- When a selected background window still cannot be revealed after the
+  single bounded activation, but the same app and process now has an
+  on-screen window, the Host captures that app's largest visible window.
+  Selecting a background entry therefore means "this app". A confirmed loss
+  of the selected window ends the selection, not the session.

@@ -1324,6 +1324,38 @@ actor HostRuntime {
     /// Capture/encoder startup for one app may fail even though the LAN
     /// session is healthy. Release the old input target, return to the current
     /// authorized selection epoch, and let the Viewer choose a window again.
+    /// The largest on-screen window of the same app and process, used when an
+    /// explicitly selected background window cannot be revealed but the app
+    /// itself was activated.
+    private func visibleWindowOfSameApplication(as window: CaptureWindow) async -> CaptureWindow? {
+        guard let windows = try? await discoverWindowsForRuntime() else { return nil }
+        return windows
+            .filter {
+                $0.processIdentifier == window.processIdentifier &&
+                    $0.applicationIdentifier == window.applicationIdentifier &&
+                    $0.isOnScreen && $0.eligible
+            }
+            .max { $0.bounds.width * $0.bounds.height < $1.bounds.width * $1.bounds.height }
+    }
+
+    @MainActor
+    private static func isWindowForegroundNow(_ window: CaptureWindow) -> Bool {
+        CoreGraphicsAccessibilityWindowFocus.isSelectedWindowForeground(
+            HostInputWindowSelection(
+                windowIdentifier: window.identifier,
+                processIdentifier: window.processIdentifier,
+                applicationIdentifier: window.applicationIdentifier,
+                generation: 0,
+                bounds: InputWindowBounds(
+                    originX: window.bounds.x,
+                    originY: window.bounds.y,
+                    width: window.bounds.width,
+                    height: window.bounds.height
+                )
+            )
+        )
+    }
+
     /// Ends a selection whose window stopped being capturable while keeping
     /// the session. The input controller releases held state for the old
     /// target before the selection is cleared, as for a window replacement.
@@ -1916,24 +1948,39 @@ actor HostRuntime {
         M10HostVideoDiagnostics.shared.beginWindow()
 #endif
         captureRecoveryStatusActive = false
+        var captureTarget = window
+        // Set when the bounded reveal/activation already ran for this
+        // selection, so it is not repeated before authorization.
+        var preCaptureForeground: Bool?
         if !window.isOnScreen {
             // A background catalog entry (minimized, hidden app, another
             // Space) has nothing visible to capture yet. The explicit Viewer
             // selection permits the same bounded reveal and activation used
             // for foreground restore; capture still starts if it is refused.
             let revealed = await bringSelectedApplicationToForeground(window)
+            preCaptureForeground = revealed
             startupLogger.notice(
                 "Host revealed an offscreen selected window before capture (confirmed: \(revealed, privacy: .public))"
             )
+            // An app may keep the listed window ordered out forever while its
+            // activation shows a different window. Capture the same app's
+            // visible window instead of an empty offscreen one.
+            if !revealed, let visible = await visibleWindowOfSameApplication(as: window) {
+                captureTarget = visible
+                preCaptureForeground = await Self.isWindowForegroundNow(visible)
+                startupLogger.notice(
+                    "Host is capturing the selected app's visible window instead of an unrevealable background window"
+                )
+            }
         }
-        try await captureSession.start(window: window)
+        try await captureSession.start(window: captureTarget)
         let captureSnapshot = await captureSession.snapshot()
         // CaptureCore owns its internal engine generation. It advances that
         // value on every restart, including a same-session window switch. The
         // wire generation remains the advertised WindowList generation and is
         // intentionally validated separately above.
         guard case .capturing = captureSnapshot.state,
-              captureSnapshot.selectedWindow?.hasSameOwner(as: window) == true,
+              captureSnapshot.selectedWindow?.hasSameOwner(as: captureTarget) == true,
               let selected = captureSnapshot.selectedWindow,
               let dimensions = captureSnapshot.outputDimensions else {
             throw HostRuntimeError.staleWindowGeneration
@@ -1974,7 +2021,13 @@ actor HostRuntime {
         // enable inactive-process event delivery. Every explicit selection
         // must foreground the selected regular app before input can be
         // authorized, regardless of capability negotiation.
-        let didForegroundSelectedApplication = await bringSelectedApplicationToForeground(selected)
+        let didForegroundSelectedApplication: Bool
+        if preCaptureForeground != nil {
+            // The bounded attempt already ran; only re-check the result.
+            didForegroundSelectedApplication = await Self.isWindowForegroundNow(selected)
+        } else {
+            didForegroundSelectedApplication = await bringSelectedApplicationToForeground(selected)
+        }
         if !didForegroundSelectedApplication {
             startupLogger.error(
                 "Host could not confirm the selected application became foreground; input remains fail-closed"
