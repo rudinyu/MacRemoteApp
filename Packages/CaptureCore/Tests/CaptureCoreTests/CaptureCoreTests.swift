@@ -771,20 +771,16 @@ final class CaptureCoreTests: XCTestCase {
         )
     }
 
-    func testBackgroundCatalogOffersOnlyTitledWindowsOfRegularApps() {
+    func testBackgroundCatalogOffersRegularAppWindowsEvenWhenUntitled() {
         XCTAssertTrue(
             WindowCandidateVisibility.permitsBackgroundCatalogWindow(
                 title: "Quarterly report",
                 ownerIsRegularApplication: true
-            ),
-            "A minimized or other-Space document window of a regular app must be selectable."
+            )
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             WindowCandidateVisibility.permitsBackgroundCatalogWindow(title: nil, ownerIsRegularApplication: true),
-            "Untitled offscreen windows are usually invisible utility surfaces."
-        )
-        XCTAssertFalse(
-            WindowCandidateVisibility.permitsBackgroundCatalogWindow(title: "   ", ownerIsRegularApplication: true)
+            "Apps such as LINE leave their main window untitled; it must be selectable from the background."
         )
         XCTAssertFalse(
             WindowCandidateVisibility.permitsBackgroundCatalogWindow(
@@ -792,6 +788,36 @@ final class CaptureCoreTests: XCTestCase {
                 ownerIsRegularApplication: false
             ),
             "Offscreen windows of agent or accessory apps are not offered."
+        )
+    }
+
+    func testBackgroundRepresentativePrefersTitledWindowsThenLargerArea() {
+        func window(_ id: UInt64, title: String?, width: Double) -> CaptureWindow {
+            CaptureWindow(
+                identifier: id,
+                applicationIdentifier: "jp.naver.line.mac",
+                title: title,
+                bounds: WindowBounds(x: 0, y: 0, width: width, height: 600),
+                processIdentifier: 70,
+                eligible: true,
+                isOnScreen: false
+            )
+        }
+        XCTAssertEqual(
+            CatalogBackgroundWindowReduction.reduce([
+                window(1, title: nil, width: 1200),
+                window(2, title: "LINE", width: 800)
+            ]).map(\.identifier),
+            [2],
+            "A titled window is preferred over a larger untitled one."
+        )
+        XCTAssertEqual(
+            CatalogBackgroundWindowReduction.reduce([
+                window(1, title: nil, width: 400),
+                window(2, title: "  ", width: 900)
+            ]).map(\.identifier),
+            [2],
+            "With no titled window, the largest untitled window represents the app."
         )
     }
 

@@ -208,8 +208,9 @@ enum SelectedWindowCaptureEligibility {
 /// app keeps ordered out and never shows (Build 1038 testing: AX activation of
 /// such an app was accepted, yet the chosen window never appeared). Every
 /// on-screen window is kept. An app with no on-screen window contributes only
-/// its largest offscreen window, and an app that already has an on-screen
-/// window contributes no offscreen ones.
+/// one offscreen window (its largest titled one, or its largest untitled one
+/// when none is titled), and an app that already has an on-screen window
+/// contributes no offscreen ones.
 enum CatalogBackgroundWindowReduction {
     static func reduce(_ windows: [CaptureWindow]) -> [CaptureWindow] {
         let onScreenOwners = Set(windows.filter(\.isOnScreen).map(\.processIdentifier))
@@ -219,15 +220,28 @@ enum CatalogBackgroundWindowReduction {
                 representative[window.processIdentifier] = window
                 continue
             }
-            let area = window.bounds.width * window.bounds.height
-            let currentArea = current.bounds.width * current.bounds.height
-            if area > currentArea || (area == currentArea && window.identifier < current.identifier) {
+            if Self.isPreferred(window, over: current) {
                 representative[window.processIdentifier] = window
             }
         }
         return windows.filter {
             $0.isOnScreen || representative[$0.processIdentifier]?.identifier == $0.identifier
         }
+    }
+
+    /// Titled windows first, then larger area, then the lower window number.
+    private static func isPreferred(_ candidate: CaptureWindow, over current: CaptureWindow) -> Bool {
+        let candidateTitled = isTitled(candidate)
+        let currentTitled = isTitled(current)
+        if candidateTitled != currentTitled { return candidateTitled }
+        let area = candidate.bounds.width * candidate.bounds.height
+        let currentArea = current.bounds.width * current.bounds.height
+        if area != currentArea { return area > currentArea }
+        return candidate.identifier < current.identifier
+    }
+
+    private static func isTitled(_ window: CaptureWindow) -> Bool {
+        window.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 }
 

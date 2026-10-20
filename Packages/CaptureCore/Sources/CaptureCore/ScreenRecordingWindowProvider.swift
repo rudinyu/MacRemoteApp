@@ -358,19 +358,18 @@ enum WindowCandidateVisibility {
     /// Whether an offscreen window may be offered in the selection catalog.
     /// Minimized windows, hidden apps, and windows on another Space or in a
     /// full-screen Space are offscreen but are real user documents; an
-    /// explicit selection reveals and activates them. Untitled offscreen
-    /// windows and windows of non-regular (agent/accessory) apps are commonly
-    /// invisible utility surfaces and are not offered.
+    /// explicit selection reveals and activates them. Windows of non-regular
+    /// (agent/accessory) apps are not offered. A title is not required: some
+    /// apps, such as LINE, leave their main window untitled, and
+    /// `CatalogBackgroundWindowReduction` keeps at most one entry per app
+    /// (preferring titled windows), while selection falls back to the app's
+    /// visible window if the listed one cannot be revealed.
     static func permitsBackgroundCatalogWindow(
         title: String?,
         ownerIsRegularApplication: Bool
     ) -> Bool {
-        guard ownerIsRegularApplication,
-              let title = title?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !title.isEmpty else {
-            return false
-        }
-        return true
+        _ = title
+        return ownerIsRegularApplication
     }
 }
 

@@ -19,8 +19,8 @@ capture as an unrequested fallback.
 - Window discovery requires Screen Recording authorization, a zero-layer
   window, a non-empty application bundle identifier, and positive bounds.
   On-screen windows qualify as before. Since the 2026-10-20 amendment below,
-  offscreen windows also qualify when they have a non-empty title and belong
-  to a regular (`NSApplication.ActivationPolicy.regular`) app. Titles remain
+  offscreen windows of a regular (`NSApplication.ActivationPolicy.regular`)
+  app also qualify, at most one per app. Titles remain
   optional metadata and are not treated as credentials.
 - `WindowCaptureSession` assigns a new generation per selection, accepts only
   matching window/generation frames, and uses a bounded newest-frame output.
@@ -30,7 +30,7 @@ capture as an unrequested fallback.
 - Permission loss, window disappearance, capture error, EOF, or cancellation
   invalidates the active capture before later codec or transport work.
 - Windows without a bundle identifier, with non-zero layers, or offscreen
-  without a title or outside a regular app are not offered for selection.
+  outside a regular app are not offered for selection.
 
 ## Amendment (2026-10-20): background windows
 
@@ -41,9 +41,8 @@ minimized, hidden, or on other Spaces / full-screen Spaces). The Build 1035
 Host log shows 0–2 eligible windows per discovery.
 
 - The catalog now queries the full ScreenCaptureKit window list and also
-  offers titled offscreen windows of regular apps. Untitled offscreen windows
-  and offscreen windows of agent/accessory apps stay excluded because they
-  are commonly invisible utility surfaces.
+  offers offscreen windows of regular apps. Offscreen windows of
+  agent/accessory apps stay excluded.
 - Each `CaptureWindow` records `isOnScreen`. Selecting an offscreen window is
   an explicit Viewer selection, so the Host runs the same bounded reveal and
   activation used for foreground restore before capture starts. That request
@@ -62,3 +61,8 @@ Host log shows 0–2 eligible windows per discovery.
   on-screen window, the Host captures that app's largest visible window.
   Selecting a background entry therefore means "this app". A confirmed loss
   of the selected window ends the selection, not the session.
+- Build 1039 testing: LINE could be chosen only after it was brought to the
+  front on the Host, because its main window is untitled and the titled-only
+  rule hid it while offscreen. With one entry per app and the visible-window
+  fallback in place, the title requirement is dropped; an app's titled
+  offscreen window is still preferred as its representative.

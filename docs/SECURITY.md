@@ -50,10 +50,11 @@ secure-input, lock, console-session, system-authentication-dialog, or PostEvent
 checks.
 
 The selection catalog sent to the authenticated, paired Viewer lists
-on-screen layer-0 windows and, per the ADR-0003 amendment, titled offscreen
-windows of regular apps (minimized, hidden, or on another Space). Their
-titles are the same metadata class as on-screen titles; untitled offscreen
-windows and agent/accessory app windows are not listed. Selecting an
+on-screen layer-0 windows and, per the ADR-0003 amendment, one offscreen
+window per regular app that has no on-screen window (minimized, hidden, or on
+another Space; a titled window is preferred). Their titles are the same
+metadata class as on-screen titles; agent/accessory app windows are not
+listed. Selecting an
 offscreen window permits only the bounded reveal and activation described
 above, run once per selection; it never authorizes input by itself. If the
 listed window cannot be revealed but that app (same PID and bundle) now has

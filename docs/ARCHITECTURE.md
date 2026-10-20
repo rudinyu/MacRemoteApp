@@ -210,8 +210,9 @@ Additional rules:
   classify an inactive selected target for safe cleanup; it does not impose an
   additional foreground gate or authorize inactive-process input.
   CaptureCore resolves selected windows from the full ScreenCaptureKit
-  catalog, and the picker offers titled offscreen windows of regular apps as
-  well as on-screen targets. Explicit selection requests a bounded reveal and
+  catalog, and the picker offers offscreen windows of regular apps (one per
+  app) as well as on-screen targets. Explicit selection requests a bounded
+  reveal and
   activation before capture; this does not grant input authority. A transient
   catalog snapshot that omits the active selection is withheld from Viewer;
   three consecutive CaptureCore liveness misses are required before target
@@ -362,11 +363,11 @@ These capture rules do not authorize input; Host input keeps its independent
 pairing, generation, permission, target, focus/P6, secure-input, and lock
 checks.
 
-The selection catalog includes on-screen layer-0 windows and titled
-offscreen windows of regular apps, so minimized, hidden, and other-Space
-windows can be chosen (ADR-0003 amendment). Each catalog entry records
-`isOnScreen`; when an offscreen entry is selected, the Host reveals and
-activates it before starting capture.
+The selection catalog includes on-screen layer-0 windows and one offscreen
+window per regular app that has no on-screen window (titled preferred), so
+minimized, hidden, and other-Space windows can be chosen (ADR-0003 amendment).
+Each catalog entry records `isOnScreen`; when an offscreen entry is selected,
+the Host reveals and activates it before starting capture.
 
 An inactive selected app stays viewable. When ScreenCaptureKit cannot resolve
 or capture the selected window but WindowServer still lists that exact window
