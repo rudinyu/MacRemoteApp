@@ -784,7 +784,45 @@ public enum CoreGraphicsAccessibilityWindowFocus {
         _ selection: HostInputWindowSelection,
         title: String?
     ) -> Bool {
-        guard AXIsProcessTrusted() else { return false }
+        guard let window = matchingAccessibilityWindow(selection, title: title) else { return false }
+        return AXUIElementPerformAction(window, kAXRaiseAction as CFString) == .success
+    }
+
+    /// Restores the exact selected window from the Dock for an explicit
+    /// Viewer selection. Activating an app does not deminiaturize its
+    /// windows, so a minimized selected window would otherwise never become
+    /// foreground. Uses the same unique geometry/title match as the raise
+    /// action and never prompts for Accessibility access.
+    @discardableResult
+    public static func unminimizeSelectedWindowIfAccessible(
+        _ selection: HostInputWindowSelection,
+        title: String?
+    ) -> Bool {
+        guard let window = matchingAccessibilityWindow(selection, title: title) else { return false }
+        _ = AXUIElementSetMessagingTimeout(window, 0.35)
+        var minimizedValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            window,
+            kAXMinimizedAttribute as CFString,
+            &minimizedValue
+        ) == .success,
+        (minimizedValue as? Bool) == true else {
+            return false
+        }
+        return AXUIElementSetAttributeValue(
+            window,
+            kAXMinimizedAttribute as CFString,
+            kCFBooleanFalse
+        ) == .success
+    }
+
+    /// The single AX window of the selected process whose global geometry
+    /// (and, when known, title) uniquely matches the selected window.
+    private static func matchingAccessibilityWindow(
+        _ selection: HostInputWindowSelection,
+        title: String?
+    ) -> AXUIElement? {
+        guard AXIsProcessTrusted() else { return nil }
 
         let application = AXUIElementCreateApplication(pid_t(selection.processIdentifier))
         _ = AXUIElementSetMessagingTimeout(application, 0.35)
@@ -795,7 +833,7 @@ public enum CoreGraphicsAccessibilityWindowFocus {
             &windowsValue
         ) == .success,
         let accessibilityWindows = windowsValue as? [AXUIElement] else {
-            return false
+            return nil
         }
 
         let candidates = accessibilityWindows.compactMap { element -> (AXUIElement, AccessibilityWindowGeometry)? in
@@ -808,7 +846,7 @@ public enum CoreGraphicsAccessibilityWindowFocus {
             candidates: geometries
         )
         guard !geometryMatches.isEmpty else {
-            return false
+            return nil
         }
 
         let index: Int
@@ -829,15 +867,12 @@ public enum CoreGraphicsAccessibilityWindowFocus {
                 selectedTitle: title,
                 candidates: titledCandidates
             ) else {
-                return false
+                return nil
             }
             index = match
         }
 
-        return AXUIElementPerformAction(
-            candidates[index].0,
-            kAXRaiseAction as CFString
-        ) == .success
+        return candidates[index].0
     }
 
     private static func geometry(of element: AXUIElement) -> AccessibilityWindowGeometry? {

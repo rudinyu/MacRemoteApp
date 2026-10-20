@@ -55,8 +55,13 @@ app-owned sheet or popover. Only layer-0 windows participate; nonzero layers
 are excluded, and an overlapping unknown-owner layer-0 window or window with
 missing layer metadata is an unresolved blocker. Bounded activation requests
 for the selected regular app are allowed only for an explicit Viewer window
-selection, including negotiated P6. They run in order and stop as soon as the
-exact selected window is confirmed foreground: (1) on macOS 14 or later, a
+selection, including negotiated P6. Because activation neither unhides an app
+nor restores a minimized window, the Host first reveals the exact target: it
+asks a hidden selected app to unhide (`NSRunningApplication.unhide`) and, when
+it already has Accessibility trust, clears `kAXMinimizedAttribute` on the one
+AX window that uniquely matches the selected window's geometry and title. The
+requests then run in order and stop as soon as the exact selected window is
+confirmed foreground: (1) on macOS 14 or later, a
 cooperative AppKit request, where the Host must first confirm that it is
 frontmost before yielding activation to the target; (2) when the Host already
 has Accessibility trust, the public AX `kAXFrontmostAttribute` request on the

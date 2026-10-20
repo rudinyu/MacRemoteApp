@@ -426,14 +426,18 @@ M6 splits Host input handling across these owners:
   on-screen window identity, foreground ordering/identity, and lock state.
 - `CoreGraphicsAccessibilityInputAdapter` is the only M6 code that
   constructs/posts `CGEvent` values.
-- For an explicit window selection, `HostRuntime` tries bounded activation
-  requests in order: a cooperative AppKit request on macOS 14 or later after
+- For an explicit window selection, `HostRuntime` first reveals the exact
+  target (unhides a hidden app; restores a minimized window through the
+  uniquely matched AX window when Accessibility is trusted), then tries bounded
+  activation requests in order: a cooperative AppKit request on macOS 14 or later after
   Host foreground status is confirmed, then the AX `kAXFrontmostAttribute`
   request when Accessibility is trusted, then LaunchServices activation of the
   running app when it is the bundle's only instance. After each accepted
   request it polls for the exact selected window to become foreground and
   stops at the first confirmation; each step's outcome is logged without app
-  names. No request is itself proof of focus. Every input path
+  names. No request is itself proof of focus. A same-window restore runs beside
+  the single message consumer, so input and other messages are not blocked for
+  its duration, and repeated Select presses during one attempt are coalesced. Every input path
   requires the exact selected target to remain live, the selected PID to be
   active, and a top regular layer-0 WindowServer window from that app. P6 adds
   Host pairing trust and a control generation, and uses the same optional

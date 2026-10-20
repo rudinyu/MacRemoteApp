@@ -358,6 +358,9 @@ actor HostRuntime {
     private var restartRequested = false
     private var selectionTransitionInProgress = false
     private var captureRecoveryStatusActive = false
+    /// True while a same-window foreground restore runs beside the message
+    /// consumer; further same-window Select presses are coalesced into it.
+    private var foregroundRestoreInProgress = false
     private let startupLogger = Logger(
         subsystem: "com.rudinyu.MacRemoteApp",
         category: "host-runtime"
@@ -1565,7 +1568,18 @@ actor HostRuntime {
             // used for new selections; resolve the exact target instead.
             if let currentSelection = selectedWindow,
                currentSelection.hasSameOwner(as: advertisedWindow) {
-                await restoreForegroundForCurrentSelection(currentSelection, session: session)
+                // A restore attempt can take several seconds. Run it beside
+                // the single message consumer so input and other messages keep
+                // flowing, and coalesce repeated Select presses into one.
+                guard !foregroundRestoreInProgress else {
+                    startupLogger.notice("Host ignored a same-window selection while a foreground restore is running")
+                    return
+                }
+                foregroundRestoreInProgress = true
+                Task { [weak self] in
+                    await self?.restoreForegroundForCurrentSelection(currentSelection, session: session)
+                    await self?.finishForegroundRestore()
+                }
                 return
             }
             do {
@@ -1695,6 +1709,10 @@ actor HostRuntime {
         HostRuntimeCallbackTeardownScheduler.schedule { [weak self] in
             await self?.teardown(session: session)
         }
+    }
+
+    private func finishForegroundRestore() {
+        foregroundRestoreInProgress = false
     }
 
     /// Verifies that the authorized selection still names the same live
@@ -2364,6 +2382,25 @@ actor HostRuntime {
         )
         if CoreGraphicsAccessibilityWindowFocus.isSelectedWindowForeground(selection) {
             return true
+        }
+
+        // Activating an app neither unhides it nor restores a minimized
+        // window, so reveal the exact selected window first.
+        if application.isHidden {
+            let unhideAccepted = application.unhide()
+            startupLogger.notice(
+                "Host asked the hidden selected app to unhide (accepted: \(unhideAccepted, privacy: .public))"
+            )
+        }
+        let selectedTitle = window.title
+        let unminimizeAccepted = await Task.detached(priority: .userInitiated) {
+            CoreGraphicsAccessibilityWindowFocus.unminimizeSelectedWindowIfAccessible(
+                selection,
+                title: selectedTitle
+            )
+        }.value
+        if unminimizeAccepted {
+            startupLogger.notice("Host asked Accessibility to restore the minimized selected window")
         }
 
         let cooperativeAPIAvailable: Bool
