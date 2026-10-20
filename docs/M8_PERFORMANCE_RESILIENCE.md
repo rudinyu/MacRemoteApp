@@ -93,6 +93,9 @@ thread), so a slow capture-to-send stage can be attributed to encoding
 (for example thermal throttling) or to send-side waiting. The capture loop
 reads keyframe requests without an actor hop, and window discovery resolves
 each owning process's activation policy once per pass rather than per window.
+An encoded frame larger than the negotiated envelope payload limit (4 MiB by
+default) is dropped with a bitrate reduction (`reason=host-oversize-frame`)
+and a forced keyframe; it no longer stops the video pipeline.
 The Host uses category `host-runtime`; the Viewer uses
 `startup` and also logs `viewer-receive-to-present` and, once the clock
 estimate is eligible, `end-to-end`. These lines contain no pixels, titles,

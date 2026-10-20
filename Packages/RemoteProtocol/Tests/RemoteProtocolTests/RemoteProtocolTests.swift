@@ -310,10 +310,10 @@ final class RemoteProtocolTests: XCTestCase {
 
         var oversized = valid
         oversized[11] = 0x00
-        oversized[12] = 0x10
+        oversized[12] = 0x40
         oversized[13] = 0x00
         oversized[14] = 0x01
-        assertProtocolError(.payloadTooLarge(actual: 1_048_577, maximum: 1_048_576)) {
+        assertProtocolError(.payloadTooLarge(actual: 4_194_305, maximum: 4_194_304)) {
             _ = try Envelope.decode(oversized)
         }
 
@@ -452,7 +452,8 @@ final class RemoteProtocolTests: XCTestCase {
         ]
 
         let goldenVectors: [MessageType: String] = [
-            .hello: "0101010000000202000201000000010103010000000F4D616352656D6F74654170702D4D3104010000000400100000050100000004000100000601000000040000FFEB",
+            // Field 4 advertises the 4 MiB default payload limit.
+            .hello: "0101010000000202000201000000010103010000000F4D616352656D6F74654170702D4D3104010000000400400000050100000004000100000601000000040000FFEB",
             .capabilities: "010101000000060002000100060200000000040000078003000000000400000438040000000002003C",
             .pairingChallenge: "010101000000080102030405060708020100000006313233343536",
             .pairingConfirmation: "01010100000008010203040506070802010000000101030000000006313233343536",

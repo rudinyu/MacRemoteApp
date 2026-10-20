@@ -333,10 +333,12 @@ public struct ProtocolLimits: Equatable, Sendable {
     public let maxCapabilities: Int
 
     public init(
-        maxPayloadLength: Int = 1_048_576,
+        // 4 MiB fits a 1440p/4K keyframe of detailed content. The session
+        // negotiates min(local, peer), so a 1 MiB older peer keeps 1 MiB.
+        maxPayloadLength: Int = 4_194_304,
         maxControlPayloadLength: Int = 65_536,
         maxClipboardTextBytes: Int = 65_515,
-        maxFieldLength: Int = 1_048_576,
+        maxFieldLength: Int = 4_194_304,
         maxIdentifierBytes: Int = 256,
         maxWindowEntries: Int = 256,
         maxCapabilities: Int = 128

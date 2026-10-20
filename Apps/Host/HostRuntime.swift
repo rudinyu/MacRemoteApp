@@ -209,6 +209,15 @@ final class HostStageLatencyRecorder: @unchecked Sendable {
     }
 }
 
+enum HostVideoFramePolicy {
+    /// Bytes reserved for the VideoFrame fields around the access unit.
+    static let messageOverheadBytes = 256
+
+    static func fits(accessUnitBytes: Int, payloadLimit: Int) -> Bool {
+        accessUnitBytes + messageOverheadBytes <= payloadLimit
+    }
+}
+
 enum HostRuntimeCaptureLivenessPolicy {
     static func keepsAuthenticatedSession(for state: CaptureSessionState) -> Bool {
         switch state {
@@ -2335,6 +2344,24 @@ actor HostRuntime {
                 videoConfigSentGeneration = generation
             }
             guard videoConfigSentGeneration == generation else { return }
+            // An access unit above the negotiated payload limit (a detailed
+            // high-resolution keyframe) cannot be sent. Drop only this frame,
+            // lower the bitrate, and ask for a fresh keyframe; never stop the
+            // pipeline for it.
+            guard HostVideoFramePolicy.fits(
+                accessUnitBytes: frame.accessUnit.count,
+                payloadLimit: snapshot.effectiveProtocolLimits.maxPayloadLength
+            ) else {
+#if DEBUG
+                M10HostVideoDiagnostics.shared.recordDropped()
+#endif
+                keyframeRequest.request()
+                applyBitrate(
+                    bitrateController?.recordCongestion(atNanoseconds: DispatchTime.now().uptimeNanoseconds),
+                    reason: "host-oversize-frame"
+                )
+                return
+            }
             let result = try await session.send(
                 .videoFrame(
                     VideoFrameMessage(

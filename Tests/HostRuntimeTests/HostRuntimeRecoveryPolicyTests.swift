@@ -111,6 +111,12 @@ final class HostRuntimeRecoveryPolicyTests: XCTestCase {
         )
     }
 
+    func testOversizeVideoFramesAreDetectedAgainstTheNegotiatedLimit() {
+        XCTAssertTrue(HostVideoFramePolicy.fits(accessUnitBytes: 500_000, payloadLimit: 1_048_576))
+        XCTAssertFalse(HostVideoFramePolicy.fits(accessUnitBytes: 1_048_576, payloadLimit: 1_048_576))
+        XCTAssertTrue(HostVideoFramePolicy.fits(accessUnitBytes: 2_000_000, payloadLimit: 4_194_304))
+    }
+
     func testKeyframeRequestIsConsumedOnceAndCanBeReset() {
         let flag = HostKeyframeRequestFlag()
         XCTAssertFalse(flag.consume())

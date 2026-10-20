@@ -221,7 +221,11 @@ mismatch stops capture and fails closed.
 - Configuration: `VideoConfig` carries a decoder configuration record and a
   generation identifier before dependent frames.
 - Frame payload: a bounded encoded access unit with sequence, capture timestamp,
-  presentation timing, dimensions, and keyframe indicator.
+  presentation timing, dimensions, and keyframe indicator. The default envelope
+  payload limit is 4 MiB (Hello field 4); a session uses min(local, peer), so a
+  1 MiB older peer keeps 1 MiB. A Host access unit that does not fit the
+  negotiated limit is dropped (the Host lowers its bitrate and forces the next
+  keyframe) instead of stopping the stream.
 - Keyframes: the Host can request or produce a new keyframe after stream start,
   decoder reset, or recovery.
 - Ordering: the Viewer rejects non-increasing media sequences and stale
