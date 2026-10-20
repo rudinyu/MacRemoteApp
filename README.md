@@ -10,18 +10,18 @@ Host; this is deliberately not a full remote-desktop product.
 Milestone state and open evidence gaps are tracked in one place:
 [`docs/STATUS.md`](docs/STATUS.md).
 
-Build `0.2.1038` is the current in-house M10 Debug diagnostic pair in
+Build `0.2.1039` is the current in-house M10 Debug diagnostic pair in
 `build/debug-diagnostic/`. Full `.codex/ci.sh` validation passed on 2026-10-20.
 The Host and Viewer apps, ZIPs, and DMGs are Developer ID signed, accepted by
-Apple, stapled, and passed Gatekeeper and final package audits. Build `1038`
-includes the M7 Viewer picker-retention fix from commit `ee5f49d`: catalog
-refreshes preserve the chosen window and keep Select disabled while a selection
-is in flight. It also includes selection of titled offscreen windows from
-regular apps; explicit selection requests that the Host reveal and foreground
-the app before capture, while input authorization checks remain independent.
-Physical offscreen-selection and full two-Mac input/recovery acceptance remain
-pending. Earlier local build outputs were cleared before creating this pair.
-See
+Apple, stapled, and passed Gatekeeper and final package audits. Build `1039`
+includes the M3 background-window catalog and capture-recovery corrections,
+M6's same-app visible-window fallback after a background target cannot be
+revealed, M7 Viewer selection reconciliation when the Host replaces or closes
+the streaming window, and M10's fixed-category capture-loss log scope. The
+foreground and per-event input authorization checks remain in force. Physical
+offscreen-selection and full two-Mac input/recovery acceptance remain pending.
+Earlier local build outputs were cleared before creating this pair; `.build`
+validation caches were retained. See
 [`docs/STATUS.md`](docs/STATUS.md) for artifact hashes, Apple submission IDs,
 and remaining acceptance evidence.
 

@@ -12,16 +12,19 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 
 ## Summary
 
-Build `0.2.1038` is the current validated in-house M10 Debug diagnostic pair.
-Both role plists identify Version `0.2`, Build `1038`; the apps, ZIPs, and DMGs
+Build `0.2.1039` is the current validated in-house M10 Debug diagnostic pair.
+Both role plists identify Version `0.2`, Build `1039`; the apps, ZIPs, and DMGs
 are in `build/debug-diagnostic/`. Full `.codex/ci.sh` validation passed on
 2026-10-20. Four Apple notarizations were accepted; all apps and DMGs were
-stapled and passed Gatekeeper and final package audit. Previous local
+stapled and passed Gatekeeper and final package audit. Previous `build/`
 distribution outputs were cleared before packaging; the `.build` validation
-caches were retained. Build `1038` artifact submission IDs and hashes are
-recorded below. This package includes the M7 Viewer picker-retention fix and
-the Build `1037` offscreen-window selection feature. Physical offscreen-window
-selection and full two-Mac M10 acceptance remain pending.
+caches were retained. Build `1039` artifact submission IDs and hashes are
+recorded below. This build includes M3 background-window catalog and capture
+recovery corrections, M6's same-app visible-window fallback after reveal fails,
+M7 Viewer selection reconciliation when the Host replaces or closes the
+streaming window, and M10's fixed-category capture-loss scope in Debug logs.
+Foreground and per-event input authorization remain required. Physical
+offscreen-window selection and full two-Mac M10 acceptance remain pending.
 The public source snapshot at commit `a63222e` remains included in the
 historical signed and notarized `0.2.1011` RC. Builds `1036`, `1035`, `1033`, `1032`,
 `1031`, and `1030` are historical; their local distribution outputs are not
@@ -128,6 +131,48 @@ rejections, these logs do not support attributing that later stop to the click.
 They do not record why the Host sent the close, and actual target-app response
 to the injected events remains unverified. Repeated Viewer main-actor stalls
 around 0.8–1.1 seconds were also present during the session.
+
+### 0.2.1039 M3/M6/M7/M10 in-house Debug diagnostic artifacts
+
+At generation, both role plists identified Version `0.2`, Build `1039`. The
+source includes commits `18c2262`, `b3cc257`, `68f9c5e`, and `ec2d291` after
+Build `1038`. M3 lists at most one largest offscreen window for each app that
+has no on-screen window. If explicit activation cannot reveal the chosen
+background window, M6 capture may fall back to the largest visible window from
+that same process and app; input still requires the selected app to be
+foreground and pass the existing per-event checks. M7 keeps the Viewer on that
+app's replacement window when the Host switches capture targets, and clears
+the stream while keeping the session connected if the selected window closes.
+M10 Debug logs record whether capture loss ended the selection or the session
+using fixed categories.
+
+Full `.codex/ci.sh` validation passed on 2026-10-20, including Host arm64 and
+x86_64 builds, Viewer arm64, deterministic package/app tests, M8 benchmark, and
+M9 packaging audit. The opt-in ScreenCaptureKit system smoke was skipped by
+design; this is not physical Host/Viewer acceptance. Previous `build/`
+distribution outputs were cleared before packaging, and `.build` validation
+caches were retained. Both Debug apps, ZIPs, and DMGs were Developer ID signed,
+accepted by Apple, stapled, and passed Gatekeeper, ticket, and final package
+audits. Apple submission IDs:
+
+| Artifact | Apple submission ID | Status |
+| --- | --- | --- |
+| Host app ZIP | `8a470ce1-7fa7-481b-a431-3e1651495772` | Accepted |
+| Viewer app ZIP | `47c328ca-7b99-4328-9213-c763ab964264` | Accepted |
+| Host DMG | `755fb579-d07e-4fd8-8105-5b72dd1fe5f4` | Accepted |
+| Viewer DMG | `a0b928fd-f4cc-49dc-97ea-890b38322abd` | Accepted |
+
+The artifacts are in `build/debug-diagnostic/`:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1039.app.zip` | `ddc8b037b16efccf4bf2be8ca7b5bcea732be0a83b6fa24d8d9fd9874986894a` |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1039.dmg` | `d7741e71c87c98bec3675ff4cd29276cdccd4b73f58e8cfb0a2a452d791f2f0d` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1039.app.zip` | `ce853fdcd33129c06c436c61b05f17a9b1382c66b76533752ca8b482a4ec66ba` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1039.dmg` | `1e2a9b3ec6390c743af5ba08d05a33a0d2cbc04888813806c9069950ae246909` |
+
+These artifacts are for in-house diagnostics, not a public release. Physical
+offscreen-window selection and full two-Mac acceptance remain pending.
 
 ### 0.2.1038 M7/M10 in-house Debug diagnostic artifacts
 
@@ -540,7 +585,7 @@ diagnostic artifacts, not a public release.
 | M7 | Implementation/test gate complete | Physical two-machine clipboard walkthrough |
 | M8 | Deterministic measurement/resilience gate implemented | Physical clock-synchronized performance report |
 | M9 | Release-audit gate implemented; current `0.2.1011` notarized RC artifacts verified | Physical acceptance remains separate |
-| M10 | Production composition and pairing UI complete; Build `1038` is the current validated, Developer ID signed, Apple-notarized in-house Debug pair; previous local distribution outputs were cleared before it | Physical offscreen/background-window selection and foreground input-delivery test; full background-stream, connected-UI, clipboard, performance, and disconnect-recovery acceptance on the physical pair; the deterministic end-to-end Viewer send-race path remains unverified |
+| M10 | Production composition and pairing UI complete; Build `1039` is the current validated, Developer ID signed, Apple-notarized in-house Debug pair; previous local distribution outputs were cleared before it | Physical offscreen/background-window selection and foreground input-delivery test; full background-stream, connected-UI, clipboard, performance, and disconnect-recovery acceptance on the physical pair; the deterministic end-to-end Viewer send-race path remains unverified |
 
 ### 0.2.1024 in-house Debug diagnostic artifacts
 
