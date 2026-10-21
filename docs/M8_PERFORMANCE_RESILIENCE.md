@@ -102,6 +102,15 @@ prioritization (macOS 13 and later).
 An encoded frame larger than the negotiated envelope payload limit (4 MiB by
 default) is dropped with a bitrate reduction (`reason=host-oversize-frame`)
 and a forced keyframe; it no longer stops the video pipeline.
+An encoded delta frame that reaches the send queue more than 100 ms after
+capture is dropped rather than extending the backlog (`reason=host-stale-frame`
+bitrate reduction); delta frames are then skipped until the next keyframe,
+which is always sent. The `host-capture-to-send` line reports the session's
+`staleDrops` count. Forced keyframes are spaced at least one second apart so
+repeated loss signals on a congested path (such as Wi-Fi at 1440p) cannot
+send back-to-back large keyframes, and the bitrate controller cuts by 15% at
+most once per second with a floor of a quarter of the stream maximum instead
+of collapsing to 2 Mbps (see `docs/PROTOCOL.md`).
 The Host uses category `host-runtime`; the Viewer uses
 `startup` and also logs `viewer-receive-to-present` and, once the clock
 estimate is eligible, `end-to-end`. These lines contain no pixels, titles,

@@ -158,28 +158,59 @@ enum HostRuntimeClipboardAuthorizationPolicy {
 
 /// A keyframe request shared between the HostRuntime actor and the capture
 /// loop. The capture loop consumes it once per frame without an actor hop.
+///
+/// Forced keyframes are spaced at least `minimumForcedIntervalNanoseconds`
+/// apart. A high-resolution keyframe is many times larger than a delta frame,
+/// so honoring every loss signal during congestion would send back-to-back
+/// keyframes and deepen the congestion that caused them. A deferred request
+/// stays pending until the interval passes. An urgent request (a new
+/// authorization epoch whose decoder configuration must be resent) and the
+/// first keyframe after `reset()` are not delayed.
 final class HostKeyframeRequestFlag: @unchecked Sendable {
+    static let minimumForcedIntervalNanoseconds: UInt64 = 1_000_000_000
+
     private let lock = NSLock()
     private var requested = false
+    private var urgent = false
+    private var lastKeyframeNanoseconds: UInt64?
 
-    func request() {
+    func request(urgent: Bool = false) {
         lock.lock()
         requested = true
+        if urgent {
+            self.urgent = true
+        }
         lock.unlock()
     }
 
-    /// Returns whether a keyframe was requested and clears the request.
-    func consume() -> Bool {
+    /// Returns whether the next frame must be a keyframe. A due periodic
+    /// keyframe also satisfies a pending request; either way the request is
+    /// cleared and the keyframe time recorded.
+    func shouldForceKeyframe(atNanoseconds now: UInt64, periodicDue: Bool) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        let wasRequested = requested
+        var force = periodicDue
+        if requested {
+            if urgent {
+                force = true
+            } else if let lastKeyframeNanoseconds {
+                force = force || now &- lastKeyframeNanoseconds >= Self.minimumForcedIntervalNanoseconds
+            } else {
+                force = true
+            }
+        }
+        guard force else { return false }
         requested = false
-        return wasRequested
+        urgent = false
+        lastKeyframeNanoseconds = now
+        return true
     }
 
     func reset() {
         lock.lock()
         requested = false
+        urgent = false
+        lastKeyframeNanoseconds = nil
         lock.unlock()
     }
 }
@@ -467,6 +498,7 @@ actor HostRuntime {
     /// Lowers the encoder bitrate on congestion and restores it when the
     /// path is clear. Created per video pipeline.
     private var bitrateController: AdaptiveBitrateController?
+    private var staleFrameDropCount: UInt64 = 0
     /// M8 stage budget evidence: capture arrival to wire-queue admission.
     private var captureToSendCollector = BoundedStageLatencyCollector()
     private static let stageLogSampleInterval = 600
@@ -2247,6 +2279,7 @@ actor HostRuntime {
         keyframeRequest.reset()
         captureToSendCollector.reset()
         captureToEncodedRecorder.reset()
+        staleFrameDropCount = 0
         bitrateController = AdaptiveBitrateController(
             configuration: .standard(maximumBitrate: streamBitrate)
         )
@@ -2277,12 +2310,16 @@ actor HostRuntime {
                 guard !Task.isCancelled else { return }
                 let decision = continuity.consume(
                     relayFrame,
-                    droppedFrameObserved: relay.takeDroppedFrame()
+                    droppedFrameObserved: relay.takeDroppedFrame(),
+                    nowNanoseconds: DispatchTime.now().uptimeNanoseconds
                 )
                 if !decision.shouldSend {
 #if DEBUG
                     M10HostVideoDiagnostics.shared.recordDropped()
 #endif
+                }
+                if decision.droppedStale {
+                    await self?.noteStaleFrameDropped()
                 }
                 if decision.requestKeyframe {
                     await self?.requestKeyframe()
@@ -2306,8 +2343,10 @@ actor HostRuntime {
 #if DEBUG
                     M10HostVideoDiagnostics.shared.recordCaptured()
 #endif
-                    let requested = keyframeRequest.consume()
-                    let forceKeyframe = requested || framesSinceKeyframe >= 60
+                    let forceKeyframe = keyframeRequest.shouldForceKeyframe(
+                        atNanoseconds: DispatchTime.now().uptimeNanoseconds,
+                        periodicDue: framesSinceKeyframe >= 60
+                    )
                     do {
                         try encoder.encode(
                             pixelBuffer: frame.pixelBuffer,
@@ -2383,7 +2422,7 @@ actor HostRuntime {
                     // Wait for the next keyframe. Non-keyframes cannot repair
                     // a decoder after the previous epoch was invalidated, so
                     // ask for one instead of waiting for the periodic keyframe.
-                    keyframeRequest.request()
+                    keyframeRequest.request(urgent: true)
                     return
                 }
                 try await session.send(
@@ -2609,7 +2648,7 @@ actor HostRuntime {
         let budget = LatencyBudget.v1.hostCaptureToSendNanoseconds
         let within = LatencyBudget.isWithinBudget(summary, budget: budget) ?? false
         startupLogger.notice(
-            "M8 stage host-capture-to-send samples=\(summary.count, privacy: .public) p50Ns=\(summary.p50Nanoseconds, privacy: .public) p95Ns=\(summary.p95Nanoseconds, privacy: .public) budgetNs=\(budget, privacy: .public) withinBudget=\(within, privacy: .public)"
+            "M8 stage host-capture-to-send samples=\(summary.count, privacy: .public) p50Ns=\(summary.p50Nanoseconds, privacy: .public) p95Ns=\(summary.p95Nanoseconds, privacy: .public) budgetNs=\(budget, privacy: .public) withinBudget=\(within, privacy: .public) staleDrops=\(self.staleFrameDropCount, privacy: .public)"
         )
         if let encoded = captureToEncodedRecorder.summary() {
             startupLogger.notice(
@@ -2636,6 +2675,17 @@ actor HostRuntime {
 
     private func requestKeyframe() {
         keyframeRequest.request()
+    }
+
+    /// An encoded frame waited past the stale-frame age before reaching the
+    /// send queue: the path is behind the encoder. Count it for the stage log
+    /// and treat it as congestion.
+    private func noteStaleFrameDropped() {
+        staleFrameDropCount &+= 1
+        applyBitrate(
+            bitrateController?.recordCongestion(atNanoseconds: DispatchTime.now().uptimeNanoseconds),
+            reason: "host-stale-frame"
+        )
     }
 
     /// Local status-menu text only; never logged or sent to the Viewer.

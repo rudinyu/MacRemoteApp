@@ -253,7 +253,10 @@ mismatch stops capture and fails closed.
   failure. It is a protected message bound to the authorized window
   generation. The Viewer sends at most one request per 250 ms and the Host
   independently honors at most one per 250 ms, so a peer cannot force every
-  frame to be a keyframe. Peers without the capability never receive it and
+  frame to be a keyframe. Whatever the source (Viewer request, Host queue
+  discard, stale-frame drop, or oversize frame), the Host forces at most one
+  keyframe per second; a due periodic keyframe satisfies a pending request,
+  and only a new authorization epoch's first keyframe skips the spacing. Peers without the capability never receive it and
   recover at the periodic keyframe.
 - Bitrate adaptation (M8): with the optional `receiverReport` capability, the
   Viewer's session sends `ReceiverReport` about every 500 ms while video
@@ -261,11 +264,12 @@ mismatch stops capture and fails closed.
   Host send time above its minimum over the last 5–10 s, which cancels the
   clock offset), frames received, and frames lost to sequence gaps or local
   discards. The Host's `AdaptiveBitrateController` cuts the encoder bitrate to
-  70% on a report with discards or at least 40 ms queuing delay, on a Host
-  queue discard, or on a gap-triggered `KeyframeRequest`, at most once per
-  500 ms and never below 2 Mbps. After 3 s without congestion, reports with at
-  most 15 ms delay raise it by one tenth of the maximum per second back to
-  16 Mbps. The bitrate changes on the live VideoToolbox session without a new
+  85% on a report with discards or at least 40 ms queuing delay, on a Host
+  queue discard or stale-frame drop, or on a gap-triggered `KeyframeRequest`,
+  at most once per second and never below a quarter of the stream maximum
+  (at least 2 Mbps). After 2 s without congestion, reports with at most 15 ms
+  delay raise it by one twentieth of the maximum every 500 ms back to the
+  stream maximum. The bitrate changes on the live VideoToolbox session without a new
   keyframe. A report is untrusted input bound to the authorized window
   generation; the worst a peer can do is move the bitrate within those
   bounds. Without the capability, the Host still adapts to its own queue

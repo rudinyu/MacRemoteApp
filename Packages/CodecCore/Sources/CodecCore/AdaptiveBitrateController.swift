@@ -25,17 +25,23 @@ public struct AdaptiveBitrateController: Sendable {
         public var increaseQuietNanoseconds: UInt64
         public var increaseIntervalNanoseconds: UInt64
 
+        /// Gentle defaults for a shared, bursty path such as Wi-Fi: a 15% cut
+        /// at most once per second, a floor of a quarter of the maximum (not
+        /// below 2 Mbps), and recovery in twentieth-of-maximum steps every
+        /// 500 ms after 2 s without congestion. Stale-frame dropping on the
+        /// Host bounds latency, so the bitrate does not need to collapse to
+        /// drain a backlog.
         public static func standard(maximumBitrate: UInt32) -> Configuration {
             Configuration(
-                minimumBitrate: min(2_000_000, maximumBitrate),
+                minimumBitrate: min(max(2_000_000, maximumBitrate / 4), maximumBitrate),
                 maximumBitrate: maximumBitrate,
-                decreaseFactor: 0.7,
-                increaseStepBitrate: max(1, maximumBitrate / 10),
+                decreaseFactor: 0.85,
+                increaseStepBitrate: max(1, maximumBitrate / 20),
                 congestionQueuingDelayMicroseconds: 40_000,
                 clearQueuingDelayMicroseconds: 15_000,
-                decreaseHoldoffNanoseconds: 500_000_000,
-                increaseQuietNanoseconds: 3_000_000_000,
-                increaseIntervalNanoseconds: 1_000_000_000
+                decreaseHoldoffNanoseconds: 1_000_000_000,
+                increaseQuietNanoseconds: 2_000_000_000,
+                increaseIntervalNanoseconds: 500_000_000
             )
         }
     }

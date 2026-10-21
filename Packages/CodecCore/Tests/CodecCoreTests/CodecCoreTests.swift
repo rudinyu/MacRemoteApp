@@ -8,18 +8,24 @@ final class CodecCoreTests: XCTestCase {
     func testAdaptiveBitrateCutsOncePerHoldoffAndRespectsFloor() {
         var controller = AdaptiveBitrateController(configuration: .standard(maximumBitrate: 16_000_000))
         XCTAssertEqual(controller.bitrate, 16_000_000)
-        XCTAssertEqual(controller.recordCongestion(atNanoseconds: 1_000_000_000), 11_200_000)
-        // A burst inside the 500 ms holdoff counts once.
-        XCTAssertNil(controller.recordCongestion(atNanoseconds: 1_200_000_000))
-        XCTAssertEqual(controller.recordCongestion(atNanoseconds: 1_600_000_000), 7_840_000)
-        var now: UInt64 = 1_600_000_000
-        for _ in 0 ..< 20 {
-            now += 600_000_000
+        XCTAssertEqual(controller.recordCongestion(atNanoseconds: 1_000_000_000), 13_600_000)
+        // A burst inside the 1 s holdoff counts once.
+        XCTAssertNil(controller.recordCongestion(atNanoseconds: 1_600_000_000))
+        XCTAssertEqual(controller.recordCongestion(atNanoseconds: 2_000_000_000), 11_560_000)
+        var now: UInt64 = 2_000_000_000
+        for _ in 0 ..< 30 {
+            now += 1_100_000_000
             _ = controller.recordCongestion(atNanoseconds: now)
         }
-        XCTAssertEqual(controller.bitrate, 2_000_000, "never below the floor")
-        now += 600_000_000
+        XCTAssertEqual(controller.bitrate, 4_000_000, "never below a quarter of the maximum")
+        now += 1_100_000_000
         XCTAssertNil(controller.recordCongestion(atNanoseconds: now), "no change at the floor")
+    }
+
+    func testAdaptiveBitrateFloorIsAtLeastTwoMegabits() {
+        XCTAssertEqual(AdaptiveBitrateController.Configuration.standard(maximumBitrate: 4_000_000).minimumBitrate, 2_000_000)
+        XCTAssertEqual(AdaptiveBitrateController.Configuration.standard(maximumBitrate: 1_000_000).minimumBitrate, 1_000_000)
+        XCTAssertEqual(AdaptiveBitrateController.Configuration.standard(maximumBitrate: 22_000_000).minimumBitrate, 5_500_000)
     }
 
     func testAdaptiveBitrateTreatsReportsAsCongestionOrRecovery() {
@@ -27,25 +33,29 @@ final class CodecCoreTests: XCTestCase {
         // High queuing delay or discards cut the bitrate.
         XCTAssertEqual(
             controller.recordReport(queuingDelayMicroseconds: 60_000, discardedFrames: 0, atNanoseconds: 1_000_000_000),
-            11_200_000
+            13_600_000
         )
         XCTAssertEqual(
             controller.recordReport(queuingDelayMicroseconds: 0, discardedFrames: 3, atNanoseconds: 2_000_000_000),
-            7_840_000
+            11_560_000
         )
-        // Low delay does not raise it until 3 s after the last congestion.
-        XCTAssertNil(controller.recordReport(queuingDelayMicroseconds: 5_000, discardedFrames: 0, atNanoseconds: 4_000_000_000))
+        // Low delay does not raise it until 2 s after the last congestion.
+        XCTAssertNil(controller.recordReport(queuingDelayMicroseconds: 5_000, discardedFrames: 0, atNanoseconds: 3_500_000_000))
+        XCTAssertEqual(
+            controller.recordReport(queuingDelayMicroseconds: 5_000, discardedFrames: 0, atNanoseconds: 4_000_000_000),
+            12_360_000
+        )
+        // At most one increase per 500 ms, and none while delay is between
+        // the clear and congestion thresholds.
+        XCTAssertNil(controller.recordReport(queuingDelayMicroseconds: 5_000, discardedFrames: 0, atNanoseconds: 4_300_000_000))
+        XCTAssertNil(controller.recordReport(queuingDelayMicroseconds: 25_000, discardedFrames: 0, atNanoseconds: 5_000_000_000))
         XCTAssertEqual(
             controller.recordReport(queuingDelayMicroseconds: 5_000, discardedFrames: 0, atNanoseconds: 5_000_000_000),
-            9_440_000
+            13_160_000
         )
-        // At most one increase per second, and none while delay is between
-        // the clear and congestion thresholds.
-        XCTAssertNil(controller.recordReport(queuingDelayMicroseconds: 5_000, discardedFrames: 0, atNanoseconds: 5_500_000_000))
-        XCTAssertNil(controller.recordReport(queuingDelayMicroseconds: 25_000, discardedFrames: 0, atNanoseconds: 7_000_000_000))
-        var now: UInt64 = 7_000_000_000
+        var now: UInt64 = 5_000_000_000
         for _ in 0 ..< 20 {
-            now += 1_000_000_000
+            now += 500_000_000
             _ = controller.recordReport(queuingDelayMicroseconds: 0, discardedFrames: 0, atNanoseconds: now)
         }
         XCTAssertEqual(controller.bitrate, 16_000_000, "recovers to, but not above, the maximum")

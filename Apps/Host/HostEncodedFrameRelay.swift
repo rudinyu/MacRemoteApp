@@ -79,22 +79,41 @@ struct HostEncodedFrameContinuity {
     struct Decision {
         let requestKeyframe: Bool
         let shouldSend: Bool
+        /// True when this delta frame was dropped for exceeding
+        /// `staleFrameAgeNanoseconds`; the caller counts it as congestion.
+        var droppedStale = false
     }
+
+    /// A delta frame older than this (capture to send-queue admission) is
+    /// dropped instead of extending the backlog. Later delta frames reference
+    /// it, so delta frames are skipped until the next keyframe. Keyframes are
+    /// always sent: they restore decodability.
+    static let staleFrameAgeNanoseconds: UInt64 = 100_000_000
 
     private(set) var awaitingKeyframe = false
 
     /// A drop notification requests recovery immediately. The per-entry marker
     /// controls when the consumer begins skipping, because earlier buffered
-    /// entries still precede the dropped frame in FIFO order.
+    /// entries still precede the dropped frame in FIFO order. Without
+    /// `nowNanoseconds` no stale-frame check is made.
     mutating func consume(
         _ relayFrame: HostEncodedFrameRelay.Frame,
-        droppedFrameObserved: Bool
+        droppedFrameObserved: Bool,
+        nowNanoseconds: UInt64? = nil
     ) -> Decision {
         if relayFrame.followsDroppedFrame {
             awaitingKeyframe = true
         }
 
         guard awaitingKeyframe else {
+            if let nowNanoseconds,
+               case let .success(frame) = relayFrame.result,
+               !frame.keyframe,
+               nowNanoseconds > frame.captureTimestamp,
+               nowNanoseconds - frame.captureTimestamp > Self.staleFrameAgeNanoseconds {
+                awaitingKeyframe = true
+                return Decision(requestKeyframe: true, shouldSend: false, droppedStale: true)
+            }
             return Decision(
                 requestKeyframe: droppedFrameObserved,
                 shouldSend: true

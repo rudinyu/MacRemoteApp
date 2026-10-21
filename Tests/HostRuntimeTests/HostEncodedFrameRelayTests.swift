@@ -164,6 +164,59 @@ final class HostEncodedFrameRelayTests: XCTestCase {
         XCTAssertTrue(acceptedAfterGap.last?.followsDroppedFrame == true)
     }
 
+    func testStaleDeltaFramesAreDroppedUntilTheNextKeyframe() throws {
+        var continuity = HostEncodedFrameContinuity()
+        let age = HostEncodedFrameContinuity.staleFrameAgeNanoseconds
+        let now: UInt64 = 10_000_000_000
+
+        let fresh = continuity.consume(
+            relayFrame(try makeFrame(sequence: now - age, keyframe: false)),
+            droppedFrameObserved: false,
+            nowNanoseconds: now
+        )
+        XCTAssertTrue(fresh.shouldSend, "a frame at exactly the age limit is sent")
+        XCTAssertFalse(fresh.droppedStale)
+
+        let stale = continuity.consume(
+            relayFrame(try makeFrame(sequence: now - age - 1, keyframe: false)),
+            droppedFrameObserved: false,
+            nowNanoseconds: now
+        )
+        XCTAssertFalse(stale.shouldSend)
+        XCTAssertTrue(stale.droppedStale)
+        XCTAssertTrue(stale.requestKeyframe)
+        XCTAssertTrue(continuity.awaitingKeyframe)
+
+        let laterDelta = continuity.consume(
+            relayFrame(try makeFrame(sequence: now, keyframe: false)),
+            droppedFrameObserved: false,
+            nowNanoseconds: now
+        )
+        XCTAssertFalse(laterDelta.shouldSend, "later deltas reference the dropped frame")
+        XCTAssertFalse(laterDelta.droppedStale)
+
+        let staleKeyframe = continuity.consume(
+            relayFrame(try makeFrame(sequence: now - 5 * age, keyframe: true)),
+            droppedFrameObserved: false,
+            nowNanoseconds: now
+        )
+        XCTAssertTrue(staleKeyframe.shouldSend, "a keyframe is sent even when old")
+        XCTAssertFalse(continuity.awaitingKeyframe)
+    }
+
+    func testFrameAgeIsIgnoredWithoutACurrentTime() throws {
+        var continuity = HostEncodedFrameContinuity()
+        let decision = continuity.consume(
+            relayFrame(try makeFrame(sequence: 0, keyframe: false)),
+            droppedFrameObserved: false
+        )
+        XCTAssertTrue(decision.shouldSend)
+    }
+
+    private func relayFrame(_ frame: EncodedH264Frame) -> HostEncodedFrameRelay.Frame {
+        HostEncodedFrameRelay.Frame(result: .success(frame), followsDroppedFrame: false)
+    }
+
     private func makeFrame(sequence: UInt64, keyframe: Bool) throws -> EncodedH264Frame {
         try EncodedH264Frame(
             generation: 1,

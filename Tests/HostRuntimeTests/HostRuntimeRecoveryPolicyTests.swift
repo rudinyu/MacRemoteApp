@@ -146,14 +146,47 @@ final class HostRuntimeRecoveryPolicyTests: XCTestCase {
 
     func testKeyframeRequestIsConsumedOnceAndCanBeReset() {
         let flag = HostKeyframeRequestFlag()
-        XCTAssertFalse(flag.consume())
+        XCTAssertFalse(flag.shouldForceKeyframe(atNanoseconds: 1_000_000_000, periodicDue: false))
         flag.request()
         flag.request()
-        XCTAssertTrue(flag.consume(), "A pending request forces the next frame to be a keyframe.")
-        XCTAssertFalse(flag.consume(), "A request is consumed by exactly one frame.")
+        XCTAssertTrue(
+            flag.shouldForceKeyframe(atNanoseconds: 1_000_000_000, periodicDue: false),
+            "A pending request forces the next frame to be a keyframe."
+        )
+        XCTAssertFalse(
+            flag.shouldForceKeyframe(atNanoseconds: 2_100_000_000, periodicDue: false),
+            "A request is consumed by exactly one frame."
+        )
         flag.request()
         flag.reset()
-        XCTAssertFalse(flag.consume())
+        XCTAssertFalse(flag.shouldForceKeyframe(atNanoseconds: 3_200_000_000, periodicDue: false))
+    }
+
+    func testForcedKeyframesAreSpacedUnlessUrgent() {
+        let flag = HostKeyframeRequestFlag()
+        XCTAssertTrue(flag.shouldForceKeyframe(atNanoseconds: 1_000_000_000, periodicDue: true))
+        // Loss signals during congestion do not force back-to-back keyframes.
+        flag.request()
+        XCTAssertFalse(flag.shouldForceKeyframe(atNanoseconds: 1_300_000_000, periodicDue: false))
+        XCTAssertFalse(flag.shouldForceKeyframe(atNanoseconds: 1_900_000_000, periodicDue: false))
+        XCTAssertTrue(
+            flag.shouldForceKeyframe(atNanoseconds: 2_000_000_000, periodicDue: false),
+            "The deferred request is honored once the interval passes."
+        )
+        XCTAssertFalse(flag.shouldForceKeyframe(atNanoseconds: 3_500_000_000, periodicDue: false))
+        // A due periodic keyframe satisfies a pending request.
+        flag.request()
+        XCTAssertTrue(flag.shouldForceKeyframe(atNanoseconds: 3_600_000_000, periodicDue: true))
+        XCTAssertFalse(flag.shouldForceKeyframe(atNanoseconds: 4_000_000_000, periodicDue: false))
+        // A new authorization epoch cannot wait.
+        flag.request()
+        XCTAssertFalse(flag.shouldForceKeyframe(atNanoseconds: 4_000_000_000, periodicDue: false))
+        flag.request(urgent: true)
+        XCTAssertTrue(flag.shouldForceKeyframe(atNanoseconds: 4_000_000_001, periodicDue: false))
+        // The first keyframe after a reset is not delayed.
+        flag.reset()
+        flag.request()
+        XCTAssertTrue(flag.shouldForceKeyframe(atNanoseconds: 4_000_000_002, periodicDue: false))
     }
 
     func testStageLatencyRecorderSummarizesAfterWarmup() {
