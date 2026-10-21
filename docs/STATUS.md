@@ -12,22 +12,24 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 
 ## Summary
 
-Build `0.2.1042` is the current in-house M10 Debug diagnostic pair. Both role
-plists identify Version `0.2`, Build `1042`; the apps, ZIPs, and DMGs are in
-`build/debug-diagnostic/`. Full `.codex/ci.sh` validation and the opt-in
-VideoToolbox encode/decode smoke passed on 2026-10-21. Four Apple notarizations
-were accepted; both apps and DMGs were stapled and passed Gatekeeper, ticket,
-and final package audits. Previous `build/debug-diagnostic/` outputs were
-cleared before packaging; `.build` validation caches were retained. Build
-`1042` adds a hardware low-latency H.264 encoder profile with a standard-session
-fallback and safe logging of the accepted profile. It retains Build `1041`'s
-selectable Viewer stream quality (1080p/1440p or experimental 4K, at 30 or 60
-fps), asynchronous Viewer decoding, Host-side oversized-frame recovery, and
-Build `1040`'s offscreen representative window selection and Viewer-side
-Chinese composition. Artifacts were built from source commit `19ee315` with the
-Build `1042` bundle-version bump. Physical high-resolution performance,
+Build `0.2.1043` is the current in-house M10 Debug diagnostic pair and
+notarized Release pair. Both role plists identify Version `0.2`, Build `1043`;
+Debug artifacts are in `build/debug-diagnostic/` and Release artifacts are in
+`build/release/`. Full `.codex/ci.sh` validation passed on 2026-10-21, as did
+the Release workflow's clean validation, notarization, stapling, Gatekeeper,
+and final package audits. All eight Apple submissions (Debug and Release app
+ZIPs and DMGs) were accepted. Debug builds include diagnostic logging; Release
+builds do not. Build `1043` adds M8 stale-frame dropping, gentler bitrate
+reductions, and spacing between forced keyframes. It retains the low-latency
+H.264 profile and standard-session fallback, selectable Viewer stream quality
+(1080p/1440p or experimental 4K, at 30 or 60 fps), asynchronous Viewer
+decoding, Host-side oversized-frame recovery, offscreen representative window
+selection, and Viewer-side Chinese composition. Artifacts were built from
+source commit `b8922d4` with the Host and Viewer Build `1043` bundle-version
+bump. Previous distribution outputs were cleared before packaging; `.build`
+validation caches were retained. Physical high-resolution performance,
 background-window selection, and two-Mac Chinese-input acceptance remain
-pending. Build `1042` submission IDs and hashes are recorded below.
+pending. Build `1043` submission IDs and hashes are recorded below.
 The public source snapshot at commit `a63222e` remains included in the
 historical signed and notarized `0.2.1011` RC. Builds `1036`, `1035`, `1033`, `1032`,
 `1031`, and `1030` are historical; their local distribution outputs are not
@@ -173,6 +175,68 @@ The artifacts are in `build/debug-diagnostic/`:
 
 These artifacts are for in-house diagnostics, not a public release. Physical
 background-window selection and Chinese input acceptance remain pending.
+
+### 0.2.1043 M8/M10 Debug diagnostic and Release artifacts
+
+Build `1043` was generated from source commit `b8922d4` with the Host and Viewer
+`CFBundleVersion` set to `1043`. M8 drops stale encoded frames before they add
+latency to the send queue, uses gentler adaptive bitrate reductions, and spaces
+forced keyframe requests. The previous low-latency H.264 profile, standard
+session fallback, Viewer quality controls, asynchronous decoding, and Host
+oversized-frame recovery remain included.
+
+Full `.codex/ci.sh` validation passed on 2026-10-21, including Host arm64 and
+x86_64, Viewer arm64, deterministic package/app tests, M8 benchmark, and M9
+package audit. The opt-in VideoToolbox encode/decode smoke passed on this Apple
+Silicon Mac; the opt-in ScreenCaptureKit system smoke was skipped by design.
+The Release notarization workflow reran the full clean CI and passed its
+signature, hardened-runtime, entitlement, DMG, ticket, and Gatekeeper audits.
+Both build channels were packaged after clearing the existing distribution
+outputs; `.build` caches were retained. All eight Apple submissions were
+accepted and the apps and DMGs were stapled and verified.
+
+Debug diagnostic Apple submission IDs:
+
+| Artifact | Apple submission ID | Status |
+| --- | --- | --- |
+| Host app ZIP | `362c707d-1f60-4f78-8977-9a6ae1a6ae09` | Accepted |
+| Viewer app ZIP | `a643b442-65f9-4850-a658-d39661c20cdf` | Accepted |
+| Host DMG | `dd6fa593-3c00-448a-9310-8c123e4c5ec5` | Accepted |
+| Viewer DMG | `6ffc53db-4666-497d-81f1-e0aa679ba5c3` | Accepted |
+
+Release Apple submission IDs:
+
+| Artifact | Apple submission ID | Status |
+| --- | --- | --- |
+| Host app ZIP | `f51470b1-850c-478c-af24-1a3a446db669` | Accepted |
+| Viewer app ZIP | `3eea7cb3-6fdb-4e99-a0d7-b205a0584d9d` | Accepted |
+| Host DMG | `aeb22671-d0ed-4485-a76c-9c6081ddd357` | Accepted |
+| Viewer DMG | `c4fc1abc-fc5b-41b3-b20d-dce99596f846` | Accepted |
+
+SHA-256 hashes for the Debug diagnostic artifacts in `build/debug-diagnostic/`:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1043.app.zip` | `9efabc3fab4a28bcabc858c409915e02cbbca8677944a57b011318eca537e26b` |
+| `MacRemoteApp-Host-debug-diagnostic-0.2.1043.dmg` | `958bdf6c2704af3221c4cabe9dae49b1f87ec346e978c90dd825e465304598cc` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1043.app.zip` | `fcbc4775fb7460e1da3ac9a9e692b00265fbd8d1dc3907be08303a3a36410c84` |
+| `MacRemoteApp-Viewer-debug-diagnostic-0.2.1043.dmg` | `ff03d35033fd3c819620bd92f9da0395fd9d573d75d169bfe6789eaf5aca5967` |
+
+SHA-256 hashes for the Release artifacts in `build/release/`:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host.app.zip` | `2565553e2f775b0fb08e1c66685d2bd5b8259098e0c4f56a04c7725781c5ef20` |
+| `MacRemoteApp-Host.dmg` | `28f393e5eac894c66c01872a27debee774abcbed00b8e746f61b384022afdf2f` |
+| `MacRemoteApp-Viewer.app.zip` | `fa26db29b158b19bf351cd4efe38c7894f8db02283ff96dd03e71c35a84ef13f` |
+| `MacRemoteApp-Viewer.dmg` | `7384d8405a74b941b35bd6c36299bd17a3135433d99f4124b33ed45fd62a7b20` |
+
+The Debug pair is for in-house diagnostics; the Release pair is the formal
+production-channel package and was not uploaded to a public release. Physical
+Intel Host/Apple Silicon Viewer performance, background-window selection,
+two-Mac Chinese-input, and full M10 acceptance remain pending. M8 physical
+congestion and latency measurements are tracked in
+[issue #5](https://github.com/rudinyu/MacRemoteApp/issues/5).
 
 ### 0.2.1042 M8/M10 in-house Debug diagnostic artifacts
 
@@ -702,8 +766,8 @@ diagnostic artifacts, not a public release.
 | M6 | Implementation/test gate complete | Real OS event posting (manual disposable-application test) |
 | M7 | Implementation/test gate complete | Physical two-machine clipboard walkthrough |
 | M8 | Deterministic measurement/resilience gate implemented | Physical clock-synchronized performance report |
-| M9 | Release-audit gate implemented; current `0.2.1011` notarized RC artifacts verified | Physical acceptance remains separate |
-| M10 | Production composition and pairing UI complete; Build `1042` is the current validated, Developer ID signed, Apple-notarized in-house Debug pair; previous local distribution outputs were cleared before it | Physical offscreen/background-window selection and foreground input-delivery test; full background-stream, connected-UI, clipboard, high-resolution performance, and disconnect-recovery acceptance on the physical pair; the deterministic end-to-end Viewer send-race path remains unverified |
+| M9 | Release-audit gate implemented; current `0.2.1043` notarized Release artifacts verified | Physical acceptance remains separate |
+| M10 | Production composition and pairing UI complete; Build `1043` is the current validated, Developer ID signed, Apple-notarized Debug and Release pair; previous distribution outputs were cleared before it | Physical offscreen/background-window selection and foreground input-delivery test; full background-stream, connected-UI, clipboard, high-resolution performance, and disconnect-recovery acceptance on the physical pair; the deterministic end-to-end Viewer send-race path remains unverified |
 
 ### 0.2.1024 in-house Debug diagnostic artifacts
 

@@ -10,19 +10,20 @@ Host; this is deliberately not a full remote-desktop product.
 Milestone state and open evidence gaps are tracked in one place:
 [`docs/STATUS.md`](docs/STATUS.md).
 
-Build `0.2.1042` is the current in-house M10 Debug diagnostic pair in
-`build/debug-diagnostic/`. Full `.codex/ci.sh` validation and the opt-in
-VideoToolbox encode/decode smoke passed on 2026-10-21. The Host and Viewer
-apps, ZIPs, and DMGs are Developer ID signed, accepted by Apple, stapled, and
-passed Gatekeeper and final package audits. Build `1042` adds a hardware
-low-latency H.264 encoder profile with a standard-session fallback and logs
-the accepted profile. It retains Build `1041`'s selectable Viewer stream
-quality (1080p or 1440p at 30/60 fps, or experimental 4K at 30/60 fps),
-asynchronous Viewer decoding, and Host handling for oversized encoded frames.
-Physical high-resolution performance, background-window selection, and
-two-Mac Chinese-input acceptance remain pending. Earlier distribution outputs
-were cleared before creating this pair; `.build` validation caches were
-retained. See
+Build `0.2.1043` is the current in-house Debug diagnostic pair in
+`build/debug-diagnostic/` and the signed, notarized Release pair in
+`build/release/`. Full `.codex/ci.sh` validation passed on 2026-10-21, as did
+the Release workflow's clean validation, notarization, stapling, Gatekeeper,
+and package audits. Both channels' Host and Viewer apps were accepted by Apple.
+Debug builds include the diagnostic log; Release builds do not. Build `1043`
+adds M8 stale-frame dropping, gentler bitrate reductions, and spacing between
+forced keyframes. It retains the low-latency H.264 profile and standard-session
+fallback, selectable Viewer stream quality (1080p or 1440p at 30/60 fps, or
+experimental 4K at 30/60 fps), asynchronous Viewer decoding, and Host handling
+for oversized encoded frames. Physical high-resolution performance,
+background-window selection, and two-Mac Chinese-input acceptance remain
+pending. Previous distribution outputs were cleared before packaging;
+`.build` validation caches were retained. See
 [`docs/STATUS.md`](docs/STATUS.md) for artifact hashes, Apple submission IDs,
 and remaining acceptance evidence.
 

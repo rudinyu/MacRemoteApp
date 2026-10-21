@@ -256,8 +256,9 @@ mismatch stops capture and fails closed.
   frame to be a keyframe. Whatever the source (Viewer request, Host queue
   discard, stale-frame drop, or oversize frame), the Host forces at most one
   keyframe per second; a due periodic keyframe satisfies a pending request,
-  and only a new authorization epoch's first keyframe skips the spacing. Peers without the capability never receive it and
-  recover at the periodic keyframe.
+  and only a new authorization epoch's first keyframe skips the spacing.
+  Peers without the capability never receive it and recover at the periodic
+  keyframe.
 - Bitrate adaptation (M8): with the optional `receiverReport` capability, the
   Viewer's session sends `ReceiverReport` about every 500 ms while video
   arrives. It carries the mean queuing delay (the rise of receive time minus
@@ -269,8 +270,8 @@ mismatch stops capture and fails closed.
   at most once per second and never below a quarter of the stream maximum
   (at least 2 Mbps). After 2 s without congestion, reports with at most 15 ms
   delay raise it by one twentieth of the maximum every 500 ms back to the
-  stream maximum. The bitrate changes on the live VideoToolbox session without a new
-  keyframe. A report is untrusted input bound to the authorized window
+  stream maximum. The bitrate changes on the live VideoToolbox session without
+  a new keyframe. A report is untrusted input bound to the authorized window
   generation; the worst a peer can do is move the bitrate within those
   bounds. Without the capability, the Host still adapts to its own queue
   discards and to gap-triggered keyframe requests.
