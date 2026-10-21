@@ -144,6 +144,8 @@ final class CodecCoreTests: XCTestCase {
         )
         try encoder.start(generation: 7)
         defer { encoder.reset() }
+        let profile = try XCTUnwrap(encoder.latencyProfile, "The encoder must report its accepted latency settings.")
+        XCTAssertNotEqual(profile.hardwareAccelerated, false, "The real-time encoder must not be a software fallback.")
         let pixelBuffer = try makePixelBuffer(width: 64, height: 64, pixelFormat: pixelFormat)
         let encoded: EncodedH264Frame = try await withCheckedThrowingContinuation { continuation in
             do {

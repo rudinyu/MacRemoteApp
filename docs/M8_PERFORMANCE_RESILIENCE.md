@@ -93,6 +93,12 @@ thread), so a slow capture-to-send stage can be attributed to encoding
 (for example thermal throttling) or to send-side waiting. The capture loop
 reads keyframe requests without an actor hop, and window discovery resolves
 each owning process's activation policy once per pass rather than per window.
+When a selection starts, the Host logs `M8 encoder profile` with the
+stream size, frame rate, bitrate, and which latency settings VideoToolbox
+accepted: hardware low-latency rate control (tried first, with hardware
+required, falling back to the standard configuration), whether the encoder is
+hardware-accelerated, `MaxFrameDelayCount = 0`, and speed-over-quality
+prioritization (macOS 13 and later).
 An encoded frame larger than the negotiated envelope payload limit (4 MiB by
 default) is dropped with a bitrate reduction (`reason=host-oversize-frame`)
 and a forced keyframe; it no longer stops the video pipeline.

@@ -19,6 +19,7 @@ public final class H264Encoder: @unchecked Sendable {
     private var nextRequestID: UInt64 = 1
     private var pending: [UInt64: PendingRequest] = [:]
     private var latestDecoderConfiguration: H264DecoderConfiguration?
+    private var latencyProfileValue: H264EncoderLatencyProfile?
 
     public init(configuration: H264EncoderConfiguration = .default) throws {
         try configuration.validate()
@@ -48,13 +49,49 @@ public final class H264Encoder: @unchecked Sendable {
         }
         lock.unlock()
 
+        // Prefer hardware low-latency rate control; fall back to the standard
+        // configuration if the encoder rejects it or any required property.
+        // Hardware is required for the low-latency attempt so an Intel Host
+        // never silently drops to a slow software encoder.
+        let configured: (session: VTCompressionSession, profile: H264EncoderLatencyProfile)
+        do {
+            configured = try makeConfiguredSession(width: width, height: height, lowLatency: true)
+        } catch {
+            configured = try makeConfiguredSession(width: width, height: height, lowLatency: false)
+        }
+
+        lock.withLock {
+            session = configured.session
+            latencyProfileValue = configured.profile
+            self.generation = generation
+            latestDecoderConfiguration = nil
+        }
+    }
+
+    /// The latency-related settings the encoder accepted for the current
+    /// session, for diagnostics. `nil` before the first start.
+    public var latencyProfile: H264EncoderLatencyProfile? {
+        lock.withLock { latencyProfileValue }
+    }
+
+    private func makeConfiguredSession(
+        width: UInt32,
+        height: UInt32,
+        lowLatency: Bool
+    ) throws -> (session: VTCompressionSession, profile: H264EncoderLatencyProfile) {
+        let specification: CFDictionary? = lowLatency
+            ? [
+                kVTVideoEncoderSpecification_EnableLowLatencyRateControl: kCFBooleanTrue,
+                kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: kCFBooleanTrue
+            ] as CFDictionary
+            : nil
         var newSession: VTCompressionSession?
         let status = VTCompressionSessionCreate(
             allocator: nil,
             width: Int32(width),
             height: Int32(height),
             codecType: kCMVideoCodecType_H264,
-            encoderSpecification: nil,
+            encoderSpecification: specification,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
             outputCallback: nil,
@@ -102,20 +139,61 @@ public final class H264Encoder: @unchecked Sendable {
                 value: NSNumber(value: configuration.keyframeInterval),
                 on: newSession
             )
+            // Emit every frame as soon as it is encoded instead of letting the
+            // encoder hold frames internally (each held frame adds a frame
+            // interval of latency).
+            let maxFrameDelayZero = applyOptionalProperty(
+                kVTCompressionPropertyKey_MaxFrameDelayCount,
+                value: NSNumber(value: 0),
+                on: newSession
+            )
+            var prioritizeSpeed = false
+            if #available(macOS 13.0, *) {
+                prioritizeSpeed = applyOptionalProperty(
+                    kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
+                    value: kCFBooleanTrue,
+                    on: newSession
+                )
+            }
             let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(newSession)
             guard prepareStatus == noErr else {
                 throw CodecError.videoToolboxFailure(prepareStatus)
             }
+            let profile = H264EncoderLatencyProfile(
+                lowLatencyRateControl: lowLatency,
+                hardwareAccelerated: Self.isHardwareAccelerated(newSession),
+                maxFrameDelayZero: maxFrameDelayZero,
+                prioritizeSpeed: prioritizeSpeed
+            )
+            return (newSession, profile)
         } catch {
             VTCompressionSessionInvalidate(newSession)
             throw error
         }
+    }
 
-        lock.withLock {
-            session = newSession
-            self.generation = generation
-            latestDecoderConfiguration = nil
+    private static func isHardwareAccelerated(_ session: VTCompressionSession) -> Bool? {
+        var value: CFTypeRef?
+        let status = withUnsafeMutablePointer(to: &value) { pointer in
+            VTSessionCopyProperty(
+                session,
+                key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+                allocator: nil,
+                valueOut: pointer
+            )
         }
+        guard status == noErr, let number = value as? NSNumber else { return nil }
+        return number.boolValue
+    }
+
+    /// Applies a property that improves latency when available and reports
+    /// whether the encoder accepted it; rejection never fails the session.
+    private func applyOptionalProperty(
+        _ key: CFString,
+        value: CFTypeRef,
+        on session: VTCompressionSession
+    ) -> Bool {
+        VTSessionSetProperty(session, key: key, value: value) == noErr
     }
 
     public func encode(
@@ -372,5 +450,28 @@ public final class H264Encoder: @unchecked Sendable {
         guard status == noErr else {
             throw CodecError.videoToolboxFailure(status)
         }
+    }
+}
+
+/// Latency-related encoder settings that VideoToolbox accepted for a session.
+public struct H264EncoderLatencyProfile: Equatable, Sendable {
+    /// Created with hardware low-latency rate control (otherwise the standard
+    /// configuration fallback).
+    public let lowLatencyRateControl: Bool
+    /// Whether VideoToolbox reports a hardware encoder; `nil` if unknown.
+    public let hardwareAccelerated: Bool?
+    public let maxFrameDelayZero: Bool
+    public let prioritizeSpeed: Bool
+
+    public init(
+        lowLatencyRateControl: Bool,
+        hardwareAccelerated: Bool?,
+        maxFrameDelayZero: Bool,
+        prioritizeSpeed: Bool
+    ) {
+        self.lowLatencyRateControl = lowLatencyRateControl
+        self.hardwareAccelerated = hardwareAccelerated
+        self.maxFrameDelayZero = maxFrameDelayZero
+        self.prioritizeSpeed = prioritizeSpeed
     }
 }

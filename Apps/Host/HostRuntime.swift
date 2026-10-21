@@ -2235,6 +2235,12 @@ actor HostRuntime {
             )
         )
         try encoder.start(generation: generation)
+        if let profile = encoder.latencyProfile {
+            let hardware = profile.hardwareAccelerated.map { $0 ? "true" : "false" } ?? "unknown"
+            startupLogger.notice(
+                "M8 encoder profile width=\(dimensions.width, privacy: .public) height=\(dimensions.height, privacy: .public) fps=\(streamLimits.frameRate, privacy: .public) bps=\(streamBitrate, privacy: .public) lowLatency=\(profile.lowLatencyRateControl, privacy: .public) hardware=\(hardware, privacy: .public) maxFrameDelayZero=\(profile.maxFrameDelayZero, privacy: .public) prioritizeSpeed=\(profile.prioritizeSpeed, privacy: .public)"
+            )
+        }
         self.encoder = encoder
         videoConfigSentGeneration = nil
         videoConfigSentAuthorizationGeneration = nil
