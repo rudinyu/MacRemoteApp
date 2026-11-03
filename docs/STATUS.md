@@ -12,24 +12,28 @@ loopback test, or synthetic benchmark does not upgrade it to verified.
 
 ## Summary
 
-Build `0.2.1043` is the current in-house M10 Debug diagnostic pair and
-notarized Release pair. Both role plists identify Version `0.2`, Build `1043`;
-Debug artifacts are in `build/debug-diagnostic/` and Release artifacts are in
-`build/release/`. Full `.codex/ci.sh` validation passed on 2026-10-21, as did
-the Release workflow's clean validation, notarization, stapling, Gatekeeper,
-and final package audits. All eight Apple submissions (Debug and Release app
-ZIPs and DMGs) were accepted. Debug builds include diagnostic logging; Release
-builds do not. Build `1043` adds M8 stale-frame dropping, gentler bitrate
-reductions, and spacing between forced keyframes. It retains the low-latency
-H.264 profile and standard-session fallback, selectable Viewer stream quality
-(1080p/1440p or experimental 4K, at 30 or 60 fps), asynchronous Viewer
-decoding, Host-side oversized-frame recovery, offscreen representative window
-selection, and Viewer-side Chinese composition. Artifacts were built from
-source commit `b8922d4` with the Host and Viewer Build `1043` bundle-version
-bump. Previous distribution outputs were cleared before packaging; `.build`
-validation caches were retained. Physical high-resolution performance,
-background-window selection, and two-Mac Chinese-input acceptance remain
-pending. Build `1043` submission IDs and hashes are recorded below.
+Build `0.2.1043` remains the current in-house M10 Debug diagnostic pair in
+`build/debug-diagnostic/`; Build `0.2.1044` is the current notarized Release
+pair in `build/release/` and the
+[GitHub RC1](https://github.com/rudinyu/MacRemoteApp/releases/tag/v0.2.1044-rc1).
+The Debug role plists identify Build `1043`; both Release role plists identify
+Version `0.2`, Build `1044`. Full `.codex/ci.sh` validation passed on
+2026-11-03, as did the Release workflow's clean validation, notarization,
+stapling, Gatekeeper, and final package audits. All four Release app/DMG Apple
+submissions were accepted. Debug builds include diagnostic logging; Release
+builds do not. Build `1044` packages the MIT license inside both signed apps
+and at the root of both installer DMGs. It carries forward Build `1043`'s M8
+stale-frame dropping, gentler bitrate reductions, and spacing between forced
+keyframes, plus the low-latency H.264 profile and standard-session fallback,
+selectable Viewer stream quality (1080p/1440p or experimental 4K, at 30 or 60
+fps), asynchronous Viewer decoding, Host-side oversized-frame recovery,
+offscreen representative window selection, and Viewer-side Chinese
+composition. Release artifacts were generated from source commit `be97b89`
+with the Host and Viewer Build `1044` bundle-version bump. The new notarized
+Release pair replaced the prior `build/release/` only after all checks passed;
+`.build` validation caches were retained. Physical high-resolution
+performance, background-window selection, and two-Mac Chinese-input acceptance
+remain pending. Build `1044` submission IDs and hashes are recorded below.
 The public source snapshot at commit `a63222e` remains included in the
 historical signed and notarized `0.2.1011` RC. Builds `1036`, `1035`, `1033`, `1032`,
 `1031`, and `1030` are historical; their local distribution outputs are not
@@ -176,7 +180,42 @@ The artifacts are in `build/debug-diagnostic/`:
 These artifacts are for in-house diagnostics, not a public release. Physical
 background-window selection and Chinese input acceptance remain pending.
 
-### 0.2.1043 M8/M10 Debug diagnostic and Release artifacts
+### 0.2.1044 M9/M10 notarized Release artifacts
+
+Build `1044` contains the current formal Release pair. Its distribution change
+adds the repository MIT `LICENSE` to each signed app bundle and to the root of
+each DMG; the DMG payload manifest and release auditor verify the license
+bytes. The Host and Viewer bundle versions are `0.2` / `1044`. Application
+behavior carries forward from Build `1043`.
+
+The complete `.codex/ci.sh` validation passed on 2026-11-03. The formal
+`scripts/release-notarized.sh release` workflow reran clean validation, signed
+the apps and DMGs with Developer ID, and passed the hardened-runtime,
+entitlement, payload, signature, Gatekeeper, and notarization-ticket audits.
+All four Apple submissions were accepted and their tickets stapled:
+
+| Artifact | Apple submission ID | Status |
+| --- | --- | --- |
+| Host app ZIP | `9409e428-254c-48e9-8dcb-99fb0667bbd8` | Accepted |
+| Viewer app ZIP | `098d9884-618e-44e8-9af0-9e017d946fe5` | Accepted |
+| Host DMG | `c95ce152-0443-439b-8428-0fc275dfe98f` | Accepted |
+| Viewer DMG | `c46dcea8-6fc7-4740-84af-3cb7817c0da6` | Accepted |
+
+The Host and Viewer DMGs are published as the
+[0.2.1044 RC1 GitHub release](https://github.com/rudinyu/MacRemoteApp/releases/tag/v0.2.1044-rc1):
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `MacRemoteApp-Host.dmg` | `ece721b96d1ef06bcb48f58da8e8102821a19b1c6a5f00bee954a2cf93a4a462` |
+| `MacRemoteApp-Viewer.dmg` | `956363a90890ce8de4e8bead383d5b4bd305e13dac7c8f1a7dee52eee5117727` |
+| `MacRemoteApp-Host.app.zip` | `fb2b52376e9a328ede4d0b965477eafc8356baa8b04fee5e947e972133292adb` |
+| `MacRemoteApp-Viewer.app.zip` | `bc64b47a31f94b34bcae836e3c9ed8f4d97815e49502ee3ee294cfac3ca5ce40` |
+
+The release remains an RC. Physical high-resolution performance,
+background-window selection, two-Mac Chinese-input, and full M10 acceptance
+remain pending.
+
+### 0.2.1043 M8/M10 Debug diagnostic and historical Release artifacts
 
 Build `1043` was generated from source commit `b8922d4` with the Host and Viewer
 `CFBundleVersion` set to `1043`. M8 drops stale encoded frames before they add
@@ -222,7 +261,7 @@ SHA-256 hashes for the Debug diagnostic artifacts in `build/debug-diagnostic/`:
 | `MacRemoteApp-Viewer-debug-diagnostic-0.2.1043.app.zip` | `fcbc4775fb7460e1da3ac9a9e692b00265fbd8d1dc3907be08303a3a36410c84` |
 | `MacRemoteApp-Viewer-debug-diagnostic-0.2.1043.dmg` | `ff03d35033fd3c819620bd92f9da0395fd9d573d75d169bfe6789eaf5aca5967` |
 
-SHA-256 hashes for the Release artifacts in `build/release/`:
+SHA-256 hashes for the superseded Build `1043` Release artifacts:
 
 | Artifact | SHA-256 |
 | --- | --- |
@@ -231,8 +270,8 @@ SHA-256 hashes for the Release artifacts in `build/release/`:
 | `MacRemoteApp-Viewer.app.zip` | `fa26db29b158b19bf351cd4efe38c7894f8db02283ff96dd03e71c35a84ef13f` |
 | `MacRemoteApp-Viewer.dmg` | `7384d8405a74b941b35bd6c36299bd17a3135433d99f4124b33ed45fd62a7b20` |
 
-The Debug pair is for in-house diagnostics; the Release pair is the formal
-production-channel package and was not uploaded to a public release. Physical
+The Debug pair is for in-house diagnostics. The Release pair was published as
+the historical 0.2.1043 RC1 and has been superseded by Build `1044`. Physical
 Intel Host/Apple Silicon Viewer performance, background-window selection,
 two-Mac Chinese-input, and full M10 acceptance remain pending. M8 physical
 congestion and latency measurements are tracked in
@@ -766,8 +805,8 @@ diagnostic artifacts, not a public release.
 | M6 | Implementation/test gate complete | Real OS event posting (manual disposable-application test) |
 | M7 | Implementation/test gate complete | Physical two-machine clipboard walkthrough |
 | M8 | Deterministic measurement/resilience gate implemented | Physical clock-synchronized performance report |
-| M9 | Release-audit gate implemented; current `0.2.1043` notarized Release artifacts verified | Physical acceptance remains separate |
-| M10 | Production composition and pairing UI complete; Build `1043` is the current validated, Developer ID signed, Apple-notarized Debug and Release pair; previous distribution outputs were cleared before it | Physical offscreen/background-window selection and foreground input-delivery test; full background-stream, connected-UI, clipboard, high-resolution performance, and disconnect-recovery acceptance on the physical pair; the deterministic end-to-end Viewer send-race path remains unverified |
+| M9 | Release-audit gate implemented; current `0.2.1044` notarized Release artifacts verified and published as RC1 | Physical acceptance remains separate |
+| M10 | Production composition and pairing UI complete; Build `1043` is the current validated, Developer ID signed, Apple-notarized Debug pair; Build `1044` is the current Developer ID signed, Apple-notarized Release pair | Physical offscreen/background-window selection and foreground input-delivery test; full background-stream, connected-UI, clipboard, high-resolution performance, and disconnect-recovery acceptance on the physical pair; the deterministic end-to-end Viewer send-race path remains unverified |
 
 ### 0.2.1024 in-house Debug diagnostic artifacts
 
