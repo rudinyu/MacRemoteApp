@@ -343,6 +343,11 @@ clipboard capability without another Host dialog; the Viewer must still opt in
 locally before text flows. The initial target is 1080p at up to 60 fps with low
 measured latency.
 
+## License
+
+Copyright (c) 2026 Rudin Yu. MacRemoteApp is distributed under the MIT License;
+see [LICENSE](LICENSE).
+
 ## Technology baseline
 
 - Swift 6 with strict concurrency checks.
