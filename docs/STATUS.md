@@ -31,12 +31,12 @@ offscreen representative window selection, and Viewer-side Chinese
 composition. Release artifacts were generated from source commit `be97b89`
 with the Host and Viewer Build `1044` bundle-version bump. The new notarized
 Release pair replaced the prior `build/release/` only after all checks passed;
-`.build` validation caches were retained. Physical high-resolution
-performance, background-window selection, and two-Mac Chinese-input acceptance
+`.build` validation caches were retained. On 2026-11-03, the operator reported
+quick tests passed for items 1–27 of the grouped M10 checklist on Build `1044`.
+The 12 remaining items were not reported as tested; the matching rows are
+marked `Quick pass` or remain open in [the M10 checklist](M10_ACCEPTANCE.md).
+Full M10 acceptance and the separate M8 clock-synchronized performance report
 remain pending. Build `1044` submission IDs and hashes are recorded below.
-On 2026-11-03, the operator reported no issues during physical testing of
-Build `1044`; the specific M10 scenarios covered were not itemized in that
-report, so checklist rows not explicitly recorded below remain open.
 The public source snapshot at commit `a63222e` remains included in the
 historical signed and notarized `0.2.1011` RC. Builds `1036`, `1035`, `1033`, `1032`,
 `1031`, and `1030` are historical; their local distribution outputs are not
@@ -809,7 +809,7 @@ diagnostic artifacts, not a public release.
 | M7 | Implementation/test gate complete | Physical two-machine clipboard walkthrough |
 | M8 | Deterministic measurement/resilience gate implemented | Physical clock-synchronized performance report |
 | M9 | Release-audit gate implemented; current `0.2.1044` notarized Release artifacts verified and published as RC1 | Physical acceptance remains separate |
-| M10 | Production composition and pairing UI complete; Build `1043` is the current validated, Developer ID signed, Apple-notarized Debug pair; Build `1044` is the current Developer ID signed, Apple-notarized Release pair | Physical offscreen/background-window selection and foreground input-delivery test; full background-stream, connected-UI, clipboard, high-resolution performance, and disconnect-recovery acceptance on the physical pair; the deterministic end-to-end Viewer send-race path remains unverified |
+| M10 | Production composition and pairing UI complete; Build `1043` is the current Developer ID signed, Apple-notarized Debug pair; Build `1044` is the current Developer ID signed, Apple-notarized Release pair; operator reports quick tests passed for checklist items 1–27 | Checklist items 28–39, detailed two-Mac run record, complete acceptance, and the separate M8 clock-synchronized performance report |
 
 ### 0.2.1024 in-house Debug diagnostic artifacts
 

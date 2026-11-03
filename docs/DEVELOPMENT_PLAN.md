@@ -14,11 +14,13 @@ contract also requires capability negotiation, current target and generation
 checks, valid permissions and geometry, and fail-closed secure-input and
 console-state checks. P6 does not authorize locked-screen control.
 
-P6 deterministic implementation checks are part of the current validation;
-physical P6 input/IME acceptance and Intel-Host-to-Apple-Silicon-Viewer M10
-acceptance remain explicit evidence gaps. The current Debug diagnostic
-candidate is for internal reproduction, not a public release. The shared
-notarization adapter remains the release path for authorized artifacts.
+P6 deterministic implementation checks are part of the current validation.
+The operator reports quick Build `1044` physical tests passed for M10 checklist
+items 1–27, including P6 control, input, and IME scenarios. Full M10 acceptance
+remains open for the 12 unchecked scenarios and the detailed two-Mac run
+record. The current Debug diagnostic candidate is for internal reproduction,
+not a public release. The shared notarization adapter remains the release path
+for authorized artifacts.
 
 ## Plan status
 
@@ -539,9 +541,10 @@ TLS bootstrap, two-sided code
 confirmation, and an explicit Viewer window picker; an optional peer
 certificate remains available only for pinned migration and diagnostics. The
 operator confirms physical Bonjour/TLS communication works and a selected Host
-window frame reached the Viewer. Full Intel Host to Apple Silicon Viewer
-acceptance remains open for input, recovery, clipboard, performance, and UI
-lifecycle behaviors.
+window frame reached the Viewer. On 2026-11-03 the operator also reported quick
+Build `1044` physical tests passed for checklist items 1–27. Full Intel Host to
+Apple Silicon Viewer acceptance remains open for checklist items 28–39, the
+detailed run record, and separate M8 performance evidence.
 
 The app-shell implementation includes native menu commands for both roles,
 shared release metadata, same-window Viewer Settings, and a retained Host
@@ -616,8 +619,9 @@ secure-input checks. Other post-V1 capabilities remain out of scope.
   stale trust, unsupported capability, clipboard opt-out, and input disable.
 - Deterministically test transient discovery gaps, bounded capture restart,
   owner-ID reuse rejection, and Host retention of the authenticated session
-  while capture reports recovery. Record physical background-stream checks as
-  pending until the two-Mac run is complete.
+  while capture reports recovery. A quick physical background-stream pass was
+  reported for Build `1044`; keep full acceptance open until detailed two-Mac
+  evidence is recorded.
 - Run final build/test/security/release validation and archive only sanitized
   evidence.
 - Use `bash scripts/validate.sh` for code changes; it includes AppSupport tests.

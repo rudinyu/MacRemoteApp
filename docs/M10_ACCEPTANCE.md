@@ -57,22 +57,23 @@ The app shell now provides native menus and version/build metadata on both
 roles. Viewer Settings navigates within its existing main window; Host
 Settings/About temporarily expose a regular application menu and Dock icon,
 then return to menu-bar operation when closed. These are app-layer changes,
-not a protocol revision. The rows below remain unchecked until exercised on
-the target Macs; [dated local UI evidence](TESTING_CLEANUP.md#local-evidence-2026-09-26-021003)
+not a protocol revision. States marked `Quick pass` below record the
+operator's brief Build `1044` physical checks; they are not full acceptance.
+[Dated local UI evidence](TESTING_CLEANUP.md#local-evidence-2026-09-26-021003)
 is not physical acceptance.
 
 ## Current candidate and manual acceptance
 
-The last public notarized `0.2.1011` RC was built from source commit `a63222e`,
-with both app bundle plists set to Build `1011`. It includes the M6/M10
-runtime follow-ups that were absent from the
-superseded `0.2.1010` RC built from
-`1e422da8799f183487276e2295008c6ebe499ec8`. Canonical CI, Apple notarization,
-stapling, and release audit passed on 2026-10-13; see the
-[release evidence](STATUS.md#021011-notarized-rc). This remains local build and
-notarization evidence only. The operator elected to perform physical
-acceptance manually, so every physical row below remains unchecked until the
-operator records evidence for the exact installed build.
+The current formal candidate is Build `0.2.1044` RC1, built from source
+commit `be97b89`, Developer ID signed, accepted by Apple, stapled, and
+published at the [GitHub release](https://github.com/rudinyu/MacRemoteApp/releases/tag/v0.2.1044-rc1).
+Build `1043` remains the in-house Debug diagnostic pair. On 2026-11-03, the
+operator reported that quick physical tests of items 1–27 in the grouped
+checklist shared for review passed on Build `1044`. The matching rows below
+are marked `Quick pass (Build 1044)`; items 28–39 remain unchecked. This is a
+quick-test report, not full M10 acceptance. Detailed Mac models, OS versions,
+logs, and the complete run record have not been attached; see the
+[release evidence](STATUS.md#021044-m9m10-notarized-release-artifacts).
 
 P6 control is available when both peers negotiate `backgroundControl` and the
 Host has accepted the authenticated Viewer pairing. There is no separate Host
@@ -97,8 +98,9 @@ diagnostic pairs; their artifacts have been superseded in
 signed, but not submitted to Apple. Build `1029` was accepted by Apple and
 promoted, then withheld after source review found that distinct input rejection
 provenance could be flattened into the same recoverable error. Do not use it
-for physical acceptance. Build `1031` is the current validated M10 in-house
-Debug pair; both role plists identify Version `0.2`, Build `1031`. Its complete
+for physical acceptance. Build `1031` was a validated M10 in-house Debug pair;
+Build `1043` later superseded it as the current Debug pair. Both Build `1031`
+role plists identify Version `0.2`, Build `1031`. Its complete
 `.codex/ci.sh` validation, Developer ID signing, Apple notarization, stapling,
 Gatekeeper checks, and final artifact audit passed on 2026-10-16. Physical
 two-Mac acceptance remains open. Build `1030` is superseded. Its Dropbox
@@ -130,8 +132,9 @@ regression tests cover the ordering. Build `1018` included the former Host
 clipboard consent sheet. The current M10 pairing-trust policy removes that
 per-session Host prompt; accepted pairing enables the negotiated Host-side
 clipboard capability, while the Viewer-local clipboard toggle remains, and
-clipboard text is never logged. The physical acceptance rows below remain
-unchecked. The operator confirmed Bonjour/TLS communication and a Host frame
+clipboard text is never logged. The physical acceptance rows below record the
+Build `1044` quick-test report and still require full acceptance evidence. The
+operator confirmed Bonjour/TLS communication and a Host frame
 reaching the Viewer before the disconnect recurred on Build `1025`; complete
 the remaining rows against the tested pair. The Build `1022` log analysis and the
 resulting input-failure recovery are recorded in the
@@ -199,8 +202,8 @@ are in `build/debug-diagnostic/`:
 | `MacRemoteApp-Host-debug-diagnostic-0.2.1031.dmg` | `9f09baa380ab650e0df1f0e6741ef3dc1a6a13520e669deb8a4d1c713d83cd84` |
 | `MacRemoteApp-Viewer-debug-diagnostic-0.2.1031.dmg` | `d2ef32ae9d96d72e3aa0038489130247ea9cd4d334d5a08db390ffa452945dce` |
 
-The physical two-Mac background-selection and input-delivery test remains
-pending. For this historical build, local validation and Apple notarization do
+The physical two-Mac background-selection and input-delivery test remained
+pending for this historical build. Local validation and Apple notarization do
 not establish that an inactive target app consumed its posted mouse or keyboard
 events. Current source acceptance checks foreground input and focus loss.
 
@@ -559,20 +562,25 @@ establish production performance.
 
 ## Acceptance sequence
 
+The operator reports quick tests passed for items 1–27 of the grouped list
+shared on 2026-11-03; the corresponding rows are labeled `Quick pass`. Items
+28–39 were not reported as tested and remain unchecked. Record the full M10
+run separately before treating this milestone's acceptance as complete.
+
 | Step | Acceptance evidence | State |
 | --- | --- | --- |
-| Fresh install | Host/Viewer app bundles launch and signatures verify | ☐ |
-| Startup permissions | Host Local Network and Screen Recording, plus Viewer Local Network, are granted to the signed app bundles | ☐ |
-| User documentation | Each DMG contains the User Guide, debugging guide, and debug-log collection guide | ☐ |
-| Pairing | Host and Viewer complete commit/reveal, display the same independently derived six-digit code, operators compare it, Host allows and Viewer explicitly accepts, and trust records are stored | ☐ |
-| Pairing recovery | Host and Viewer can explicitly forget their own role's saved peer pairings; the next connection requires a new code and local identity records remain intact | ☐ |
-| Full uninstall reset | The standalone `Uninstall-MacRemoteApp.command` verifies installed signed cleanup helpers, clears both roles' current-user data and role-owned Keychain state, resets only the two product bundle IDs' TCC decisions, and moves removable apps to Trash. Check explicit partial-result reporting; Local Network revocation is manual and legacy shared records remain preserved | ☐ |
-| Host display name | Host `Rename Host…` changes the Bonjour discovery name and the listener restarts without changing the TLS identity | ☐ |
-| Default/display device names | Host defaults to its macOS short hostname; Viewer pairing UI and trust metadata use the Viewer hostname; names never affect authentication | ☐ |
-| Window selection | Select one eligible on-screen Host app window, including one occluded by another app. The Viewer may continue showing it while inactive; explicit selection must foreground the selected regular app before input becomes ready. The picker excludes minimized, hidden, and off-space candidates | ☐ |
-| Same-session app/window switching | Replace the selected app without reconnecting. Verify old-target input and held state are released, capture follows the new selection, Host foregrounds the newly selected app, and ordinary events are dispatched only after the selected PID is confirmed foreground. WindowServer hit-testing determines the recipient; physical receipt remains unverified across the final focus/overlay race | ☐ |
-| P6 capability and pairing trust | Verify both peers negotiate `backgroundControl`; Host acceptance of pairing enables control without a second prompt. Deny pairing and confirm no control is authorized; accept pairing and verify a fresh control generation. Pause preserves video; unpair removes trust and ends the active session, and reconnect requires fresh pairing | ☐ |
-| Focus-loss input safety | After selecting and foregrounding the app, switch to another Host app during mouse and keyboard input. Verify ordinary input stops immediately, Viewer readiness becomes unavailable, and admitted pressed state is safely released. Re-select the target and verify system-dispatched input resumes only after foreground, permission, pairing, generation, target, console, and secure-input checks pass | ☐ |
+| Fresh install | Host/Viewer app bundles launch and signatures verify | Quick pass (Build 1044) |
+| Startup permissions | Host Local Network and Screen Recording, plus Viewer Local Network, are granted to the signed app bundles | Quick pass (Build 1044) |
+| User documentation | Each DMG contains the User Guide, debugging guide, and debug-log collection guide | Quick pass (Build 1044) |
+| Pairing | Host and Viewer complete commit/reveal, display the same independently derived six-digit code, operators compare it, Host allows and Viewer explicitly accepts, and trust records are stored | Quick pass (Build 1044) |
+| Pairing recovery | Host and Viewer can explicitly forget their own role's saved peer pairings; the next connection requires a new code and local identity records remain intact | Quick pass (Build 1044) |
+| Full uninstall reset | The standalone `Uninstall-MacRemoteApp.command` verifies installed signed cleanup helpers, clears both roles' current-user data and role-owned Keychain state, resets only the two product bundle IDs' TCC decisions, and moves removable apps to Trash. Check explicit partial-result reporting; Local Network revocation is manual and legacy shared records remain preserved | Quick pass (Build 1044) |
+| Host display name | Host `Rename Host…` changes the Bonjour discovery name and the listener restarts without changing the TLS identity | Quick pass (Build 1044) |
+| Default/display device names | Host defaults to its macOS short hostname; Viewer pairing UI and trust metadata use the Viewer hostname; names never affect authentication | Quick pass (Build 1044) |
+| Window selection | Select one eligible on-screen Host app window, including one occluded by another app. The Viewer may continue showing it while inactive; explicit selection must foreground the selected regular app before input becomes ready. The picker excludes minimized, hidden, and off-space candidates | Quick pass (Build 1044) |
+| Same-session app/window switching | Replace the selected app without reconnecting. Verify old-target input and held state are released, capture follows the new selection, Host foregrounds the newly selected app, and ordinary events are dispatched only after the selected PID is confirmed foreground. WindowServer hit-testing determines the recipient; physical receipt remains unverified across the final focus/overlay race | Quick pass (Build 1044) |
+| P6 capability and pairing trust | Verify both peers negotiate `backgroundControl`; Host acceptance of pairing enables control without a second prompt. Deny pairing and confirm no control is authorized; accept pairing and verify a fresh control generation. Pause preserves video; unpair removes trust and ends the active session, and reconnect requires fresh pairing | Quick pass (Build 1044) |
+| Focus-loss input safety | After selecting and foregrounding the app, switch to another Host app during mouse and keyboard input. Verify ordinary input stops immediately, Viewer readiness becomes unavailable, and admitted pressed state is safely released. Re-select the target and verify system-dispatched input resumes only after foreground, permission, pairing, generation, target, console, and secure-input checks pass | Quick pass (Build 1044) |
 | Viewer connection state | Connect changes to disabled `Connected`; disconnect shows `Reconnecting…` during retry and re-enables Connect only when disconnected | ☐ |
 | Native app menus | Both roles expose About with version/build, Settings, Minimize, Hide, and Quit; Host status menu also opens About/Settings | ☐ |
 | Debug log access | In Debug builds, each role's **Open Debug Log…** action reveals its own automatically created file, and Finder fallback locates it when the UI is unavailable | ☐ |
@@ -581,24 +589,24 @@ establish production performance.
 | Release identity | About, Settings, Viewer title/status, and Host status menu match both installed plists; `major.minor.build` means separate short version and build, not wire protocol version | ☐ |
 | Viewer settings navigation | Settings uses the same main window; Back, Command-0, and Command-W return to remote view; switching during a connected session releases held input and preserves the session | ☐ |
 | Host settings lifecycle | Runtime and permission status refresh; closing settings keeps Host running, and the app returns to menu-bar operation after its windows close | ☐ |
-| Capture/display | Viewer renders the selected window with aspect preservation | ☐ |
-| Background selected-window stream | Keep the selected Host window unminimized, switch to another app and cover it for at least 30 seconds. Confirm Viewer frames continue without activating either app. If ScreenCaptureKit ends the stream, verify a visible bounded recovery resumes the same selected target without reconnecting. Minimize or close the target separately and confirm target loss does not leave stale video or input active | ☐ |
-| Display lifetime | Disconnect or window replacement clears the previous image immediately; late decode/presentation callbacks from the old session cannot restore it, including reconnects that reuse a wire generation | ☐ |
-| Capture replacement race | Rapid window replacement during a slow capture stop/failure keeps the new selection and its stream alive | ☐ |
-| Video backlog recovery | After encoder-relay overflow, pre-gap frames stay ordered; only a post-gap keyframe permits post-gap deltas to resume | ☐ |
-| Performance | 30-second report has clock probes, valid samples, p50/p95, fps and resource data | ☐ |
-| Input | Each authorized input capability works only while authorized; mouse-only or keyboard-only authorization keeps the other local controls disabled | ☐ |
-| Viewer-led input source | EN/EN stays EN; Chinese/EN and EN/Chinese reach the Viewer's selected state without double toggling; with `textInput`, Chinese composition is on Viewer and, when source following is active, Host targets English; without it, Host uses its matching enabled source; missing/disabled source reports a clear status and leaves mouse available | ☐ |
-| Viewer-side Chinese composition | With `textInput` negotiated, marked text and candidates remain on Viewer; only committed text reaches the selected foreground app; Return/Delete/arrows and Command/Control shortcuts retain their documented physical-key behavior; focus loss discards composition; secure input rejects committed text; Debug logs contain no text content | ☐ |
-| Input-source lifetime | Change source while typing, return from Settings, switch windows/apps, reauthorize, and reconnect; no old acknowledgement or queued key releases a different source/session; focus loss or secure input prevents Host source mutation | ☐ |
-| Input-source compatibility | A peer without `inputSourceSync` continues manual Host IME input without receiving new messages; unsupported third-party internal modes are not presented as synchronized | ☐ |
-| Clipboard | Host pairing trust enables the negotiated text capability without another Host prompt; the Viewer-local opt-in, text-only bounds, opt-out, and echo prevention work | ☐ |
+| Capture/display | Viewer renders the selected window with aspect preservation | Quick pass (Build 1044) |
+| Background selected-window stream | Keep the selected Host window unminimized, switch to another app and cover it for at least 30 seconds. Confirm Viewer frames continue without activating either app. If ScreenCaptureKit ends the stream, verify a visible bounded recovery resumes the same selected target without reconnecting. Minimize or close the target separately and confirm target loss does not leave stale video or input active | Quick pass (Build 1044) |
+| Display lifetime | Disconnect or window replacement clears the previous image immediately; late decode/presentation callbacks from the old session cannot restore it, including reconnects that reuse a wire generation | Quick pass (Build 1044) |
+| Capture replacement race | Rapid window replacement during a slow capture stop/failure keeps the new selection and its stream alive | Quick pass (Build 1044) |
+| Video backlog recovery | After encoder-relay overflow, pre-gap frames stay ordered; only a post-gap keyframe permits post-gap deltas to resume | Quick pass (Build 1044) |
+| Performance | 30-second report has clock probes, valid samples, p50/p95, fps and resource data | Quick pass (Build 1044) |
+| Input | Each authorized input capability works only while authorized; mouse-only or keyboard-only authorization keeps the other local controls disabled | Quick pass (Build 1044) |
+| Viewer-led input source | EN/EN stays EN; Chinese/EN and EN/Chinese reach the Viewer's selected state without double toggling; with `textInput`, Chinese composition is on Viewer and, when source following is active, Host targets English; without it, Host uses its matching enabled source; missing/disabled source reports a clear status and leaves mouse available | Quick pass (Build 1044) |
+| Viewer-side Chinese composition | With `textInput` negotiated, marked text and candidates remain on Viewer; only committed text reaches the selected foreground app; Return/Delete/arrows and Command/Control shortcuts retain their documented physical-key behavior; focus loss discards composition; secure input rejects committed text; Debug logs contain no text content | Quick pass (Build 1044) |
+| Input-source lifetime | Change source while typing, return from Settings, switch windows/apps, reauthorize, and reconnect; no old acknowledgement or queued key releases a different source/session; focus loss or secure input prevents Host source mutation | Quick pass (Build 1044) |
+| Input-source compatibility | A peer without `inputSourceSync` continues manual Host IME input without receiving new messages; unsupported third-party internal modes are not presented as synchronized | Quick pass (Build 1044) |
+| Clipboard | Host pairing trust enables the negotiated text capability without another Host prompt; the Viewer-local opt-in, text-only bounds, opt-out, and echo prevention work | Quick pass (Build 1044) |
 | Permission recovery | Local Network, Screen Recording, or PostEvent denial/revocation disables the affected path and gives a recoverable instruction; all ordinary input requires foreground checks, and P6 requires known-safe global and target-process Accessibility inspection for inactive-target cleanup | ☐ |
 | Window recovery | Close/change/target-safety loss or foreground loss disables input and reports a recoverable state; explicit reselection restores control only after the selected app is confirmed foreground | ☐ |
 | LAN recovery | Disconnect shows reconnecting; reauthorization is required before input resumes | ☐ |
-| Queued-input isolation | Held input is released on Settings navigation within the same authorization; window switch, reauthorization, and reconnect never replay queued old input, and a saturated input queue closes the affected session instead of losing a release | ☐ |
-| Stale trust | Revocation or identity mismatch requires explicit re-pairing | ☐ |
-| Failure UX | Malformed/unsupported/oversized input fails closed without sensitive diagnostics | ☐ |
+| Queued-input isolation | Held input is released on Settings navigation within the same authorization; window switch, reauthorization, and reconnect never replay queued old input, and a saturated input queue closes the affected session instead of losing a release | Quick pass (Build 1044) |
+| Stale trust | Revocation or identity mismatch requires explicit re-pairing | Quick pass (Build 1044) |
+| Failure UX | Malformed/unsupported/oversized input fails closed without sensitive diagnostics | Quick pass (Build 1044) |
 | Post-test cleanup | After collecting evidence, stop test apps, clear scoped settings/trust/identity and permissions, remove test installations/review output, verify absence, and preserve source/release artifacts | ☐ |
 
 Follow [UI Review and Post-test Cleanup](TESTING_CLEANUP.md) after the run.
@@ -671,8 +679,8 @@ CI and notarization succeed.
 
 | Combination | Current evidence | Acceptance state |
 | --- | --- | --- |
-| Intel Host (`x86_64`) → Apple Silicon Viewer (`arm64`), same LAN | Operator confirms Bonjour/TLS communication and reports that a Host window frame reached the Viewer before disconnect | Partial: live video was observed; full M10 input, recovery, clipboard, performance, and UI acceptance remains open |
-| Local Apple Silicon build host, macOS `27.0.1` (`26A434`) | Canonical `0.2.1011` CI, release audit, and notarized universal Host / arm64 Viewer packaging passed | Local build evidence only |
+| Intel Host (`x86_64`) → Apple Silicon Viewer (`arm64`), same LAN | Operator reports Build `1044` quick tests passed for items 1–27; the 12 remaining scenarios and exact machine/OS run record are not yet captured | Quick-test pass only; full M10 acceptance remains open |
+| Local Apple Silicon build host, macOS `27.0.1` (`26A434`) | Build `1044` canonical CI, release audit, and notarized Host/Viewer packaging passed on 2026-11-03 | Local build evidence only |
 | macOS `13.0` deployment minimum from both app plists | Deployment target declared; current-toolchain compilation passed | Minimum-OS launch, capture, codec, permissions, and UI unverified |
 | Apple Silicon as a production Host | Host `arm64` builds for development | Not a verified V1 Host hardware target |
 | Internet relay, locked-screen control, audio, files, and concurrent multi-window control | No implementation or acceptance scope | Unsupported |
@@ -699,9 +707,11 @@ For each run, record the following without copying private data:
 - Cleanup result and every retained exception. A partial cleanup result is
   recorded as partial; preserve source and release artifacts.
 
-M10's implementation and manual handoff are ready. Product acceptance and the
-release decision remain open until the operator attaches these physical
-results; unchecked rows are not converted into passes by this handoff.
+M10's implementation and manual handoff are ready. `Quick pass` states record
+the operator-reported Build `1044` checks only. Product acceptance and the
+release decision remain open until items 28–39 and the complete two-Mac run
+record are documented; unchecked rows are not converted into passes by this
+handoff.
 
 Archive only sanitized logs and the JSON performance report. Do not archive
 screen captures, clipboard content, raw input values, private keys, or full

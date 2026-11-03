@@ -23,11 +23,12 @@ retains Build `1043`'s M8 stale-frame dropping, gentler bitrate reductions, and
 spacing between forced keyframes, along with the low-latency H.264 profile and
 standard-session fallback, selectable Viewer stream quality (1080p or 1440p at
 30/60 fps, or experimental 4K at 30/60 fps), asynchronous Viewer decoding, and
-Host handling for oversized encoded frames. Physical high-resolution
-performance, background-window selection, and two-Mac Chinese-input acceptance
-remain pending. See
+Host handling for oversized encoded frames. The operator reports quick physical
+tests passed for M10 checklist items 1–27 on Build `1044`; full M10 acceptance
+remains open for the 12 untested checklist items and detailed run evidence. The
+separate M8 clock-synchronized performance report also remains pending. See
 [`docs/STATUS.md`](docs/STATUS.md) for artifact hashes, Apple submission IDs,
-and remaining acceptance evidence.
+and the [M10 checklist](docs/M10_ACCEPTANCE.md).
 
 P6 remains an explicit extension to foreground-only input authorization;
 secure-input, system-authentication-dialog, lock, session, target, permission,
