@@ -175,6 +175,7 @@ bash -n \
     scripts/Uninstall-MacRemoteApp.command \
     scripts/test-artifact-naming.sh \
     scripts/test-debug-diagnostic-packaging.sh \
+    scripts/test-release-license-packaging.sh \
     scripts/test-notarization-config.sh \
     scripts/test-uninstall-macremoteapp.sh \
     scripts/check-environment.sh \
@@ -186,6 +187,8 @@ echo "Running isolated artifact-naming fixtures"
 bash scripts/test-artifact-naming.sh
 echo "Running M10 Debug diagnostic packaging fixtures"
 bash scripts/test-debug-diagnostic-packaging.sh
+echo "Running M9 release license packaging fixtures"
+bash scripts/test-release-license-packaging.sh
 echo "Running isolated notarization-configuration fixtures"
 bash scripts/test-notarization-config.sh
 if ! grep -q -- '--remove-all-data' Apps/Host/main.swift ||

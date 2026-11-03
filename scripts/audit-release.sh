@@ -23,6 +23,26 @@ release_identity="$(macremoteapp_release_identity \
 audit_tmp_dir="$(mktemp -d "${TMPDIR:-/private/tmp}/macremoteapp-release-audit.XXXXXX")"
 trap 'rm -rf -- "${audit_tmp_dir}"' EXIT
 
+assert_license_copy() {
+    local expected_license="$1"
+    local actual_license="$2"
+    local artifact_description="$3"
+
+    if [[ -L "${actual_license}" ]]; then
+        echo "Release audit failed: LICENSE is a symlink in ${artifact_description}" >&2
+        return 1
+    fi
+    if [[ ! -f "${actual_license}" ]]; then
+        echo "Release audit failed: LICENSE is missing or not a regular file in ${artifact_description}" >&2
+        return 1
+    fi
+    if ! cmp -s "${expected_license}" "${actual_license}"; then
+        echo "Release audit failed: LICENSE differs from the repository copy in ${artifact_description}" >&2
+        return 1
+    fi
+    return 0
+}
+
 assert_distribution_names() {
     local app_name="$1"
     local artifact_kind="$2"
@@ -96,6 +116,7 @@ verify_dmg_payload() {
         ! -name "Install-MacRemoteApp-${role_name}.command" \
         ! -name "Uninstall-MacRemoteApp-${role_name}.command" \
         ! -name "Uninstall-MacRemoteApp.command" \
+        ! -name "LICENSE" \
         ! -name "MacRemoteApp-User-Guide.txt" \
         ! -name "MacRemoteApp-How-to-Debug.txt" \
         ! -name "MacRemoteApp-How-to-Collect-Debug-Logs.txt" \
@@ -158,6 +179,7 @@ verify_dmg_payload() {
         "Install-MacRemoteApp-${role_name}.command" \
         "Uninstall-MacRemoteApp-${role_name}.command" \
         "Uninstall-MacRemoteApp.command" \
+        "LICENSE" \
         "MacRemoteApp-User-Guide.txt" \
         "MacRemoteApp-How-to-Debug.txt" \
         "MacRemoteApp-How-to-Collect-Debug-Logs.txt"
@@ -167,6 +189,14 @@ verify_dmg_payload() {
             payload_status=1
         fi
     done
+
+    if ! assert_license_copy \
+        "${repo_root}/LICENSE" \
+        "${mount_point}/LICENSE" \
+        "${dmg_path}"
+    then
+        payload_status=1
+    fi
 
     if [[ -s "${mount_point}/Uninstall-MacRemoteApp.command" ]]; then
         if ! cmp -s "${standalone_uninstall_source}" "${mount_point}/Uninstall-MacRemoteApp.command"; then
@@ -180,6 +210,7 @@ verify_dmg_payload() {
         "Install-MacRemoteApp-${role_name}.command" \
         "Uninstall-MacRemoteApp-${role_name}.command" \
         "Uninstall-MacRemoteApp.command" \
+        "LICENSE" \
         "MacRemoteApp-User-Guide.txt" \
         "MacRemoteApp-How-to-Debug.txt" \
         "MacRemoteApp-How-to-Collect-Debug-Logs.txt"
@@ -294,6 +325,10 @@ for app_name in MacRemoteApp-Host MacRemoteApp-Viewer; do
     assert_role_metadata "${app_name}" "${app_path}"
     plutil -lint "${app_path}/Contents/Info.plist" >/dev/null
     codesign --verify --deep --strict "${app_path}"
+    assert_license_copy \
+        "${repo_root}/LICENSE" \
+        "${app_path}/Contents/Resources/LICENSE" \
+        "${app_name}.app"
 
     signature_info="$(codesign --display --verbose=4 "${app_path}" 2>&1)"
     if ! printf '%s\n' "${signature_info}" | grep -Eq 'flags=.*runtime'; then

@@ -255,6 +255,8 @@ package_app() {
     cp -- "${info_plist}" "${app_dir}/Contents/Info.plist"
     cp -- "${release_root}/MacRemoteAppIcon.icns" \
         "${app_dir}/Contents/Resources/MacRemoteAppIcon.icns"
+    cp -- "${repo_root}/LICENSE" \
+        "${app_dir}/Contents/Resources/LICENSE"
     chmod 755 "${app_dir}/Contents/MacOS/${name}"
 }
 

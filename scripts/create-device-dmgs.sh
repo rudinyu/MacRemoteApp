@@ -80,10 +80,12 @@ echo "Product version: ${release_identity}; artifact channel: ${artifact_channel
 install_script="${script_dir}/dmg-install.sh"
 uninstall_script="${script_dir}/dmg-uninstall.sh"
 standalone_uninstall_script="${script_dir}/Uninstall-MacRemoteApp.command"
+license_source="${repo_root}/LICENSE"
 user_guide="${repo_root}/docs/USER_GUIDE.md"
 test -x "${install_script}"
 test -x "${uninstall_script}"
 test -x "${standalone_uninstall_script}"
+test -s "${license_source}"
 test -s "${user_guide}"
 test -s "${debug_guide}"
 test -s "${log_guide}"
@@ -222,6 +224,7 @@ create_dmg() {
     cp -- "${install_script}" "${staging_dir}/Install-MacRemoteApp-${role_name}.command"
     cp -- "${uninstall_script}" "${staging_dir}/Uninstall-MacRemoteApp-${role_name}.command"
     cp -- "${standalone_uninstall_script}" "${staging_dir}/Uninstall-MacRemoteApp.command"
+    cp -- "${license_source}" "${staging_dir}/LICENSE"
     cp -- "${user_guide}" "${staging_dir}/MacRemoteApp-User-Guide.txt"
     cp -- "${debug_guide}" "${staging_dir}/MacRemoteApp-How-to-Debug.txt"
     cp -- "${log_guide}" "${staging_dir}/MacRemoteApp-How-to-Collect-Debug-Logs.txt"
@@ -234,6 +237,7 @@ create_dmg() {
         "${staging_dir}/Install-MacRemoteApp-${role_name}.command" \
         "${staging_dir}/Uninstall-MacRemoteApp-${role_name}.command" \
         "${staging_dir}/Uninstall-MacRemoteApp.command" \
+        "${staging_dir}/LICENSE" \
         "${staging_dir}/MacRemoteApp-User-Guide.txt" \
         "${staging_dir}/MacRemoteApp-How-to-Debug.txt" \
         "${staging_dir}/MacRemoteApp-How-to-Collect-Debug-Logs.txt"
