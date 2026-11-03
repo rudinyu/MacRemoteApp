@@ -34,6 +34,9 @@ Release pair replaced the prior `build/release/` only after all checks passed;
 `.build` validation caches were retained. Physical high-resolution
 performance, background-window selection, and two-Mac Chinese-input acceptance
 remain pending. Build `1044` submission IDs and hashes are recorded below.
+On 2026-11-03, the operator reported no issues during physical testing of
+Build `1044`; the specific M10 scenarios covered were not itemized in that
+report, so checklist rows not explicitly recorded below remain open.
 The public source snapshot at commit `a63222e` remains included in the
 historical signed and notarized `0.2.1011` RC. Builds `1036`, `1035`, `1033`, `1032`,
 `1031`, and `1030` are historical; their local distribution outputs are not
